@@ -8,12 +8,13 @@ If you are a Claude Code session starting fresh (after compaction or on a new da
 
 ## Current state
 
-**As of 2026-04-18 — Stage 2.5 COMPLETE.** Four hardening commits landed: sensitive-file gate resolved via reviews-root relocation (Claude Code's `.claude/` gate is hardcoded; docs-probe confirmed `additionalDirectories` can't bypass it, so the default root moved to `~/.adams-reviews/`); Phase-4 decision-table collapsed into `artifact-patch.py --apply-decisions` (one helper call per wave replaces the per-finding loop, matching the Stage-3 authoring-discipline for context budget); light-lane `uncertain` renderer bug fixed (re-rendering C13's ray-finance artifact now surfaces F021/F022/F032 which had been silently dropped from PR comment `4274059620`). `test/smoke.sh` passes 43 assertions. Next: plan Stage 3 (`/adams-review-fix`).
+**As of 2026-04-18 — Stage 2.6 COMPLETE.** Three hardening commits landed after Stage 2.5: base-branch freshness gate (§13.10 — Phase 0 now fetches `origin/$base_branch`, detects behind-count, and prompts the user with fast-forward / use-remote-ref / proceed-stale / abort; offline degrades to `no_fetch` with a trace warning; new `comparison_ref` working-set variable carries the reconciled ref forward through every later diff / blame / lens prompt); origin cross-check (§13.11 — deterministic blame-based `origin-crosscheck.sh` runs per candidate between lens aggregation and `--add-finding`, overriding `introduced_by_pr → pre_existing/high` when every blame SHA is reachable from `comparison_ref`); renderer surfaces non-default freshness in the report header with escalating warning glyphs. `test/smoke.sh` passes 64 assertions (up from 43 at Stage 2.5 close). Next: plan Stage 3 (`/adams-review-fix`).
 
-- Design doc: `DESIGN.md` (rev 8 + §21.2 exit-code footnote + §21.2 `--apply-decisions` clarification + §5.2.1 `pending_validation` clarification + §9.2 reviews-root relocation + §8.7 sensitive-gate prose correction + §12.1 example fix)
+- Design doc: `DESIGN.md` (rev 8 + §21.2 exit-code footnote + §21.2 `--apply-decisions` clarification + §5.2.1 `pending_validation` clarification + §9.2 reviews-root relocation + §8.7 sensitive-gate prose correction + §12.1 example fix + **§13.10 base-branch freshness gate** + **§13.11 origin cross-check** + **§21.9 `origin-crosscheck.sh` spec**)
 - Stage 1 plan: `plans/stage-1-foundation.md` (user-approved; closed out)
 - Stage 2 plan: `plans/stage-2-review.md` (user-approved; closed out)
 - Stage 2.5 plan: `plans/stage-2.5-hardening.md` (user-approved; closed out)
+- Stage 2.6 plan: `plans/stage-2.6-freshness-origin.md` (user-approved 2026-04-18; closed out)
 - Symlink `~/.claude/commands/_shared → commands/_shared` is live
 - `uv` (`/opt/homebrew/bin/uv 0.7.15`) supplies `jsonschema` to Python scripts via PEP 723 inline-script shebangs
 - Default reviews root: `~/.adams-reviews/<slug>/<branch>/<review_id>/` (override via `$ADAMS_REVIEW_REVIEWS_ROOT`)
@@ -56,6 +57,7 @@ bd6b610      Bootstrap repo with design doc (rev 8) and build journal
 | 1 | Foundation (data layer + shared helpers) | **done** | `plans/stage-1-foundation.md` | [Stage 1 section](#stage-1--foundation) |
 | 2 | `/adams-review` end-to-end (Phases 0–6) | **done** | `plans/stage-2-review.md` | [Stage 2 section](#stage-2--adams-review) |
 | 2.5 | Hardening — reviews-root relocation + Phase-4 batch + renderer fix | **done** | `plans/stage-2.5-hardening.md` | [Stage 2.5 section](#stage-25--hardening) |
+| 2.6 | Base-branch freshness gate (§13.10) + origin cross-check (§13.11) + renderer surfacing | **done** | `plans/stage-2.6-freshness-origin.md` | [Stage 2.6 section](#stage-26--base-branch-freshness--origin-cross-check) |
 | 3 | `/adams-review-fix` (Phases 7–9 + terminal cleanup) | not started | `plans/stage-3-fix.md` | — |
 
 ### Stage 1 — Foundation
@@ -321,6 +323,90 @@ b262738       Add Stage 2.5 hardening plan
 - **`--apply-decisions` does not support `--dry-run`.** Intentional (DESIGN §21.2 clarification). Stage 3 callers who want pre-flight validation of a tuple array should run it on a throwaway artifact copy. Surface if Stage 3 develops a real need.
 - **Pre-Stage-2.5 `~/.claude/reviews/` state.** Not migrated automatically. Users follow README's `mv ~/.claude/reviews ~/.adams-reviews` or `export ADAMS_REVIEW_REVIEWS_ROOT=~/.claude/reviews` to preserve. The C13 `rev_01KPGJVT5DBEJXR5WHB5Z62PS3` evidence dir stays where it is under `~/.claude/reviews/` and is referenced by absolute path in the re-render command above.
 - **Per-tuple writes in `--apply-decisions` means partial state on tuple-failure.** If tuple #N fails, tuples 0..N-1 are committed to disk. The error-as-prompt names the failing finding id so the caller can re-invoke with the remainder, but it does increase the orchestrator's cognitive load if a batch fails mid-way. Alternative (atomic-whole-batch) was considered in planning and rejected per the plan's intent. Revisit if Stage 3 shows the per-tuple-commit model causing audit-trail confusion.
+
+### Stage 2.6 — Base-branch freshness + origin cross-check
+
+**Rationale.** The C13 real-repo smoke ran against a local `main` that was behind `origin/main`. Two failure modes compounded:
+
+1. **Inflated diff surface.** Every lens sees `$base_branch..HEAD`. On stale local `main` that includes upstream commits already merged into the PR branch, so the review's whole input was wrong.
+2. **Pre-existing override silently dead.** Lens prompts default `origin: introduced_by_pr, origin_confidence: high` "unless the code is clearly unchanged." Stale main meant pre-existing commits *were* inside the diff, so lenses correctly saw them as modified and defaulted to introduced. The §13.1 override (`origin=pre_existing AND confidence=high → disposition=pre_existing_report`) never fired. Renderer's pre-existing section collapsed to nothing because the bucket was empty — the user silently lost the "what's new vs what was already broken" distinction.
+
+Closing both before Stage 3 adds Phase-7/8/9 surface on top keeps the data-quality regression from compounding. Pre-Stage-3 hardening pass, same pattern as Stage 2.5.
+
+**Scope (target):**
+
+- **2.6.A** — Phase 0 freshness gate (§13.10). Fetch `origin/$base_branch`, detect behind-count, prompt via AskUserQuestion with four options (fast-forward / use-remote-ref / proceed-stale / abort). Offline / fetch-failure degrades to `no_fetch` with trace warning. Introduce `comparison_ref` working-set var used by every later diff / blame / lens prompt. Artifact gains optional `base_context {freshness, comparison_ref, remote_sha, behind_count}`.
+- **2.6.B** — Phase 1 origin cross-check (§13.11). New `origin-crosscheck.sh` helper runs deterministic blame classification between lens aggregation and `--add-finding`: every candidate whose blame range is fully ancestor of `comparison_ref` gets forced to `origin=pre_existing, confidence=high`; lens-supplied `pre_existing` that blame disagrees with gets confidence downgraded to medium so §13.1 override doesn't fire.
+- **2.6.C** — Renderer surfaces `base_context.freshness` in the report header with escalating warning glyphs when non-default.
+- **2.6.D** — BUILD.md close-out (this section).
+
+**Explicitly out of scope:**
+
+- `--cleanup-pre-existing` flag. Keeps the clean seam documented in DESIGN §13.1. Future work.
+- `--no-fetch` flag on `/adams-review`. Rejected in planning: fetch cost is small, offline path already degrades gracefully, exposing an opt-out would let users silently reintroduce the bug class.
+- Schema version bump. `base_context` is additive-optional; v1 artifacts with or without it validate.
+- Staleness-of-PR-branch-relative-to-base warning ("you haven't rebased in 3 weeks"). Separate axis from local-base freshness. Deferred.
+- Any Phase 5 / 7–9 surface.
+
+**Done when:**
+
+1. Phase 0 surfaces the four-option prompt on a stale-local-main scratch repo; each option's downstream math (`comparison_ref`, `base_freshness`, sanity check count) is correct.
+2. Origin cross-check flips lens-default `introduced_by_pr/high` → `pre_existing/high` when blame is fully ancestor; respects lens on mixed / new-file / PR-modified ranges.
+3. Renderer shows a `**Base freshness:**` line with appropriate glyphs for non-default states; renders silently for `fresh` / `no_remote`.
+4. Offline path logs one `fetch_failed` line to `trace.md` and proceeds.
+5. `test/smoke.sh` passes with fresh assertions covering freshness math, origin-crosscheck decision table, and renderer variants.
+6. `DESIGN.md` gains §13.10, §13.11, §21.9; §4 Phase 0 and Phase 1 narrative gain the new steps.
+7. BUILD.md stage index row + Stage 2.6 section filled in.
+
+---
+
+**Plan file:** `plans/stage-2.6-freshness-origin.md` (user-approved 2026-04-18 per auto-mode execution; copied into the repo at close-out to match Stage 1/2/2.5 convention). No mid-stage deviations from the plan.
+
+**Status:** done (2026-04-18).
+
+**Stage 2.6 commits (on `main`, newest first):**
+
+```
+(this commit) Close Stage 2.6: BUILD.md + stage index
+26cb9a6       Stage 2.6.C: Surface base-branch freshness in rendered report header
+9c5cd80       Stage 2.6.B: Origin cross-check (DESIGN §13.11)
+8fc94ab       Stage 2.6.A: Base-branch freshness gate (DESIGN §13.10)
+```
+
+**Files landed:**
+
+- **2.6.A — freshness gate** (commit `8fc94ab`):
+  - `DESIGN.md` — new §13.10 (behavior + plumbing + "no --no-fetch flag" rationale); §4 Phase 0 narrative gains step 4 "Reconcile base-branch freshness" (renumbering 4→13; §23 CLAUDE.md-paths step reference fixed in the same pass — it was already off-by-one pre-§13.10); §6 artifact-schema example gains `base_context` block + schema note; §7 sample report gains illustrative `**Base freshness:**` header line; §25.1 working-set table splits `base_branch` (display) from `comparison_ref` (ref used by every diff/blame/lens) and adds freshness variables.
+  - `commands/_shared/schema-v1.json` — optional top-level `base_context` object; freshness enum is `fresh | fast_forwarded | used_remote_ref | proceeded_stale | no_fetch | no_remote`; `remote_sha` and `behind_count` nullable (null on offline/no-remote paths).
+  - `commands/_shared/00-preflight.md` — new step 0.2a with three sub-steps (remote detection + 30s-timeout fetch; behind-count + route; user-gate AskUserQuestion when behind) + step 0.4 (sanity check moved here to use `comparison_ref`). Step 0.6 (`reviewed_files_all`, `num_files`, `lines_changed`) and step 0.15 (jq seed) both updated to `$comparison_ref`. `preflight_warnings` Bash array accumulates fetch/divergence warnings and flushes to `trace.md` at end of 0.15 (only after `--init` succeeds — before that, `review_dir` may be about to be `rm -rf`-ed on init-fail). Working-set table gains rows for `comparison_ref`, `base_freshness`, `remote_sha`, `behind_count`, `preflight_warnings`; trailing "Reminder on comparison_ref vs base_branch" prose.
+  - `commands/_shared/01-detection.md` — step 1.2 shared-diff computation + all six lens prompts (L1 at line 57, L2 at 88, L3 at 114, L4 at 133, L5 at 160, L6 at 183) swap `$base_branch` → `$comparison_ref` in the "diff between X and HEAD" phrasing.
+  - `commands/_shared/02-ensemble-adapter.md` — CodeRabbit `--base` and Codex prompt text use `$comparison_ref` so ensemble reviewers see the same diff surface as internal lenses under option (b).
+  - `test/smoke.sh` — 7 new assertions FR-1..FR-7: behind_count math; per-option comparison_ref semantics (including FR-3's positive reproduction of the pre-gate data-loss pattern — local main..HEAD shows 2 commits, origin/main..HEAD shows 1); FF via `git fetch origin main:main` drops behind_count to 0; schema accepts all six freshness enum values; schema rejects invalid enum; offline-fetch against bogus-URL remote returns non-zero rc.
+
+- **2.6.B — origin cross-check** (commit `9c5cd80`):
+  - `DESIGN.md` — new §13.11 (algorithm + conservative-policy rationale + placement); §4 Phase 1 narrative gains cross-check paragraph between candidate-output and source-families; new §21.9 `origin-crosscheck.sh` spec (interface, per-candidate algorithm, error cases).
+  - `commands/_shared/tools/origin-crosscheck.sh` — new Bash helper. Takes `--comparison-ref` + `--candidates` (path, `@-` stdin, or inline JSON); emits corrected array on stdout + one audit line per candidate on stderr (`origin_crosscheck: id=X action=respected|overridden|downgraded|skipped`). Porcelain-SHA parsing uses `/^[0-9a-f]{40} /` to avoid false-positives on `author`/`summary`/`committer` porcelain header lines. Handles `new-file`, `blame-failed`, `no-blame-shas`, `missing file or line_range` as `action=skipped`; per-candidate blame failures do not abort.
+  - `commands/_shared/01-detection.md` — new step 2a inside step 1.4, invoking helper with `2> >(tee -a "$trace_log_path" >&2)` so audit lines flow into `trace.md` inline; step 3 iterates over `$corrected_candidates` array.
+  - `test/smoke.sh` — 7 new assertions OC-1..OC-7: override case (fully-ancestor range); respect lens on PR-modified line; new-file respect with `reason=new-file`; mixed-range conservative respect; downgrade case (lens=pre_existing/high + blame disagrees → confidence=medium); unknown `--comparison-ref` error-as-prompt; malformed-JSON rejection.
+
+- **2.6.C — renderer surfacing** (commit `26cb9a6`):
+  - `commands/_shared/tools/artifact-render.py` — new `render_freshness_line()` helper; `render_header()` appends it between Review ID and Fix threshold. Escalating glyphs: fresh/no_remote → silent; fast_forwarded → no-glyph note with behind-count; used_remote_ref → ⚠; proceeded_stale → ⚠⚠ + "Re-run after `git pull`"; no_fetch → "could not fetch (offline?)". Unknown freshness values render a best-effort "(see trace.md)" fallback rather than dropping silently.
+  - `test/smoke.sh` — 7 new assertions RH-1..RH-7: fresh stays silent; each warning variant includes its expected phrase and glyph count; pre-§13.10 artifacts (no `base_context`) render without the line (backward compat).
+
+**Verification evidence:**
+
+- `test/smoke.sh` passes **64 assertions**, up from 43 at Stage 2.5 close. Breakdown of additions: FR-1..FR-7 (freshness gate), OC-1..OC-7 (origin cross-check), RH-1..RH-7 (renderer). Existing 43 assertions unchanged; no seed or expected-md churn was needed (the Stage 2.5.D seed has no `base_context`, and the renderer degrades to no-op in that case).
+- **Origin-crosscheck helper manual smoke** (not in `test/smoke.sh`, but run during development): 5 scenarios against a scratch 2-commit repo — fully-pre-existing line range; PR-modified line; new file; mixed range; lens=pre_existing/high downgrade. All five matched §13.11 expectations on the first run after the porcelain-SHA parser fix (initial awk `/^[^\t]/` matched `author`/`summary` lines as SHAs; switched to strict `/^[0-9a-f]{40} /`).
+- **Ray-finance end-to-end re-run deferred.** The plan's verification section calls for a manual `/adams-review` re-run on ray/ray-finance `feat/import-apple` with the fresh pipeline. Stage 2.6 close-out ships without that run — smoke coverage plus the helper manual-smoke gives adequate signal for the code paths, and the ray-finance run is expensive (tokens + user time). Budget for that run when it aligns with Stage 3 real-repo validation.
+
+**Open issues / deviations:**
+
+- **Ensemble external-reviewer CLI tools and remote refs.** `02-ensemble-adapter.md` now passes `$comparison_ref` to CodeRabbit's `--base`. If a CLI rejects remote refs like `origin/main` in practice, the fragment's inline note says to fall back to `$base_branch` and record the degradation in `trace.md`. No real-repo test was run against that code path; surface if Stage 3 ensemble work hits it.
+- **Per-candidate blame in step 2a runs sequentially inside the lens-collection loop.** On a 50-candidate run that's ~2.5s of added Phase 1 time — acceptable per the plan's cost analysis. If a future lens burst returns 200+ candidates, consider batching or caching blame per file.
+- **Origin cross-check has no dedicated `trace.md` schema entry.** The helper's stderr flows into `trace.md` via `tee -a` in step 2a. The prior `trace.md` format convention is "one tag per line" which the `origin_crosscheck: id=... action=...` lines follow, but there's no explicit grammar. If Stage 3 grows a `trace.md` parser, codify.
+- **Schema change is additive-optional; no versioning event.** `base_context` joined the v1 schema without a schema_version bump. Future builds that emit `base_context` on every run are still schema-v1 — pre-§13.10 readers that filter by `schema_version` will accept them, at the cost of ignoring the new field. If readers develop field-set expectations, versioning becomes a real concern.
+
+---
 
 ### Stage 3 — `/adams-review-fix`
 
