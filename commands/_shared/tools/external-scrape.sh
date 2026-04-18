@@ -19,7 +19,7 @@
 # Default chain (first found wins):
 #   .claude/review-config.json                      (per-repo, cwd-relative)
 #   $ADAMS_REVIEW_CONFIG_ROOT/review-config.json    (override for tests)
-#   ~/.claude/reviews/review-config.json            (global)
+#   ~/.adams-reviews/review-config.json             (global)
 #
 # Config shape (all keys optional):
 #   {
@@ -120,8 +120,8 @@ resolve_config_path() {
         echo "$test_root/review-config.json"
         return
     fi
-    if [[ -f "$HOME/.claude/reviews/review-config.json" ]]; then
-        echo "$HOME/.claude/reviews/review-config.json"
+    if [[ -f "$HOME/.adams-reviews/review-config.json" ]]; then
+        echo "$HOME/.adams-reviews/review-config.json"
         return
     fi
     echo ""

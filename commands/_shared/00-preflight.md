@@ -247,7 +247,7 @@ a real UX finding).
 ### 0.13. Prior-artifact detection
 
 Resolve the reviews root: `$ADAMS_REVIEW_REVIEWS_ROOT` if set, else
-`~/.claude/reviews`. Build the path:
+`~/.adams-reviews`. Build the path:
 `<reviews_root>/<repo_slug>/<head_branch>/latest.txt`.
 
 If the file exists and is non-empty, read its contents as
@@ -305,7 +305,7 @@ Capture as `review_id`.
 Build the artifact directory:
 
 ```bash
-reviews_root="${ADAMS_REVIEW_REVIEWS_ROOT:-$HOME/.claude/reviews}"
+reviews_root="${ADAMS_REVIEW_REVIEWS_ROOT:-$HOME/.adams-reviews}"
 review_dir="$reviews_root/$repo_slug/$head_branch/$review_id"
 mkdir -p "$review_dir"
 artifact_path="$review_dir/artifact.json"

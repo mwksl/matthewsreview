@@ -18,7 +18,7 @@
 #        <reviews-root>/<slug>/<branch>/latest.txt → <review_id> →
 #        <reviews-root>/<slug>/<branch>/<review_id>/artifact.md
 #      where <reviews-root> is $ADAMS_REVIEW_REVIEWS_ROOT (default
-#      ~/.claude/reviews). If the resolved review_id disagrees with
+#      ~/.adams-reviews). If the resolved review_id disagrees with
 #      --review-id, exit 1 with a staleness note.
 #
 # Comment discovery (§13.4, in order):
@@ -136,7 +136,7 @@ resolve_md_path() {
 
     # Tier 3: latest.txt under <reviews-root>/<slug>/<branch>/.
     if [[ -n "$REPO_SLUG" && -n "$BRANCH" ]]; then
-        local reviews_root_base="${ADAMS_REVIEW_REVIEWS_ROOT:-$HOME/.claude/reviews}"
+        local reviews_root_base="${ADAMS_REVIEW_REVIEWS_ROOT:-$HOME/.adams-reviews}"
         local reviews_root="$reviews_root_base/$REPO_SLUG/$BRANCH"
         local latest_file="$reviews_root/latest.txt"
         if [[ ! -f "$latest_file" ]]; then

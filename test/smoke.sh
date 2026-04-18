@@ -228,6 +228,22 @@ else
     fail "B5: expected staleness error, got code=$code stderr=$stderr"
 fi
 
+# B6. publish default root (no ADAMS_REVIEW_REVIEWS_ROOT override) → ~/.adams-reviews.
+# Stage 2.5.A relocated the default root outside ~/.claude/ so that Claude Code's
+# hardcoded sensitive-file gate for ~/.claude/... paths doesn't fire. Assert the
+# new default by triggering a latest.txt-not-found error against a slug guaranteed
+# not to exist under the real home dir; the error message names the resolved path
+# so we can grep for ~/.adams-reviews without polluting actual state.
+ghost_slug="adams-review-smoke-missing-$$-$(date +%s)"
+stderr=$(env -u ADAMS_REVIEW_REVIEWS_ROOT "$TOOLS/artifact-publish.sh" \
+        --mode pr --review-id rev_ghost --pr 1 \
+        --repo-slug "$ghost_slug" --branch ghost-branch --dry-run 2>&1 >/dev/null); code=$?
+if [[ "$code" != "0" ]] && echo "$stderr" | grep -q "\.adams-reviews/$ghost_slug/ghost-branch/latest.txt"; then
+    pass "B6: publish default reviews root resolves under ~/.adams-reviews (Stage 2.5.A)"
+else
+    fail "B6: expected error naming ~/.adams-reviews/$ghost_slug/ghost-branch/latest.txt; code=$code stderr=$stderr"
+fi
+
 # C. claude-md-paths synthetic tree: root + a/CLAUDE.md expected, root-first
 mkdir -p "$WORK/cm/a/b" "$WORK/cm/a/c"
 touch "$WORK/cm/CLAUDE.md" "$WORK/cm/a/CLAUDE.md" "$WORK/cm/a/b/file.ts" "$WORK/cm/a/c/file.ts"

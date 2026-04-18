@@ -43,6 +43,22 @@ readlink ~/.claude/commands/_shared   # should print the repo path
 uv --version                          # 0.7+
 ```
 
+### Review state location
+
+`/adams-review` writes per-run state (artifact, trace, phase logs, token logs) under `~/.adams-reviews/<repo-slug>/<branch>/<review_id>/`. Override with `export ADAMS_REVIEW_REVIEWS_ROOT=/some/other/path` if you want state elsewhere.
+
+**Why not `~/.claude/reviews/`?** Claude Code hardcodes a sensitive-file permission prompt for writes to `~/.claude/...` that survives even `bypassPermissions` mode, and `~/.claude/reviews` is not on the short list of exempt subdirs (`.claude/commands`, `.claude/agents`, `.claude/skills`). Keeping review state outside `~/.claude/` avoids dozens of permission prompts per run.
+
+**Migrating from pre-Stage-2.5 state.** If you have reviews under `~/.claude/reviews/`, either:
+
+```bash
+# Option A: move state to the new canonical root (recommended).
+mv ~/.claude/reviews ~/.adams-reviews
+
+# Option B: keep state at the old location via the env var (accepts the prompts).
+export ADAMS_REVIEW_REVIEWS_ROOT=~/.claude/reviews
+```
+
 ### Why `uv` instead of plain pip
 
 PEP 668 (Python 3.12+ with Homebrew) marks system and user site-packages as externally managed and refuses direct `pip install`. The original plan assumed plain pip; `uv`'s inline-script dep spec is the cleanest workaround: each Python helper is self-contained, runs without activation ceremony, and its dep list lives next to the code that imports it. Tradeoff: requires `uv` on the machine running the scripts.

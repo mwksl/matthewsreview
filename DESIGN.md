@@ -62,7 +62,7 @@ The fix command is agnostic to how the review was produced — it only reads the
 Artifacts live on the local filesystem:
 
 ```
-~/.claude/reviews/<repo-slug>/<branch>/<review_id>/
+~/.adams-reviews/<repo-slug>/<branch>/<review_id>/
   ├── artifact.json
   ├── artifact.md
   ├── trace.md
@@ -70,7 +70,7 @@ Artifacts live on the local filesystem:
   └── phases.jsonl
 ```
 
-A small `~/.claude/reviews/<repo-slug>/<branch>/latest.txt` holds the most-recent `review_id` for that branch. Cross-session continuity is provided by this on-disk state; there is no cross-machine synchronization.
+A small `~/.adams-reviews/<repo-slug>/<branch>/latest.txt` holds the most-recent `review_id` for that branch. Cross-session continuity is provided by this on-disk state; there is no cross-machine synchronization.
 
 In PR mode, the rendered Markdown report is posted as a PR comment so it's visible to collaborators and to Adam scrolling through GitHub. The comment is authoritative for **display**; the local `artifact.json` is authoritative for **state**. `/adams-review-fix` reads only the local artifact.
 
@@ -111,7 +111,7 @@ In PR mode, the rendered Markdown report is posted as a PR comment so it's visib
 8. Sanity check: `git rev-list --count <base>..HEAD` must be > 0.
 9. **Trivial-diff detection.** Pure Bash — check file extensions and line counts per §13.9. If the diff qualifies, set `artifact.trivial_mode = true` (effect: L2/L5/L6 skipped, Phase 4a deep validation skipped). User can force full pipeline with `--full`.
 10. **User-facing change detection (Haiku classifier).** Determines whether L5 (UX lens) runs at all. Skipped when `trivial_mode = true` (L5 already off in that mode). See §19.1.
-11. **Prior-artifact detection.** Read `~/.claude/reviews/<repo>/<branch>/latest.txt` if present. If an existing review exists for this branch, `AskUserQuestion`:
+11. **Prior-artifact detection.** Read `~/.adams-reviews/<repo>/<branch>/latest.txt` if present. If an existing review exists for this branch, `AskUserQuestion`:
 
 | Prior state | Prompt |
 |---|---|
@@ -253,15 +253,15 @@ Non-deep-lane findings skip Phase 5.
 
 1. Validate the in-memory findings[] array against the v1 schema (§6). Fail loudly on drift.
 2. Append a per-phase record to `phases.jsonl` (see §12.1). One line per phase; each line contains `{phase, elapsed_sec, counts_by_state, delta_from_prev}`.
-3. Write final `artifact.json` + `artifact.md` + `trace.md` to `~/.claude/reviews/<repo>/<branch>/<review_id>/`.
-4. Update `~/.claude/reviews/<repo>/<branch>/latest.txt` with the new `review_id`.
+3. Write final `artifact.json` + `artifact.md` + `trace.md` to `~/.adams-reviews/<repo>/<branch>/<review_id>/`.
+4. Update `~/.adams-reviews/<repo>/<branch>/latest.txt` with the new `review_id`.
 5. If PR exists: post the rendered `artifact.md` (Markdown only) as a PR comment. No JSON embed. The local `artifact.json` is the source of truth for state; the PR comment is a human-readable mirror.
 6. Mirror rendered report to chat (all modes).
 
 ### Phase 7 — Load artifact + leftover-attempted check + clean-tree gate + staleness check (fix command)
 
 1. Parse threshold arg (default 60).
-2. Resolve artifact path: `~/.claude/reviews/<repo>/<branch>/latest.txt` → `<review_id>/artifact.json`. If missing, abort with "no review found for this branch. Run `/adams-review` first."
+2. Resolve artifact path: `~/.adams-reviews/<repo>/<branch>/latest.txt` → `<review_id>/artifact.json`. If missing, abort with "no review found for this branch. Run `/adams-review` first."
 3. Validate against schema.
 4. **Leftover-`attempted` check (hard abort).** If any finding has `current_state == attempted`, a prior `/adams-review-fix` run was interrupted between Phase 8 (edits applied) and Phase 9 (classification + terminal cleanup). Abort with a deterministic recovery message:
 
@@ -915,7 +915,7 @@ Absolute paths so the grant is specific. Tight-scoped is deliberate.
 
 **Permission-mode interaction (terminology corrected from Claude Code docs).** The modes are `bypassPermissions` (the `--dangerously-skip-permissions` flag, informally "YOLO"), `acceptEdits` (shift+tab auto-accept, edits-only), `plan`, and `default`. Behaviors relevant here:
 
-- **`bypassPermissions`** skips the user-prompt layer for most tool calls, which makes `allowed-tools` grants largely moot *for interactive prompt avoidance*. But there is a separate protected-directory layer: writes to `.git`, `.claude`, `.vscode`, `.idea`, `.husky` still prompt even in `bypassPermissions` — except that writes to `.claude/commands`, `.claude/agents`, and `.claude/skills` are explicitly exempted from the protection. The `/adams-review-fix` command does not normally touch any of those paths (its writes are to the working tree and to `~/.claude/reviews/...`, the latter of which does not appear in the protected list), so this layer should not trigger for our commands in practice — but it's a second gate to be aware of.
+- **`bypassPermissions`** skips the user-prompt layer for most tool calls, which makes `allowed-tools` grants largely moot *for interactive prompt avoidance*. But there is a separate protected-directory layer: writes to `.git`, `.claude`, `.vscode`, `.idea`, `.husky` still prompt even in `bypassPermissions` — except that writes to `.claude/commands`, `.claude/agents`, and `.claude/skills` are explicitly exempted from the protection. Review state is deliberately kept outside `~/.claude/` at `~/.adams-reviews/` (§9.2) to avoid this layer: an early draft of the layout put state at `~/.claude/reviews/...`, which triggered the gate on every write during real runs (build journal cross-stage note 2026-04-18) and is not on the exempt list. With the current layout, `/adams-review` and `/adams-review-fix` writes don't intersect the protected directories in practice.
 - **`acceptEdits`** auto-accepts file-editing tools (Edit, Write, NotebookEdit) and common filesystem commands (`mkdir`, `touch`, `mv`, `cp`) within working-directory paths. `Bash` (beyond those file ops), `Agent`, `AskUserQuestion`, and helper scripts still prompt unless listed in `allowed-tools`. This is the mode most affected by grant completeness.
 - **`plan`** mode blocks tool calls that make changes entirely.
 - **`default`** prompts on every unregistered tool call.
@@ -975,7 +975,7 @@ Top-level command files are thin shells: frontmatter + sequence of `` !`cat` `` 
 ### 9.2 Review state directory (per run)
 
 ```
-~/.claude/reviews/
+~/.adams-reviews/
 └── <repo-slug>/                         ← e.g. "adammiller-projects-foo"
     └── <branch>/                        ← e.g. "feature-auth-hardening"
         ├── latest.txt                   ← contains most recent <review_id>
@@ -991,6 +991,7 @@ Top-level command files are thin shells: frontmatter + sequence of `` !`cat` `` 
 - `latest.txt` is a tiny file with the `review_id` of the most recent review on this branch. Helper scripts read this to find "current" without explicit args. Atomic writes (temp + rename).
 - No `sub-agent-transcripts/` directory: Claude Code already persists each sub-agent's full conversation to `~/.claude/projects/<project-slug>/<session-id>/subagents/agent-<agentId>.jsonl`. Recording the `agentId` in `trace.md` is sufficient to locate any transcript on demand.
 - History is preserved: old reviews stay in place. Rough disk usage: ~200KB–1MB per review. A future `/adams-review-cleanup` command can prune if needed.
+- **Root override via `$ADAMS_REVIEW_REVIEWS_ROOT`.** The default reviews root is `~/.adams-reviews/`. Users who want their review state elsewhere — e.g., on a different volume, or to keep the pre-Stage-2.5 location at `~/.claude/reviews/` — can export `ADAMS_REVIEW_REVIEWS_ROOT` to override. Helper scripts (`artifact-publish.sh`, `external-scrape.sh`) and the `00-preflight` fragment all consult this env var. The root lives **outside** `~/.claude/` deliberately: Claude Code hardcodes a sensitive-file permission prompt for writes to `~/.claude/...` that survives even `bypassPermissions` mode (see §8.7), and writing review state there would prompt the user on every `trace.md` append, `artifact.json` mutation, and `phases.jsonl` line. Stage 2.5.A (build journal, 2026-04-18) probed this and relocated to bypass the gate entirely.
 
 ### 9.3 Scratch files during a run
 
@@ -1096,7 +1097,7 @@ Diffing two consecutive lines tells you exactly what each phase changed. Replace
 ### 12.3 Post-mortem workflow
 
 ```bash
-cd ~/.claude/reviews/<repo>/<branch>/<review_id>/
+cd ~/.adams-reviews/<repo>/<branch>/<review_id>/
 
 # "Did the run find bug X in file Y?"
 jq '.findings[] | select(.file | contains("Y"))' artifact.json
@@ -1233,7 +1234,7 @@ Else:
 
 ### 13.5 Project-configurable verification commands
 
-Optional `~/.claude/reviews/review-config.json` (global) or `.claude/review-config.json` (per-repo; takes precedence):
+Optional `~/.adams-reviews/review-config.json` (global) or `.claude/review-config.json` (per-repo; takes precedence):
 
 ```json
 {
@@ -1267,7 +1268,7 @@ Execution unit (efficiency) is decoupled from history unit (reviewability) and f
 
 ### 13.8 External-reviewer bot allow/deny (Phase 1.5)
 
-Phase 1.5 scrapes PR comments by bot authors posted after `review_started_at`. The bot universe is policed by a small allow/deny config, read from (in order of precedence) `.claude/review-config.json` (per-repo) then `~/.claude/reviews/review-config.json` (global):
+Phase 1.5 scrapes PR comments by bot authors posted after `review_started_at`. The bot universe is policed by a small allow/deny config, read from (in order of precedence) `.claude/review-config.json` (per-repo) then `~/.adams-reviews/review-config.json` (global):
 
 ```json
 {
@@ -1334,7 +1335,7 @@ Each review's artifact contains a `metrics` block populated as phases complete a
 | `subagent_tokens.*` | Phase 6 / Phase 9 | Cost attribution |
 | `pr_size_buckets` | Phase 0 | For cost-vs-size regression tracking |
 
-After a handful of real-PR runs, aggregating these across `~/.claude/reviews/*` gives empirical signal on Phase 4 precision, fix-completion rate, and cost profile.
+After a handful of real-PR runs, aggregating these across `~/.adams-reviews/*` gives empirical signal on Phase 4 precision, fix-completion rate, and cost profile.
 
 ### 14.2 Evaluation protocol for first real-PR runs
 
@@ -1451,7 +1452,7 @@ Manual validation throughout.
 - **Wave** — one round of parallel Opus Phase 4a dispatch. Two waves max (orchestrator-chained sibling investigations).
 - **Fix group** — set of findings dispatched to one Phase 8 agent because they share files or are cross-cutting. One agent reads all files, applies all fixes, runs all verification.
 - **Fix run** — one invocation of `/adams-review-fix` against the review artifact. Appends a `fix_attempts` entry per touched finding with a shared `run_id`.
-- **Artifact** — the complete v1-schema JSON record. Persisted at `~/.claude/reviews/<repo>/<branch>/<review_id>/artifact.json`. Survives between sessions on the same machine.
+- **Artifact** — the complete v1-schema JSON record. Persisted at `~/.adams-reviews/<repo>/<branch>/<review_id>/artifact.json`. Survives between sessions on the same machine.
 - **Trace** — `trace.md` in the review directory; narrative phase log for human reading. Includes each sub-agent's `agentId` so their full JSONL transcripts can be opened directly.
 - **Phases log** — `phases.jsonl` in the review directory; one JSON object per phase, for machine-readable post-mortem diff.
 - **Helper script** — deterministic tool in `_shared/tools/` for reading, mutating, validating, rendering, publishing, or computing on the artifact. Scripts produce error-as-prompt messages.
@@ -1681,7 +1682,7 @@ Each entry gives the script's interface, key algorithm, invariants, and error ca
 ### 21.1 `artifact-read.sh`
 
 **Interface:** `artifact-read.sh [--path <file>] [--filter '<jq expr>' | --finding-id <id> | --summary]`
-**Default path:** from `~/.claude/reviews/<repo>/<branch>/latest.txt` → `<review_id>/artifact.json`.
+**Default path:** from `~/.adams-reviews/<repo>/<branch>/latest.txt` → `<review_id>/artifact.json`.
 **Impl:** thin wrapper around `jq`. `--summary` runs a canned jq that aggregates counts per `current_state`, `disposition`, `impact_type`, `validation_lane` — matching §8.1 and §12.1. `disposition` is the primary routing key; `is_actionable` is derived from it and not included in the summary to avoid two views of the same information.
 **Errors:** artifact not found → clear message naming expected path; `jq` syntax error → wrapped with "filter was: <expr>".
 
@@ -1776,7 +1777,7 @@ The orchestrator passes `artifact.reviewed_files_all` as the `--reviewed-files` 
 **Interface:** `external-scrape.sh --pr <num> --since <iso-8601> [--config <path>]`
 **Algorithm:**
 1. Resolve owner/repo from `gh repo view --json owner,name` (or from git remote if `gh` isn't configured for this repo).
-2. Load config: per-repo `.claude/review-config.json` overrides global `~/.claude/reviews/review-config.json`. Extract `external_reviewer_bots.allow` (may be null) and `external_reviewer_bots.deny` (array; merge with built-in defaults if user didn't replace).
+2. Load config: per-repo `.claude/review-config.json` overrides global `~/.adams-reviews/review-config.json`. Extract `external_reviewer_bots.allow` (may be null) and `external_reviewer_bots.deny` (array; merge with built-in defaults if user didn't replace).
 3. Query three endpoints in parallel:
    - `gh api "repos/{owner}/{repo}/issues/{pr}/comments"`
    - `gh api "repos/{owner}/{repo}/pulls/{pr}/reviews"`
@@ -1937,7 +1938,7 @@ The orchestrator and sub-agents encounter failures. A fresh agent implementing t
 | Failure | Response |
 |---|---|
 | Artifact file not found when expected | For `/adams-review-fix`: abort with "no review found for this branch. Run `/adams-review` first." For `/adams-review` detecting its own prior state: treat as "no prior", proceed with fresh review. |
-| Permission denied writing to `~/.claude/reviews/...` | Abort with message including the target path. User will handle. |
+| Permission denied writing to `~/.adams-reviews/...` | Abort with message including the target path. User will handle. |
 | Disk full during artifact write | Abort cleanly — the write is atomic (temp + rename), so the prior artifact is intact. |
 | Schema validation failure at write boundary | Do NOT write. Dump the invalid artifact to `/tmp/adams-review-invalid-<ts>.json` for debugging. Emit an error naming the validation failure. |
 
@@ -1980,7 +1981,7 @@ Set up in Phase 0; consumed by every later phase.
 | Variable | Set by | Consumed by | Notes |
 |---|---|---|---|
 | `review_id` | Phase 0 (generated ULID at artifact init) | All phases, helper scripts, render templates | Written to `latest.txt` and into `artifact.json`. Not used for comment discovery (§13.4) — that's the stable marker's job. |
-| `artifact_path` | Phase 0 (`~/.claude/reviews/<repo-slug>/<branch>/<review_id>/artifact.json`) | All writer scripts, render, publish | Absolute path; avoid recomputing it in each fragment. |
+| `artifact_path` | Phase 0 (`~/.adams-reviews/<repo-slug>/<branch>/<review_id>/artifact.json`) | All writer scripts, render, publish | Absolute path; avoid recomputing it in each fragment. |
 | `repo_root` | Phase 0 (`git rev-parse --show-toplevel`) | L2, Phase 4a, Phase 8, `claude-md-paths.sh` | Used for path resolution. |
 | `repo_slug` | Phase 0 (per §9.2 derivation) | Directory creation, `latest.txt` path | Stable across checkouts. |
 | `base_branch` | Phase 0 (PR base, or inferred from merge-base) | L1/L2 diff computation, Phase 0 trivial check | `git diff <base_branch>..HEAD` is the canonical diff. |
