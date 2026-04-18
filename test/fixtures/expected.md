@@ -65,7 +65,14 @@ Shown only when `origin_confidence: high`. Never auto-fixed in v1 (§13.1 pre-ex
 
 ## Fix runs
 
-- **fixrun_stage1smoke** (2026-04-17T21:30:00Z): 1 verified. Commits: `fedcba9`
+### Run `fixrun_stage1smoke` — 2026-04-17T21:30:00Z
+
+- Outcomes: 1 verified
+- Commits: `fedcba9`
+
+| Finding | Group | Outcome | phase_9_finding |
+|---------|-------|---------|-----------------|
+| F001 | FG-1 | ✓ verified |  |
 
 ---
 

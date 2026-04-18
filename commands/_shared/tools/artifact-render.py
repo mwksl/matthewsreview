@@ -401,8 +401,32 @@ def render_pre_existing(buckets):
     return "\n".join(lines)
 
 
+_OUTCOME_LABEL = {
+    "verified":    "✓ verified",
+    "partial":     "⚠ partial",
+    "regression":  "✗ regression (reverted)",
+    # phase_9_outcome=null is the overlap-abort case (§4 Phase 9.pre):
+    # the run aborted before Phase 9 could classify the finding, but the
+    # audit trail still records the attempt. Label distinctly so the
+    # reader can tell it apart from a legit classification.
+    None:          "⚠ overlap-abort",
+}
+
+
+def _outcome_label(att):
+    outcome = att.get("phase_9_outcome")
+    return _OUTCOME_LABEL.get(outcome, str(outcome))
+
+
 def render_fix_runs(artifact):
-    """Derive per-run summary by grouping finding.fix_attempts[] by run_id."""
+    """Derive per-run summary + per-finding table by grouping fix_attempts by run_id.
+
+    DESIGN §7: "A `## Fix runs` section is appended showing each run's
+    summary." Each run produces a header line (run_id, timestamp,
+    committed SHAs, outcome counts) and a table of per-finding outcomes.
+    Runs are ordered newest-first — the freshest outcome is usually the
+    most relevant to the reader.
+    """
     runs = defaultdict(list)  # run_id -> list of (finding_id, attempt)
     for f in artifact.get("findings", []):
         for att in f.get("fix_attempts") or []:
@@ -410,18 +434,56 @@ def render_fix_runs(artifact):
     if not runs:
         return ""
 
+    # Newest-first. Use the min timestamp within the run as its stable
+    # anchor (attempts within a run should share a timestamp but don't
+    # strictly have to — the overlap-abort batch does share one, the
+    # committed branch might ts-stamp all findings at 9d within the
+    # same second, but ordering is driven by the earliest attempt-ts).
+    def run_ts(entries):
+        tss = [att.get("timestamp") or "" for _, att in entries]
+        return min(tss) if tss else ""
+
     lines = ["## Fix runs", ""]
-    for run_id, entries in sorted(runs.items(), key=lambda kv: (kv[1][0][1].get("timestamp") or "")):
+    for run_id, entries in sorted(runs.items(), key=lambda kv: run_ts(kv[1]), reverse=True):
+        ts = run_ts(entries)
         outcomes = defaultdict(int)
         shas = set()
         for _, att in entries:
-            outcomes[att.get("phase_9_outcome") or "(no outcome)"] += 1
+            outcomes[att.get("phase_9_outcome")] += 1
             if att.get("output_sha"):
                 shas.add(att["output_sha"][:7])
-        ts = entries[0][1].get("timestamp", "")
         sha_list = ", ".join(f"`{s}`" for s in sorted(shas)) if shas else "(no commit)"
-        parts = [f"{count} {outcome}" for outcome, count in outcomes.items()]
-        lines.append(f"- **{run_id}** ({ts}): {', '.join(parts)}. Commits: {sha_list}")
+
+        # Human-readable outcome summary ordered by the label precedence
+        # we want to emphasize first: verified → partial → regression → overlap.
+        summary_parts = []
+        for key, label in (("verified", "verified"),
+                           ("partial", "partial"),
+                           ("regression", "regression"),
+                           (None, "overlap-abort")):
+            if outcomes.get(key):
+                summary_parts.append(f"{outcomes[key]} {label}")
+
+        lines.append(f"### Run `{run_id}` — {ts}")
+        lines.append("")
+        lines.append(f"- Outcomes: {', '.join(summary_parts) if summary_parts else '(none)'}")
+        lines.append(f"- Commits: {sha_list}")
+        lines.append("")
+        lines.append("| Finding | Group | Outcome | phase_9_finding |")
+        lines.append("|---------|-------|---------|-----------------|")
+        # Sort per-finding rows by finding id for stable table order.
+        for fid, att in sorted(entries, key=lambda p: p[0] or ""):
+            pf = att.get("phase_9_finding") or ""
+            lines.append(
+                f"| {fid} | {att.get('fix_group_id', '?')} | "
+                f"{_outcome_label(att)} | {pf} |"
+            )
+        lines.append("")
+
+    # Trim the trailing empty line so the section ends cleanly (the join
+    # between sections adds its own).
+    while lines and lines[-1] == "":
+        lines.pop()
     return "\n".join(lines)
 
 

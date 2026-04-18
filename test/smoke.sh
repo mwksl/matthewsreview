@@ -1426,6 +1426,105 @@ else
     fail "FX-AF-9: expected exit 1 + unknown outcome + suggestion; got code=$code stderr='$stderr'"
 fi
 
+# ------------------------------------------------------------------ Stage 3 — render fix_runs
+#
+# artifact-render.py gained a richer `## Fix runs` section plus the
+# retry-eligible partial/regression sections. These assertions pin the
+# header shape, the outcome labels (including the overlap-abort label
+# for phase_9_outcome=null), and the newest-first ordering invariant.
+# expected.md already exercises the single-verified-run case at
+# assertion 9 above; these tests focus on the edge cases not covered
+# there.
+
+RF_ART="$WORK/rf-art.json"
+
+# Build a fresh artifact with F001 open/confirmed_auto and exercise the
+# full fix cycle to produce a verified+partial+regression multi-outcome
+# run.
+"$TOOLS/artifact-patch.py" --init "@$FIX/fix-group-seed.json" --path "$RF_ART" >/dev/null
+"$TOOLS/artifact-patch.py" --path "$RF_ART" --apply-fix-start \
+  '[{"id":"F001","run_id":"fixrun_rf"},{"id":"F002","run_id":"fixrun_rf"},{"id":"F003","run_id":"fixrun_rf"}]' >/dev/null 2>&1
+"$TOOLS/artifact-patch.py" --path "$RF_ART" --apply-fix-outcomes \
+  '[{"id":"F001","run_id":"fixrun_rf","fix_group_id":"FG-1","input_sha":"aaaa111","output_sha":"bbbb222","phase_9_outcome":"verified","timestamp":"2026-04-18T14:00:00Z"},
+    {"id":"F002","run_id":"fixrun_rf","fix_group_id":"FG-1","input_sha":"aaaa111","output_sha":"bbbb222","phase_9_outcome":"partial","timestamp":"2026-04-18T14:00:00Z","phase_9_finding":"missed q.ts:5"},
+    {"id":"F003","run_id":"fixrun_rf","fix_group_id":"FG-2","input_sha":"aaaa111","output_sha":null,"phase_9_outcome":"regression","timestamp":"2026-04-18T14:00:00Z","phase_9_finding":"new 401 in z.ts"}]' >/dev/null 2>&1
+
+"$TOOLS/artifact-render.py" --input "$RF_ART" --output "$WORK/rf.md" >/dev/null
+
+# Assertion FX-RF-1: Fix runs section header + per-run sub-header present.
+if grep -q '^## Fix runs$' "$WORK/rf.md" && grep -q '^### Run `fixrun_rf` — 2026-04-18T14:00:00Z$' "$WORK/rf.md"; then
+    pass "FX-RF-1 (§7): Fix runs section with per-run ### sub-header and timestamp"
+else
+    fail "FX-RF-1: expected ## Fix runs + ### Run header; $WORK/rf.md"
+fi
+
+# Assertion FX-RF-2: outcome summary line captures all three labels.
+if grep -Fq '1 verified, 1 partial, 1 regression' "$WORK/rf.md"; then
+    pass "FX-RF-2 (§7): outcome summary shows verified + partial + regression counts"
+else
+    fail "FX-RF-2: expected mixed-outcome summary line, got:
+$(grep -A1 'Outcomes:' "$WORK/rf.md")"
+fi
+
+# Assertion FX-RF-3: per-finding table renders each outcome label correctly
+# (✓ verified / ⚠ partial / ✗ regression) plus the phase_9_finding text.
+if grep -Fq '| F001 | FG-1 | ✓ verified |' "$WORK/rf.md" \
+    && grep -Fq '| F002 | FG-1 | ⚠ partial | missed q.ts:5 |' "$WORK/rf.md" \
+    && grep -Fq '| F003 | FG-2 | ✗ regression (reverted) | new 401 in z.ts |' "$WORK/rf.md"; then
+    pass "FX-RF-3 (§7): per-finding table renders verified/partial/regression with phase_9_finding"
+else
+    fail "FX-RF-3: per-finding table row(s) missing or mis-rendered; $WORK/rf.md"
+fi
+
+# Assertion FX-RF-4: Fix runs section absent when no fix_attempts exist.
+"$TOOLS/artifact-patch.py" --init "@$FIX/fix-group-seed.json" --path "$WORK/rf-fresh.json" >/dev/null
+"$TOOLS/artifact-render.py" --input "$WORK/rf-fresh.json" --output "$WORK/rf-fresh.md" >/dev/null
+if ! grep -q '^## Fix runs$' "$WORK/rf-fresh.md"; then
+    pass "FX-RF-4 (§7): Fix runs section ABSENT on artifacts with no fix_attempts"
+else
+    fail "FX-RF-4: Fix runs section rendered on an artifact with zero fix_attempts"
+fi
+
+# Assertion FX-RF-5: overlap-abort (phase_9_outcome=null) renders as
+# '⚠ overlap-abort' in the per-finding table rather than raw 'None' or
+# disappearing. Tests the §4 Phase 9.pre audit-trail visibility.
+"$TOOLS/artifact-patch.py" --init "@$FIX/fix-group-seed.json" --path "$WORK/rf-oa.json" >/dev/null
+"$TOOLS/artifact-patch.py" --path "$WORK/rf-oa.json" --apply-fix-start \
+  '[{"id":"F004","run_id":"fixrun_oa"}]' >/dev/null 2>&1
+"$TOOLS/artifact-patch.py" --path "$WORK/rf-oa.json" --apply-fix-outcomes \
+  '[{"id":"F004","run_id":"fixrun_oa","fix_group_id":"FG-1","input_sha":"aaaa111","output_sha":null,"phase_9_outcome":null,"timestamp":"2026-04-18T15:00:00Z","phase_9_finding":"run aborted: overlap on src/a.ts"}]' >/dev/null 2>&1
+"$TOOLS/artifact-render.py" --input "$WORK/rf-oa.json" --output "$WORK/rf-oa.md" >/dev/null
+if grep -Fq '| F004 | FG-1 | ⚠ overlap-abort | run aborted: overlap on src/a.ts |' "$WORK/rf-oa.md" \
+    && grep -Fq '1 overlap-abort' "$WORK/rf-oa.md"; then
+    pass "FX-RF-5 (§4 Phase 9.pre / §7): overlap-abort renders distinctly in per-finding table + outcome summary"
+else
+    fail "FX-RF-5: expected overlap-abort label; got:
+$(grep -A3 'Fix runs' "$WORK/rf-oa.md")"
+fi
+
+# Assertion FX-RF-6: newest-first ordering. Two runs on the same artifact,
+# different timestamps; expect the newer run's ### header to appear first.
+"$TOOLS/artifact-patch.py" --init "@$FIX/fix-group-seed.json" --path "$WORK/rf-two.json" >/dev/null
+# Run A at 13:00
+"$TOOLS/artifact-patch.py" --path "$WORK/rf-two.json" --apply-fix-start '[{"id":"F007","run_id":"fixrun_old"}]' >/dev/null 2>&1
+"$TOOLS/artifact-patch.py" --path "$WORK/rf-two.json" --apply-fix-outcomes \
+  '[{"id":"F007","run_id":"fixrun_old","fix_group_id":"FG-1","input_sha":"aaaa111","output_sha":"cccc333","phase_9_outcome":"verified","timestamp":"2026-04-18T13:00:00Z"}]' >/dev/null 2>&1
+# F007 is now resolved — to run a second fix, we need a fresh open finding.
+# Use F005 (currently open/confirmed_auto) for run B at 16:00.
+"$TOOLS/artifact-patch.py" --path "$WORK/rf-two.json" --apply-fix-start '[{"id":"F005","run_id":"fixrun_new"}]' >/dev/null 2>&1
+"$TOOLS/artifact-patch.py" --path "$WORK/rf-two.json" --apply-fix-outcomes \
+  '[{"id":"F005","run_id":"fixrun_new","fix_group_id":"FG-1","input_sha":"bbbb222","output_sha":"dddd444","phase_9_outcome":"verified","timestamp":"2026-04-18T16:00:00Z"}]' >/dev/null 2>&1
+
+"$TOOLS/artifact-render.py" --input "$WORK/rf-two.json" --output "$WORK/rf-two.md" >/dev/null
+# Extract line numbers of the two ### Run sub-headers; newer (fixrun_new) must come first.
+line_new=$(grep -n '^### Run `fixrun_new`' "$WORK/rf-two.md" | cut -d: -f1)
+line_old=$(grep -n '^### Run `fixrun_old`' "$WORK/rf-two.md" | cut -d: -f1)
+if [[ -n "$line_new" && -n "$line_old" && "$line_new" -lt "$line_old" ]]; then
+    pass "FX-RF-6 (§7): Fix runs ordered newest-first (line $line_new before $line_old)"
+else
+    fail "FX-RF-6: expected fixrun_new before fixrun_old, got new=$line_new old=$line_old"
+fi
+
 echo
 echo "smoke: PASS ($N assertions)"
 exit 0
