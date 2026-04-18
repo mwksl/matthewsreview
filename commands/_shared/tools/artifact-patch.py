@@ -54,7 +54,10 @@ blocks to stderr per DESIGN §8.6.
 """
 
 import argparse
+import copy
+import difflib
 import json
+import os
 import sys
 import traceback
 from datetime import datetime, timezone
@@ -133,9 +136,17 @@ def cmd_init(args):
         )
         return c.EXIT_VALIDATION
 
-    c.atomic_write(args.path, seed)
-    print(f"wrote {args.path}")
-    return c.EXIT_OK
+    # If the target file exists, load its content for the dry-run diff
+    # base. A failed load doesn't fail the init — we just show the full
+    # new doc as an all-additions diff.
+    before = None
+    if args.dry_run and os.path.exists(args.path):
+        try:
+            before = c.read_json(args.path)
+        except (OSError, json.JSONDecodeError):
+            before = None
+
+    return _write_and_emit(args.path, seed, dry_run=args.dry_run, before=before)
 
 
 def _load_or_fail(path):
@@ -156,8 +167,18 @@ def _load_or_fail(path):
         sys.exit(c.EXIT_VALIDATION)
 
 
-def _write_and_emit(path, artifact):
-    """Common write tail: bump generated_at, validate, atomic write."""
+def _write_and_emit(path, artifact, dry_run=False, before=None):
+    """Common write tail: bump generated_at, validate, then either write or print a diff.
+
+    With dry_run=True:
+      - Invalid result: exit EXIT_DRY_RUN_INVALID (3) with error-as-prompt.
+      - Valid result: print unified diff to stdout, log "(dry-run: no write)"
+        to stderr, exit EXIT_OK.
+    With dry_run=False:
+      - Invalid result: exit EXIT_VALIDATION (1) (post-patch invariant break
+        shouldn't normally happen if the mode's pre-checks are correct).
+      - Valid result: atomic tmp+rename, log "wrote <path>" to stdout.
+    """
     artifact["generated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     errors = c.validate(artifact)
     if errors:
@@ -166,9 +187,32 @@ def _write_and_emit(path, artifact):
         c.err_prompt(
             f"patched artifact is invalid ({len(errors)} schema violation(s))",
             context=["  " + e for e in shown] + overflow,
-            action="this indicates a bug in the patch mode or a malformed input value."
+            action=("--dry-run caught this before writing; fix the input."
+                    if dry_run
+                    else "this indicates a bug in the patch mode or a malformed input value.")
         )
-        return c.EXIT_VALIDATION
+        return c.EXIT_DRY_RUN_INVALID if dry_run else c.EXIT_VALIDATION
+
+    if dry_run:
+        before_lines = (
+            json.dumps(before, indent=2, sort_keys=True).splitlines(keepends=True)
+            if before is not None
+            else []
+        )
+        after_lines = json.dumps(artifact, indent=2, sort_keys=True).splitlines(keepends=True)
+        diff = difflib.unified_diff(
+            before_lines, after_lines,
+            fromfile=f"{path} (before)",
+            tofile=f"{path} (after)",
+        )
+        sys.stdout.writelines(diff)
+        sys.stdout.flush()
+        if before_lines == after_lines:
+            print("(dry-run: no changes)", file=sys.stderr)
+        else:
+            print("(dry-run: no write)", file=sys.stderr)
+        return c.EXIT_OK
+
     c.atomic_write(path, artifact)
     print(f"wrote {path}")
     return c.EXIT_OK
@@ -242,6 +286,7 @@ def cmd_add_finding(args):
         return c.EXIT_USAGE
 
     artifact = _load_or_fail(args.path)
+    before = copy.deepcopy(artifact) if args.dry_run else None
 
     existing_ids = {f.get("id") for f in artifact.get("findings", [])}
     new_id = finding.get("id")
@@ -254,7 +299,7 @@ def cmd_add_finding(args):
         return c.EXIT_VALIDATION
 
     artifact.setdefault("findings", []).append(finding)
-    return _write_and_emit(args.path, artifact)
+    return _write_and_emit(args.path, artifact, dry_run=args.dry_run, before=before)
 
 
 def _find_finding(artifact, finding_id):
@@ -397,6 +442,7 @@ def cmd_set_and_or_append(args):
     append. One atomic write.
     """
     artifact = _load_or_fail(args.path)
+    before = copy.deepcopy(artifact) if args.dry_run else None
 
     set_pairs = [parse_set_pair(p) for p in args.set] if args.set else []
 
@@ -425,7 +471,7 @@ def cmd_set_and_or_append(args):
         if set_pairs:
             _apply_artifact_set(artifact, set_pairs)
 
-    return _write_and_emit(args.path, artifact)
+    return _write_and_emit(args.path, artifact, dry_run=args.dry_run, before=before)
 
 
 # ----- CLI ---------------------------------------------------------------
@@ -458,6 +504,12 @@ def build_parser():
         dest="append_fix_attempt",
         metavar="ATTEMPT_JSON",
         help="append an entry to finding.fix_attempts[] (requires --finding-id; inline JSON, @file, or -)"
+    )
+    p.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="validate the patch in memory and print a unified diff to stdout; no write"
     )
     mode = p.add_mutually_exclusive_group(required=False)
     mode.add_argument(
