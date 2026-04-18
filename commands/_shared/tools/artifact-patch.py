@@ -18,6 +18,25 @@ Modes (CLI flags; mutually exclusive):
                             writes validation_result only for confirmed-band
                             tuples. Per-tuple atomic write + halt on first
                             failure (preceding tuples stay committed).
+  --apply-fix-start <array> Stage 3: bulk open→attempted transition at the
+                            start of Phase 8. Input is a JSON array of
+                            {id, run_id}. Per-tuple atomic + first-failure
+                            halts. `run_id` is carried in error messages so
+                            an interrupted batch is locatable in trace.md;
+                            the run_id itself isn't persisted on findings
+                            until Phase 9d (via --apply-fix-outcomes).
+  --apply-fix-outcomes <array>  Stage 3: Phase 9d state transitions +
+                            fix_attempt append in one call. Input is a JSON
+                            array of {id, run_id, fix_group_id, input_sha,
+                            output_sha, phase_9_outcome, timestamp,
+                            phase_9_finding?, revised_fix_proposal?}. The
+                            helper maps phase_9_outcome to the §13.1 Phase-9
+                            disposition (verified→resolved, partial→partial,
+                            regression→regression) and appends the attempt.
+                            phase_9_outcome=null (overlap-abort / §4 Phase
+                            9.pre) leaves current_state at attempted and
+                            only appends the fix_attempt — the next run's
+                            leftover-attempted hard abort catches the user.
   --set field=value         mutate a scalar field (repeatable). With
                             --finding-id, targets a finding; without,
                             targets top-level artifact fields.
@@ -761,6 +780,297 @@ def cmd_apply_decisions(args):
     return c.EXIT_OK
 
 
+# ----- --apply-fix-start / --apply-fix-outcomes (Stage 3, DESIGN §4 Phase 8/9) ---
+#
+# These two modes collapse per-finding loops at the start and end of a fix
+# run into single batched helper calls, matching the authoring discipline
+# captured at Stage 2.5.C (and first applied at Stage 2.5.B via
+# --apply-decisions). Same pattern: JSON array input, per-tuple atomic
+# write, first-failure halts.
+#
+# --apply-fix-start applies at Phase 8 step 8.4 (all eligible findings go
+# open → attempted before fix-group agents dispatch). --apply-fix-outcomes
+# applies at Phase 9d (every touched finding transitions per phase_9_outcome
+# and gets its fix_attempt appended).
+#
+# Derivation table (§4 Phase 9d / §13.1 Phase 9):
+#   phase_9_outcome == "verified"   → attempted → resolved, disposition=resolved
+#   phase_9_outcome == "partial"    → attempted → open,     disposition=partial,
+#                                      reason=f"fix partial: {phase_9_finding}"
+#   phase_9_outcome == "regression" → attempted → open,     disposition=regression,
+#                                      reason=f"fix regressed: {phase_9_finding}"
+#                                      (output_sha MUST be null — the group reverted)
+#   phase_9_outcome == null (overlap-abort) → no transition (stays attempted),
+#                                      fix_attempt still appended for audit trail.
+
+ALLOWED_FIX_START_TUPLE_KEYS = frozenset({"id", "run_id"})
+
+ALLOWED_FIX_OUTCOME_TUPLE_KEYS = frozenset({
+    "id",
+    "run_id",
+    "fix_group_id",
+    "input_sha",
+    "output_sha",
+    "phase_9_outcome",
+    "phase_9_finding",
+    "revised_fix_proposal",
+    "timestamp",
+})
+
+_REQUIRED_FIX_OUTCOME_KEYS = frozenset({
+    "id", "run_id", "fix_group_id", "input_sha",
+    "output_sha", "phase_9_outcome", "timestamp",
+})
+
+_PHASE_9_OUTCOME_VALUES = frozenset({"verified", "partial", "regression", None})
+
+
+def _check_fix_tuple(tup, idx, flag, allowed_keys):
+    """Shared tuple-shape validator for --apply-fix-start and --apply-fix-outcomes.
+
+    Rejects non-object tuples, missing id, and unknown keys. Returns the
+    finding id so the caller can pick up.
+    """
+    if not isinstance(tup, dict):
+        c.err_prompt(
+            f"{flag} tuple #{idx}: must be a JSON object, got {type(tup).__name__}",
+            action="each array element is an object; see artifact-patch.py docstring for the shape."
+        )
+        sys.exit(c.EXIT_VALIDATION)
+
+    fid = tup.get("id")
+    if not fid:
+        c.err_prompt(
+            f"{flag} tuple #{idx}: 'id' is required",
+            action="every tuple must name the finding it applies to."
+        )
+        sys.exit(c.EXIT_VALIDATION)
+
+    bad_keys = [k for k in tup.keys() if k not in allowed_keys]
+    if bad_keys:
+        c.err_prompt(
+            f"{flag} tuple #{idx} ({fid}): unknown keys {sorted(bad_keys)}",
+            valid_values=sorted(allowed_keys),
+            action="remove unknown keys; the helper derives state from the documented inputs."
+        )
+        sys.exit(c.EXIT_VALIDATION)
+
+    return fid
+
+
+def cmd_apply_fix_start(args):
+    """Bulk open→attempted at the start of Phase 8 (DESIGN §4 Phase 8, Stage 3)."""
+    tuples = read_json_arg(args.apply_fix_start, "--apply-fix-start")
+
+    if not isinstance(tuples, list):
+        c.err_prompt(
+            f"--apply-fix-start expects a JSON array, got {type(tuples).__name__}",
+            action="pass an array of {id, run_id} objects; see artifact-patch.py docstring."
+        )
+        return c.EXIT_USAGE
+
+    transitioned = 0
+    for idx, tup in enumerate(tuples):
+        fid = _check_fix_tuple(tup, idx, "--apply-fix-start", ALLOWED_FIX_START_TUPLE_KEYS)
+
+        # run_id is required for audit consistency even though we don't
+        # persist it on findings here — the caller passes the same run_id
+        # it'll use at Phase 9d, so trace.md / error messages can correlate.
+        if not tup.get("run_id"):
+            c.err_prompt(
+                f"--apply-fix-start tuple #{idx} ({fid}): 'run_id' is required",
+                action="pass the run_id captured at Phase 7 step 7.8 (fixrun_<ULID>)."
+            )
+            return c.EXIT_VALIDATION
+
+        # Load fresh per-tuple so preceding tuples' writes are visible
+        # (same pattern as --apply-decisions). Eligibility is the
+        # orchestrator's job at Phase 8 step 8.1; here we only enforce the
+        # §5.3 transition and the schema.
+        artifact = _load_or_fail(args.path)
+        finding = _find_finding(artifact, fid)
+
+        # Phase 8 eligibility (§4 Phase 8): the finding must be open at
+        # entry. _apply_finding_set short-circuits on same→same (e.g.,
+        # attempted→attempted is a silent no-op), which would hide a real
+        # orchestrator bug — Phase 7 step 4's leftover-attempted hard
+        # abort is supposed to catch every stale attempted state before
+        # Phase 8 dispatches. Reject loudly if we see attempted/resolved
+        # so the orchestrator's Phase 7 gate stays the only legitimate
+        # recovery path.
+        before_state = finding.get("current_state")
+        if before_state != "open":
+            allowed = c.transitions_from(before_state)
+            c.err_prompt(
+                f"--apply-fix-start tuple #{idx} ({fid}): current_state='{before_state}' is not 'open'",
+                context=(
+                    "Phase 8 eligibility (§4 Phase 8) requires current_state=='open'. "
+                    "A leftover 'attempted' finding should have triggered the Phase 7 step 4 hard abort; "
+                    "a 'resolved' finding should have been filtered out of eligibility."
+                ),
+                valid_values=(sorted(allowed) or ["(none — terminal state)"]),
+                action="run /adams-review-fix fresh; if this persists, check the Phase 8 step 8.1 eligibility filter."
+            )
+            sys.exit(c.EXIT_INVALID_TRANSITION)
+
+        # open → attempted is valid; _apply_finding_set enforces the §5.3
+        # transition whitelist via transitions_from() anyway, as a defense
+        # in depth against future edits to this guard.
+        _apply_finding_set(finding, [("current_state", "attempted")])
+
+        rc = _write_and_emit(args.path, artifact, silent=True)
+        if rc != c.EXIT_OK:
+            return rc
+        transitioned += 1
+
+    print(f"apply-fix-start: transitioned {transitioned} finding(s) open→attempted")
+    return c.EXIT_OK
+
+
+def _build_fix_attempt(tup):
+    """Assemble the fix_attempts[] entry from a Phase-9 outcome tuple.
+
+    Required schema fields (run_id, timestamp, fix_group_id, input_sha,
+    output_sha, phase_9_outcome) are copied verbatim — schema validation
+    at write time catches pattern/enum violations with a clear error.
+    phase_9_finding and revised_fix_proposal are optional; include only
+    when the tuple provides them so absent keys don't render as `null`
+    in a place the schema treats as nullable-vs-absent differently.
+    """
+    attempt = {
+        "run_id": tup["run_id"],
+        "timestamp": tup["timestamp"],
+        "fix_group_id": tup["fix_group_id"],
+        "input_sha": tup["input_sha"],
+        "output_sha": tup.get("output_sha"),
+        "phase_9_outcome": tup.get("phase_9_outcome"),
+    }
+    if "phase_9_finding" in tup:
+        attempt["phase_9_finding"] = tup["phase_9_finding"]
+    if "revised_fix_proposal" in tup:
+        attempt["revised_fix_proposal"] = tup["revised_fix_proposal"]
+    return attempt
+
+
+def cmd_apply_fix_outcomes(args):
+    """Phase 9d: append fix_attempts + transition state per phase_9_outcome."""
+    tuples = read_json_arg(args.apply_fix_outcomes, "--apply-fix-outcomes")
+
+    if not isinstance(tuples, list):
+        c.err_prompt(
+            f"--apply-fix-outcomes expects a JSON array, got {type(tuples).__name__}",
+            action="pass an array of outcome tuples; see artifact-patch.py docstring."
+        )
+        return c.EXIT_USAGE
+
+    counts = {"verified": 0, "partial": 0, "regression": 0, "overlap_abort": 0}
+
+    for idx, tup in enumerate(tuples):
+        fid = _check_fix_tuple(tup, idx, "--apply-fix-outcomes", ALLOWED_FIX_OUTCOME_TUPLE_KEYS)
+
+        missing = [k for k in _REQUIRED_FIX_OUTCOME_KEYS if k not in tup]
+        if missing:
+            c.err_prompt(
+                f"--apply-fix-outcomes tuple #{idx} ({fid}): missing required key(s) {sorted(missing)}",
+                valid_values=sorted(_REQUIRED_FIX_OUTCOME_KEYS),
+                action="every tuple needs id, run_id, fix_group_id, input_sha, output_sha, phase_9_outcome, timestamp. output_sha / phase_9_outcome may be null."
+            )
+            return c.EXIT_VALIDATION
+
+        outcome = tup["phase_9_outcome"]
+        if outcome not in _PHASE_9_OUTCOME_VALUES:
+            c.err_prompt(
+                f"--apply-fix-outcomes tuple #{idx} ({fid}): unknown phase_9_outcome '{outcome}'",
+                valid_values=["verified", "partial", "regression", "null (overlap-abort)"],
+                did_you_mean=c.suggest(outcome, ["verified", "partial", "regression"]),
+                action="see DESIGN §13.1 Phase 9 / §4 Phase 9.pre for the valid outcomes."
+            )
+            return c.EXIT_VALIDATION
+
+        # Regression findings must have output_sha=null — their fix group
+        # was reverted in §4 Phase 9b so no commit exists for this finding.
+        # Enforce so an orchestrator bug can't ship a regression-with-SHA.
+        if outcome == "regression" and tup.get("output_sha") is not None:
+            c.err_prompt(
+                f"--apply-fix-outcomes tuple #{idx} ({fid}): regression outcome requires output_sha=null",
+                context="DESIGN §13.1 Phase 9 / §6 schema note: regression findings have their fix group reverted in §4 Phase 9b, so no commit exists for them.",
+                action="pass output_sha: null for any tuple with phase_9_outcome=regression."
+            )
+            return c.EXIT_VALIDATION
+
+        # Overlap-abort (phase_9_outcome=null, §4 Phase 9.pre step 5): must
+        # also carry output_sha=null AND a phase_9_finding describing the
+        # abort. The schema allows phase_9_finding as an optional string —
+        # require it here so the audit trail is legible.
+        if outcome is None:
+            if tup.get("output_sha") is not None:
+                c.err_prompt(
+                    f"--apply-fix-outcomes tuple #{idx} ({fid}): overlap-abort outcome (null) requires output_sha=null",
+                    context="Phase 9.pre aborts before any commit — no SHA to record.",
+                    action="pass output_sha: null alongside phase_9_outcome: null."
+                )
+                return c.EXIT_VALIDATION
+            if not tup.get("phase_9_finding"):
+                c.err_prompt(
+                    f"--apply-fix-outcomes tuple #{idx} ({fid}): overlap-abort outcome (null) requires phase_9_finding diagnostic text",
+                    action="populate phase_9_finding with the overlap description (e.g. 'run aborted: fix agents touched overlapping files — <files>')."
+                )
+                return c.EXIT_VALIDATION
+
+        artifact = _load_or_fail(args.path)
+        finding = _find_finding(artifact, fid)
+
+        # 1) Append the fix_attempt. Schema validation at write time
+        # catches malformed SHAs, bad run_id pattern, bad fix_group_id, etc.
+        finding.setdefault("fix_attempts", []).append(_build_fix_attempt(tup))
+
+        # 2) State transition + disposition / reason, per outcome.
+        if outcome == "verified":
+            _apply_finding_set(finding, [
+                ("current_state", "resolved"),
+                ("disposition", "resolved"),
+                ("reason", None),
+            ])
+            counts["verified"] += 1
+        elif outcome == "partial":
+            pf = tup.get("phase_9_finding")
+            reason = f"fix partial: {pf}" if pf else "fix partial"
+            _apply_finding_set(finding, [
+                ("current_state", "open"),
+                ("disposition", "partial"),
+                ("reason", reason),
+            ])
+            counts["partial"] += 1
+        elif outcome == "regression":
+            pf = tup.get("phase_9_finding")
+            reason = f"fix regressed: {pf}" if pf else "fix regressed"
+            _apply_finding_set(finding, [
+                ("current_state", "open"),
+                ("disposition", "regression"),
+                ("reason", reason),
+            ])
+            counts["regression"] += 1
+        else:
+            # outcome is None — overlap-abort. Leave current_state at
+            # attempted (the leftover-attempted hard abort in §4 Phase 7
+            # step 4 is the deterministic recovery path). No state
+            # transition; the fix_attempt we just appended is the full
+            # audit record.
+            counts["overlap_abort"] += 1
+
+        rc = _write_and_emit(args.path, artifact, silent=True)
+        if rc != c.EXIT_OK:
+            return rc
+
+    total = sum(counts.values())
+    print(
+        f"apply-fix-outcomes: applied {total} outcome(s) "
+        f"(verified={counts['verified']}, partial={counts['partial']}, "
+        f"regression={counts['regression']}, overlap_abort={counts['overlap_abort']})"
+    )
+    return c.EXIT_OK
+
+
 def cmd_set_and_or_append(args):
     """Combined --set / --set-json / --append-fix-attempt (DESIGN §26).
 
@@ -874,6 +1184,18 @@ def build_parser():
         metavar="DECISIONS_JSON",
         help="apply a batch of Phase-4 decision tuples (inline JSON array, @file, or -); see docstring"
     )
+    mode.add_argument(
+        "--apply-fix-start",
+        dest="apply_fix_start",
+        metavar="FIX_START_JSON",
+        help="Stage 3 (Phase 8): bulk open→attempted transition. Array of {id, run_id}. Inline/@file/-."
+    )
+    mode.add_argument(
+        "--apply-fix-outcomes",
+        dest="apply_fix_outcomes",
+        metavar="FIX_OUTCOMES_JSON",
+        help="Stage 3 (Phase 9d): fix_attempt append + state transition per phase_9_outcome. Inline/@file/-."
+    )
     return p
 
 
@@ -900,6 +1222,18 @@ def main():
             if args.dry_run:
                 parser.error("--apply-decisions does not currently support --dry-run (batches write per tuple; run on a throwaway path or validate tuples upstream)")
             return cmd_apply_decisions(args)
+        if args.apply_fix_start is not None:
+            if args.set or args.set_json or args.append_fix_attempt or args.finding_id:
+                parser.error("--apply-fix-start cannot combine with --set / --set-json / --append-fix-attempt / --finding-id (tuples carry their own finding ids)")
+            if args.dry_run:
+                parser.error("--apply-fix-start does not support --dry-run (batched per-tuple writes; validate tuples upstream or use a throwaway path)")
+            return cmd_apply_fix_start(args)
+        if args.apply_fix_outcomes is not None:
+            if args.set or args.set_json or args.append_fix_attempt or args.finding_id:
+                parser.error("--apply-fix-outcomes cannot combine with --set / --set-json / --append-fix-attempt / --finding-id (tuples carry their own finding ids)")
+            if args.dry_run:
+                parser.error("--apply-fix-outcomes does not support --dry-run (batched per-tuple writes; validate tuples upstream or use a throwaway path)")
+            return cmd_apply_fix_outcomes(args)
         if args.set or args.set_json or args.append_fix_attempt is not None:
             return cmd_set_and_or_append(args)
     except SystemExit:
@@ -912,7 +1246,7 @@ def main():
         traceback.print_exc(file=sys.stderr)
         return c.EXIT_UNEXPECTED
 
-    parser.error("no mode selected (use --init, --add-finding, --delete-finding, --apply-decisions, --set, --set-json, or --append-fix-attempt)")
+    parser.error("no mode selected (use --init, --add-finding, --delete-finding, --apply-decisions, --apply-fix-start, --apply-fix-outcomes, --set, --set-json, or --append-fix-attempt)")
 
 
 if __name__ == "__main__":

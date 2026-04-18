@@ -1283,6 +1283,149 @@ else
     fail "FX-GF-8: expected exit 1 + validation_result message; got code=$code stderr='$stderr'"
 fi
 
+# ------------------------------------------------------------------ Stage 3 — apply-fix-* modes
+#
+# --apply-fix-start collapses Phase 8 step 8.4 (bulk open→attempted) to a
+# single call. --apply-fix-outcomes collapses Phase 9d (per-finding state
+# transition + fix_attempt append) to a single call. Both follow the
+# Stage-2.5.B --apply-decisions pattern: per-tuple atomic writes, first
+# failure halts, one summary line on success.
+
+AF_ART="$WORK/af-art.json"
+
+# Build a fresh artifact for apply-fix-* assertions. Avoid reusing the
+# gf-art state (which has been mutated by earlier GF assertions in theory,
+# though in practice group-fixes.py is read-only — still, independence
+# matters for test isolation).
+if "$TOOLS/artifact-patch.py" --init "@$FIX/fix-group-seed.json" --path "$AF_ART" >/dev/null; then
+    pass "FX-AF-init: rebuilt artifact for apply-fix-* tests"
+else
+    fail "FX-AF-init: --init failed"
+fi
+
+# Assertion FX-AF-1: --apply-fix-start bulk transition open→attempted.
+# Three eligible findings; post-call all three have current_state=attempted.
+"$TOOLS/artifact-patch.py" --path "$AF_ART" --apply-fix-start \
+  '[{"id":"F001","run_id":"fixrun_smoke1"},{"id":"F002","run_id":"fixrun_smoke1"},{"id":"F003","run_id":"fixrun_smoke1"}]' \
+  >/dev/null 2>&1
+states=$(jq -r '.findings[0:3] | [.[].current_state] | join(",")' "$AF_ART")
+if [[ "$states" == "attempted,attempted,attempted" ]]; then
+    pass "FX-AF-1 (§21.2/§4 Phase 8): --apply-fix-start bulk open→attempted"
+else
+    fail "FX-AF-1: expected all three attempted, got '$states'"
+fi
+
+# Assertion FX-AF-2: --apply-fix-start halts loudly when a tuple's finding
+# is not current_state=open. Re-running start on F001 (already attempted
+# from AF-1) tests the Phase-7-gate-bypass guard: the Phase-7 leftover-
+# attempted hard abort is supposed to catch stale state; --apply-fix-start
+# refuses to silently no-op on same→same.
+stderr=$("$TOOLS/artifact-patch.py" --path "$AF_ART" --apply-fix-start \
+  '[{"id":"F001","run_id":"fixrun_smoke2"}]' 2>&1 >/dev/null); code=$?
+if [[ "$code" == "2" ]] \
+    && echo "$stderr" | grep -q "current_state='attempted' is not 'open'"; then
+    pass "FX-AF-2 (§4 Phase 8): --apply-fix-start rejects non-open finding (exit 2)"
+else
+    fail "FX-AF-2: expected exit 2 + non-open guard, got code=$code stderr='$stderr'"
+fi
+
+# Assertion FX-AF-3: --apply-fix-outcomes verified outcome transitions
+# attempted→resolved, disposition=resolved, reason=null, fix_attempt
+# appended with output_sha.
+"$TOOLS/artifact-patch.py" --path "$AF_ART" --apply-fix-outcomes \
+  '[{"id":"F001","run_id":"fixrun_smoke1","fix_group_id":"FG-1","input_sha":"aaaa111","output_sha":"bbbb222","phase_9_outcome":"verified","timestamp":"2026-04-18T13:00:00Z"}]' \
+  >/dev/null 2>&1
+f1=$(jq -c '.findings[] | select(.id=="F001") | {current_state,disposition,reason,attempts:(.fix_attempts|length),last_outcome:(.fix_attempts[-1].phase_9_outcome),last_sha:(.fix_attempts[-1].output_sha)}' "$AF_ART")
+expected='{"current_state":"resolved","disposition":"resolved","reason":null,"attempts":1,"last_outcome":"verified","last_sha":"bbbb222"}'
+if [[ "$f1" == "$expected" ]]; then
+    pass "FX-AF-3 (§13.1 Phase 9): verified → resolved+resolved, fix_attempt with output_sha"
+else
+    fail "FX-AF-3: expected '$expected', got '$f1'"
+fi
+
+# Assertion FX-AF-4: partial outcome → attempted→open, disposition=partial,
+# reason prose includes phase_9_finding, fix_attempt captures the diagnostic.
+"$TOOLS/artifact-patch.py" --path "$AF_ART" --apply-fix-outcomes \
+  '[{"id":"F002","run_id":"fixrun_smoke1","fix_group_id":"FG-1","input_sha":"aaaa111","output_sha":"bbbb222","phase_9_outcome":"partial","timestamp":"2026-04-18T13:00:00Z","phase_9_finding":"missed x.ts:10"}]' \
+  >/dev/null 2>&1
+f2=$(jq -c '.findings[] | select(.id=="F002") | {current_state,disposition,reason,last_finding:(.fix_attempts[-1].phase_9_finding)}' "$AF_ART")
+expected='{"current_state":"open","disposition":"partial","reason":"fix partial: missed x.ts:10","last_finding":"missed x.ts:10"}'
+if [[ "$f2" == "$expected" ]]; then
+    pass "FX-AF-4 (§13.1 Phase 9): partial → open+partial, reason prose + phase_9_finding"
+else
+    fail "FX-AF-4: expected '$expected', got '$f2'"
+fi
+
+# Assertion FX-AF-5: regression outcome → attempted→open, disposition=regression,
+# output_sha on the fix_attempt MUST be null (group was reverted).
+"$TOOLS/artifact-patch.py" --path "$AF_ART" --apply-fix-outcomes \
+  '[{"id":"F003","run_id":"fixrun_smoke1","fix_group_id":"FG-2","input_sha":"aaaa111","output_sha":null,"phase_9_outcome":"regression","timestamp":"2026-04-18T13:00:00Z","phase_9_finding":"new 401 in y.ts:22"}]' \
+  >/dev/null 2>&1
+f3=$(jq -c '.findings[] | select(.id=="F003") | {current_state,disposition,reason,last_sha:(.fix_attempts[-1].output_sha),last_outcome:(.fix_attempts[-1].phase_9_outcome)}' "$AF_ART")
+expected='{"current_state":"open","disposition":"regression","reason":"fix regressed: new 401 in y.ts:22","last_sha":null,"last_outcome":"regression"}'
+if [[ "$f3" == "$expected" ]]; then
+    pass "FX-AF-5 (§13.1 Phase 9 / §6): regression → open+regression, output_sha=null preserved"
+else
+    fail "FX-AF-5: expected '$expected', got '$f3'"
+fi
+
+# Assertion FX-AF-6: overlap-abort (phase_9_outcome=null). current_state
+# MUST stay at attempted — this is what triggers the next run's
+# leftover-attempted hard abort for deterministic recovery. fix_attempt is
+# still appended for audit.
+OA_ART="$WORK/af-oa.json"
+"$TOOLS/artifact-patch.py" --init "@$FIX/fix-group-seed.json" --path "$OA_ART" >/dev/null
+"$TOOLS/artifact-patch.py" --path "$OA_ART" --apply-fix-start '[{"id":"F004","run_id":"fixrun_oa"}]' >/dev/null
+"$TOOLS/artifact-patch.py" --path "$OA_ART" --apply-fix-outcomes \
+  '[{"id":"F004","run_id":"fixrun_oa","fix_group_id":"FG-1","input_sha":"aaaa111","output_sha":null,"phase_9_outcome":null,"timestamp":"2026-04-18T13:00:00Z","phase_9_finding":"run aborted: overlap on src/c.ts"}]' \
+  >/dev/null 2>&1
+f4=$(jq -c '.findings[] | select(.id=="F004") | {current_state,disposition,attempts:(.fix_attempts|length),last_sha:(.fix_attempts[-1].output_sha),last_outcome:(.fix_attempts[-1].phase_9_outcome),last_finding:(.fix_attempts[-1].phase_9_finding)}' "$OA_ART")
+expected='{"current_state":"attempted","disposition":"confirmed_auto","attempts":1,"last_sha":null,"last_outcome":null,"last_finding":"run aborted: overlap on src/c.ts"}'
+if [[ "$f4" == "$expected" ]]; then
+    pass "FX-AF-6 (§4 Phase 9.pre): overlap-abort preserves current_state=attempted, appends audit fix_attempt"
+else
+    fail "FX-AF-6: expected '$expected', got '$f4'"
+fi
+
+# Assertion FX-AF-7: regression with non-null output_sha rejected. The
+# helper enforces the §13.1 invariant that regressions have no commit.
+"$TOOLS/artifact-patch.py" --init "@$FIX/fix-group-seed.json" --path "$WORK/af-rej.json" >/dev/null
+"$TOOLS/artifact-patch.py" --path "$WORK/af-rej.json" --apply-fix-start '[{"id":"F001","run_id":"fixrun_rej"}]' >/dev/null
+stderr=$("$TOOLS/artifact-patch.py" --path "$WORK/af-rej.json" --apply-fix-outcomes \
+  '[{"id":"F001","run_id":"fixrun_rej","fix_group_id":"FG-1","input_sha":"aaaa111","output_sha":"ffff999","phase_9_outcome":"regression","timestamp":"2026-04-18T13:00:00Z","phase_9_finding":"x"}]' \
+  2>&1 >/dev/null); code=$?
+if [[ "$code" == "1" ]] && echo "$stderr" | grep -q "regression outcome requires output_sha=null"; then
+    pass "FX-AF-7 (§13.1): regression with non-null output_sha rejected (exit 1)"
+else
+    fail "FX-AF-7: expected exit 1 + regression-null message; got code=$code stderr='$stderr'"
+fi
+
+# Assertion FX-AF-8: --apply-fix-outcomes tuple missing required key rejected.
+stderr=$("$TOOLS/artifact-patch.py" --path "$WORK/af-rej.json" --apply-fix-outcomes \
+  '[{"id":"F001","run_id":"fixrun_rej","phase_9_outcome":"verified"}]' \
+  2>&1 >/dev/null); code=$?
+if [[ "$code" == "1" ]] \
+    && echo "$stderr" | grep -q "missing required key" \
+    && echo "$stderr" | grep -q "fix_group_id"; then
+    pass "FX-AF-8 (§21.2): --apply-fix-outcomes rejects tuple missing required key(s)"
+else
+    fail "FX-AF-8: expected exit 1 + missing-key message; got code=$code stderr='$stderr'"
+fi
+
+# Assertion FX-AF-9: unknown phase_9_outcome rejected. Defense against
+# sub-agent response-parsing drift (e.g., a validator returns "verifed"
+# instead of "verified" — a close typo where difflib's did-you-mean fires).
+stderr=$("$TOOLS/artifact-patch.py" --path "$WORK/af-rej.json" --apply-fix-outcomes \
+  '[{"id":"F001","run_id":"fixrun_rej","fix_group_id":"FG-1","input_sha":"aaaa111","output_sha":null,"phase_9_outcome":"verifed","timestamp":"2026-04-18T13:00:00Z"}]' \
+  2>&1 >/dev/null); code=$?
+if [[ "$code" == "1" ]] \
+    && echo "$stderr" | grep -q "unknown phase_9_outcome" \
+    && echo "$stderr" | grep -q "Did you mean 'verified'"; then
+    pass "FX-AF-9 (§13.1 Phase 9): unknown phase_9_outcome rejected with did-you-mean"
+else
+    fail "FX-AF-9: expected exit 1 + unknown outcome + suggestion; got code=$code stderr='$stderr'"
+fi
+
 echo
 echo "smoke: PASS ($N assertions)"
 exit 0
