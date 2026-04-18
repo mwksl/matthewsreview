@@ -122,13 +122,15 @@ Concretely, for each group `[K, D1, D2, ...]` (K = keeper, Di = dupes):
     union_families=$(jq -c '[.[].source_families[]] | unique' <<<"$group_json")
     ```
 
-3. Compute the reconciled routing-field values across the group:
+3. Compute the reconciled routing-field values across the group.
+   The lookup objects use string keys (jq object keys must be strings)
+   and `sort_by ... | last` picks the highest-ranked value deterministically:
 
     ```bash
     # highest origin_confidence across group: high > medium > low
     max_conf=$(jq -r '
-      [.[].origin_confidence] | map({high:3, medium:2, low:1}[.]) | max
-      | {3:"high", 2:"medium", 1:"low"}[tostring]
+      [.[].origin_confidence]
+      | sort_by({"low":1, "medium":2, "high":3}[.]) | last
     ' <<<"$group_json")
 
     # deep wins over light if any member is deep
@@ -138,8 +140,8 @@ Concretely, for each group `[K, D1, D2, ...]` (K = keeper, Di = dupes):
 
     # most actionable: auto_fixable > manual > report_only
     max_act=$(jq -r '
-      [.[].actionability] | map({auto_fixable:3, manual:2, report_only:1}[.]) | max
-      | {3:"auto_fixable", 2:"manual", 1:"report_only"}[tostring]
+      [.[].actionability]
+      | sort_by({"report_only":1, "manual":2, "auto_fixable":3}[.]) | last
     ' <<<"$group_json")
     ```
 

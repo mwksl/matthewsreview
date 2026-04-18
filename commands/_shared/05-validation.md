@@ -189,14 +189,17 @@ natural-language label.
 | `75+` AND `actionability=manual` | | `confirmed_manual` | false | confirmed_strength: strong |
 | `75+` AND `actionability=report_only` | | `confirmed_report` | false | confirmed_strength: strong |
 
-Apply via one `artifact-patch.py` call per finding. Example for
-`score=72, actionability=auto_fixable`:
+Apply via one `artifact-patch.py` call per finding. Capture the
+resolved disposition into a shell variable — the validation_result
+write below keys off it:
 
 ```bash
+# Example for score=72, actionability=auto_fixable.
+resolved_disposition=confirmed_auto
 ~/.claude/commands/_shared/tools/artifact-patch.py \
   --path "$artifact_path" --finding-id "$id" \
   --set "score_phase4=72" \
-  --set disposition=confirmed_auto \
+  --set "disposition=$resolved_disposition" \
   --set confirmed_strength=moderate \
   --set actionability=auto_fixable \
   --set reason=null
