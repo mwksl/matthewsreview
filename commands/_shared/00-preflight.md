@@ -293,7 +293,10 @@ a timestamp+random tail. Both paths MUST produce a `rev_`-prefixed id:
 if ulid=$(uv run --with ulid-py python3 -c 'import ulid; print(ulid.new())' 2>/dev/null); then
     review_id="rev_${ulid}"
 else
-    review_id="rev_$(date -u +%Y%m%dT%H%M%SZ)_$(openssl rand -hex 3)"
+    # Schema (schema-v1.json) pins review_id to ^rev_[A-Za-z0-9]+$ —
+    # the character class excludes underscores, so concatenate without
+    # a separator between the timestamp and the random tail.
+    review_id="rev_$(date -u +%Y%m%dT%H%M%SZ)$(openssl rand -hex 3)"
 fi
 ```
 

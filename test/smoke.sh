@@ -533,6 +533,17 @@ else
     fail "U: reviewer_sources output = $U_OUT"
 fi
 
+# Vbis. review_id fallback format matches ^rev_[A-Za-z0-9]+$.
+# Regression test for real-repo round-5 red: the 0.15 fallback used
+# `rev_${date}_${random}` with an underscore separator; the regex
+# rejects underscores after the `rev_` prefix.
+fallback_id="rev_$(date -u +%Y%m%dT%H%M%SZ)$(openssl rand -hex 3)"
+if [[ "$fallback_id" =~ ^rev_[A-Za-z0-9]+$ ]]; then
+    pass "Vbis: review_id fallback '$fallback_id' matches schema regex"
+else
+    fail "Vbis: fallback id '$fallback_id' does not match ^rev_[A-Za-z0-9]+$"
+fi
+
 # V. pr_state=OPEN (uppercase from gh) would fail schema — the 00-preflight
 # transform at step 0.4 must lowercase it. This asserts the schema rejects
 # uppercase directly, so the transform has something to protect.
