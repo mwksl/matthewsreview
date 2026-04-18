@@ -81,8 +81,9 @@ In PR mode, the rendered Markdown report is posted as a PR comment so it's visib
 ```
 /adams-review [--ensemble]
 ├── Phase 0 — Pre-flight (branch/PR detect, dirty-tree, push, prior-artifact prompt, record review_started_at)
-├── Phase 1 — Detection (parallel lens agents; tag impact_type/origin per candidate)
-├── Phase 1.5 — External PR-comment scrape (ensemble mode only; bot comments since review_started_at)
+├── Phase 1    ─┐ Detection (parallel lens agents; tag impact_type/origin per candidate)
+│               │   (under --ensemble, Phases 1 + 1.5 dispatch in one turn — §13.12)
+├── Phase 1.5  ─┘ External PR-comment scrape + CodeRabbit/Codex CLIs + Sonnet normalizer (ensemble mode only)
 ├── Phase 2 — Dedup (LLM pass, one Sonnet call)
 ├── Phase 3 — Cheap scoring + gate (err-up rubric; source-family auto-graduation)
 ├── Phase 4 — Validation (lane-aware: deep Opus for correctness/security; light Sonnet for others)
@@ -127,7 +128,7 @@ A note on race conditions: two simultaneous `/adams-review` runs on the same bra
 
 ### Phase 1 — Detection
 
-Six internal lenses run in parallel. Each produces candidates tagged with initial routing fields.
+Six internal lenses run in parallel. Each produces candidates tagged with initial routing fields. On `--ensemble` runs, Phase 1 lens dispatches and Phase 1.5 external CLI launches fan out from the same orchestrator turn (see §13.12); the ensemble-CLI readiness gate has been hoisted ahead of dispatch so missing-CLI prompts surface before any lens token spend.
 
 | Lens | Name | Depth | Model | Default impact_type |
 |---|---|---|---|---|
@@ -166,7 +167,9 @@ External findings get a best-effort `impact_type` but are flagged `origin_confid
 
 ### Phase 1.5 — External PR-comment scrape (ensemble mode only)
 
-Runs after internal lens fan-out completes and before Phase 2 dedup. By this point, internal lenses have consumed a few minutes of wall-clock, giving automated external reviewers (e.g., Greptile, CodeRabbit-as-GitHub-app, Codacy, SonarCloud) time to react to the pushed branch and post.
+Runs concurrently with Phase 1's lens fan-out under `--ensemble` (see §13.12 for the parallel dispatch pattern). Automated external reviewers (e.g., Greptile, CodeRabbit-as-GitHub-app, Codacy, SonarCloud) are given the internal lens wall-clock to react to the pushed branch and post — the PR scrape reads whatever bot comments exist when the scrape fires, which under parallel dispatch is no later than under the former serial ordering. The normalizer's candidate array joins Phase 1's pool at a single post-dispatch join point; no `--add-finding` calls happen during collection.
+
+The CLI readiness gate that used to live here has been hoisted into Phase 1's fragment (step 1.2a) so missing-CLI prompts surface before any token spend.
 
 **Inputs:** PR number, `review_started_at` (from Phase 0), bot allow/deny config (§13.8).
 
@@ -1375,6 +1378,26 @@ A deterministic blame-based cross-check corrects both cases without an LLM call.
 **Placement.** Runs as a Phase-1 step between lens aggregation and `--add-finding`. Phase 2 (dedup) and Phase 3 (scoring) see only post-correction origin values, which is what the §13.1 override keys on. Cost per candidate is one blame + a small number of `git merge-base --is-ancestor` tests — roughly 50ms on typical repos. At 50 candidates that's ~2.5s, a rounding error against Phase 1's 5–10min LLM cost. No tokens.
 
 **Implementation.** `origin-crosscheck.sh` (§21.9) takes `--comparison-ref <ref>` and `--candidates <path|@->` (JSON array), emits the same array with origin/origin_confidence corrected to stdout, and writes one `origin_crosscheck: id=<...> action=<respected|overridden|downgraded|skipped>` line to stderr per candidate for `trace.md`.
+
+### 13.12 Detection parallelization (Phase 1 + Phase 1.5)
+
+On `--ensemble` runs, Phase 1 (six internal lens `Agent` dispatches) and Phase 1.5 (CodeRabbit CLI + Codex CLI + PR bot-comment scrape + Sonnet normalizer) have no data dependency — Phase 2 (dedup) is the first cross-phase consumer. Serial ordering costs 30–50% of detection wall-clock on ensemble runs. This section normalizes the parallel pattern so both phases fan out from a single orchestrator turn. The pipeline remains two logical phases (for schema, logging, and audit attribution); only their wall-clock windows overlap.
+
+**Invariants:**
+
+1. **Single dispatch turn.** When `ensemble_mode == true`, the orchestrator's dispatch turn contains the applicable lens `Agent` tool-use blocks, the CodeRabbit + Codex background `Bash` launches, and the foreground PR-scrape `Bash` call. Waiting a turn between blocks serializes them and negates the entire parallelism gain. Non-ensemble runs fire the lens `Agent` blocks alone in one turn (unchanged from pre-§13.12 behavior).
+2. **No IDs during collection.** Both phases accumulate their candidate arrays into orchestrator-context pools (`internal_candidates`, `external_candidates`) with no `id` field set. Partial `--add-finding` writes during collection would race the finding-id counter and produce schema-rejection errors for duplicate ids.
+3. **Single join point.** After every lens and the Sonnet normalizer have resolved, one step assigns `F001…F0NN` across the pooled set via the `assign-finding-ids.sh` helper (deterministic sort by source: L1, L2, L3, L4, L5, L6, external-pr, codex, coderabbit; stable within source). One `--add-finding` sweep then commits the full pool.
+4. **Pre-dispatch readiness gate.** The ensemble CLI readiness check (CodeRabbit version + auth, Codex companion + ready) runs BEFORE either phase dispatches — in the Phase 1 fragment, not the Phase 1.5 fragment. `AskUserQuestion` on missing CLIs surfaces ahead of any lens token spend, so "stop so I can set them up first" is a zero-token exit.
+5. **Non-ensemble short-circuit.** `ensemble_mode == false` skips the readiness gate, the CLI launches, and the normalizer. The join step iterates the internal-only pool. Observable behavior matches pre-§13.12 exactly.
+
+**Token accounting.** Unchanged from §11 — each lens and the normalizer are logged per-agent under their owning phase (`phase_1` for lenses, `phase_1_5` for the normalizer). External CLIs remain untracked per §11's existing carve-out. Parallel dispatch changes wall-clock, not token spend.
+
+**phases.jsonl semantics.** Each phase still logs its own record with its own `elapsed_sec`. Phase 1 elapsed is measured from the dispatch-turn start to the last lens result returning. Phase 1.5 elapsed is measured from the same dispatch-turn start (`phase_1_5_start_epoch` is captured in the readiness gate, immediately before the dispatch turn) to the normalizer result returning. Under parallel dispatch, the `ts` timestamps on the two phase records overlap — that's what makes concurrency observable in the log. `elapsed_sec` reflects each phase's own longest path, so typically `phase_1_5.elapsed_sec ≥ phase_1.elapsed_sec` (the normalizer tails after the last lens), approaching `max(internal, external)` overall rather than the pre-§13.12 `phase_1 + phase_1_5`.
+
+**UX note on readiness gate placement.** Hoisting the gate ahead of dispatch means a user invoking `/adams-review --ensemble` sees the "CodeRabbit/Codex missing" prompt promptly after Phase 0 completes, not after Phase 1 has already run. This is the intentional direction of the change: zero wasted token spend on "stop to set up" exits. The tradeoff is a user-visible prompt that may feel early if they're expecting the command to plow ahead — acceptable for a user-authorization surface.
+
+**Implementation pointer.** Readiness gate lives in `01-detection.md` step 1.2a. Joint dispatch is documented in `01-detection.md` step 1.3 with launch specs referenced from `02-ensemble-adapter.md`. Join + ID assignment lives at `01-detection.md` step 1.5 and calls `assign-finding-ids.sh`. Non-ensemble short-circuits are handled per-step with `ensemble_mode` guards.
 
 ---
 
