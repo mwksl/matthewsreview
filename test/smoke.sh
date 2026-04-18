@@ -1077,6 +1077,95 @@ else
     fail "RH-7: pre-§13.10 artifact should not render freshness; saw: $(echo "$md" | grep 'Base freshness')"
 fi
 
+# ------------------------------------------------------------------ Stage 2.7
+# assign-finding-ids.sh (§13.12) — deterministic source-priority sort +
+# monotonic F### assignment over pooled internal + external candidates.
+# Stage 2.7 hoists id assignment to a single join point after Phase 1 +
+# Phase 1.5 dispatch so the two phases can fan out concurrently without
+# racing a shared id counter.
+
+AI_TOOL="$TOOLS/assign-finding-ids.sh"
+
+# Assertion AI-1: internal-only pool — 3 L1 + 2 L2 + 1 L3. Expect
+# F001..F006 in source-priority order (L1 → L2 → L3) with input order
+# preserved within each source bucket.
+in='[{"sources":["L1-diff-local"],"file":"a.ts"},{"sources":["L1-diff-local"],"file":"b.ts"},{"sources":["L1-diff-local"],"file":"c.ts"},{"sources":["L2-structural"],"file":"d.ts"},{"sources":["L2-structural"],"file":"e.ts"},{"sources":["L3-claude-md"],"file":"f.ts"}]'
+out=$(echo "$in" | "$AI_TOOL")
+line=$(echo "$out" | jq -r '[.[] | "\(.id):\(.sources[0]):\(.file)"] | join(",")')
+expected="F001:L1-diff-local:a.ts,F002:L1-diff-local:b.ts,F003:L1-diff-local:c.ts,F004:L2-structural:d.ts,F005:L2-structural:e.ts,F006:L3-claude-md:f.ts"
+if [[ "$line" == "$expected" ]]; then
+    pass "AI-1 (§13.12): internal-only pool assigns F001..F006 in L1→L2→L3 source order"
+else
+    fail "AI-1: expected '$expected', got '$line'"
+fi
+
+# Assertion AI-2: ensemble-mixed pool — 1 L1 + 1 L6 + 1 external-pr +
+# 1 codex + 1 coderabbit. Expect L1 → L6 → external-pr → codex → coderabbit.
+in='[{"sources":["L1-diff-local"],"file":"a.ts"},{"sources":["L6-security"],"file":"b.ts"},{"sources":["external-pr:greptile[bot]"],"file":"c.ts"},{"sources":["codex"],"file":"d.ts"},{"sources":["coderabbit"],"file":"e.ts"}]'
+out=$(echo "$in" | "$AI_TOOL")
+line=$(echo "$out" | jq -r '[.[] | "\(.id):\(.sources[0])"] | join(",")')
+expected="F001:L1-diff-local,F002:L6-security,F003:external-pr:greptile[bot],F004:codex,F005:coderabbit"
+if [[ "$line" == "$expected" ]]; then
+    pass "AI-2 (§13.12): ensemble-mixed pool orders L1 → L6 → external-pr → codex → coderabbit"
+else
+    fail "AI-2: expected '$expected', got '$line'"
+fi
+
+# Assertion AI-3: stable within source. 4 L1 candidates in input order
+# A,B,C,D should emerge in the same order — jq sort_by is stable and
+# our secondary key on input index preserves it across identical priorities.
+in='[{"sources":["L1-diff-local"],"file":"A"},{"sources":["L1-diff-local"],"file":"B"},{"sources":["L1-diff-local"],"file":"C"},{"sources":["L1-diff-local"],"file":"D"}]'
+out=$(echo "$in" | "$AI_TOOL")
+line=$(echo "$out" | jq -r '[.[] | "\(.id):\(.file)"] | join(",")')
+expected="F001:A,F002:B,F003:C,F004:D"
+if [[ "$line" == "$expected" ]]; then
+    pass "AI-3 (§13.12): same-source candidates preserve input order (stable sort)"
+else
+    fail "AI-3: expected '$expected', got '$line'"
+fi
+
+# Assertion AI-4: empty pool. `[]` in, `[]` out, exit 0. Non-ensemble
+# runs with zero Phase 1 findings exercise this path.
+out=$(echo '[]' | "$AI_TOOL"); code=$?
+if [[ "$code" == "0" && "$out" == "[]" ]]; then
+    pass "AI-4 (§13.12): empty pool returns '[]' with exit 0"
+else
+    fail "AI-4: expected empty-array passthrough; got code=$code out='$out'"
+fi
+
+# Assertion AI-5: malformed stdin → exit 1 with error-as-prompt.
+stderr=$(echo 'not-json' | "$AI_TOOL" 2>&1 >/dev/null); code=$?
+if [[ "$code" == "1" ]] \
+    && echo "$stderr" | grep -q "not a JSON array" \
+    && echo "$stderr" | grep -q "Did you mean" \
+    && echo "$stderr" | grep -q "Action:"; then
+    pass "AI-5 (§13.12): malformed stdin rejected with exit 1 + error-as-prompt"
+else
+    fail "AI-5: expected exit 1 + full error-as-prompt; got code=$code stderr='$stderr'"
+fi
+
+# Assertion AI-6: non-array stdin (JSON object) → same error path.
+stderr=$(echo '{}' | "$AI_TOOL" 2>&1 >/dev/null); code=$?
+if [[ "$code" == "1" ]] && echo "$stderr" | grep -q "not a JSON array"; then
+    pass "AI-6 (§13.12): non-array JSON stdin rejected with exit 1"
+else
+    fail "AI-6: expected exit 1 for non-array JSON; got code=$code stderr='$stderr'"
+fi
+
+# Assertion AI-7: unknown source falls to priority 99 (sorted last) but
+# still gets an id. Forward-compat for future source-family additions
+# (e.g. a hypothetical 'semgrep' CLI reviewer) that ship before the
+# helper is updated — the id assignment must not drop the candidate.
+in='[{"sources":["mystery-source"],"file":"unknown.ts"},{"sources":["L1-diff-local"],"file":"known.ts"}]'
+out=$(echo "$in" | "$AI_TOOL")
+line=$(echo "$out" | jq -r '[.[] | "\(.id):\(.sources[0]):\(.file)"] | join(",")')
+expected="F001:L1-diff-local:known.ts,F002:mystery-source:unknown.ts"
+if [[ "$line" == "$expected" ]]; then
+    pass "AI-7 (§13.12): unknown source falls to priority 99 (sorted last), id still assigned"
+else
+    fail "AI-7: expected '$expected', got '$line'"
+fi
+
 echo
 echo "smoke: PASS ($N assertions)"
 exit 0
