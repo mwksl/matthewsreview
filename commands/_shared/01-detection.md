@@ -72,16 +72,6 @@ and continue to step 1.3.
 
 **When `ensemble_mode == true`:**
 
-Capture `phase_1_5_start_epoch`:
-
-```bash
-phase_1_5_start_epoch=$(date +%s)
-```
-
-Phase 1.5's elapsed clock starts here — immediately before dispatch —
-so `phase_1_5.elapsed_sec` at 02-ensemble-adapter.md step 1.5.7
-reflects the wall-clock from dispatch to normalizer return.
-
 Create the scratch directory for CLI outputs (DESIGN §9.3 keeps
 `$review_dir` free of transient noise):
 
@@ -141,6 +131,21 @@ of project conventions. Return a structured list of findings with file, line
 range, and concrete description for each.
 PROMPT
 ```
+
+**Finally, capture `phase_1_5_start_epoch`** — AFTER the
+`AskUserQuestion` may have run (so user-response wait time isn't
+billed into Phase 1.5's elapsed), immediately before handing off to
+step 1.3's dispatch turn:
+
+```bash
+phase_1_5_start_epoch=$(date +%s)
+```
+
+This epoch is what 02-ensemble-adapter.md step 1.5.7 subtracts to
+compute `phase_1_5_elapsed`. Placing it here mirrors Phase 1's
+`phase_1_start_epoch` capture at the top of step 1.3 — both clocks
+start at the same turn boundary, so under §13.12 parallel dispatch
+the two `elapsed_sec` values naturally overlap in `phases.jsonl`.
 
 ### 1.3. Dispatch the lenses (one turn, one Agent call per applicable lens)
 
