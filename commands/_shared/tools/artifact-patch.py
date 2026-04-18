@@ -9,6 +9,15 @@ Modes (CLI flags; mutually exclusive):
   --init <seed>             create fresh artifact at --path
   --add-finding <finding>   append a new finding to findings[]
   --delete-finding FXXX     remove a finding by id (used by Phase 2 dedup)
+  --apply-decisions <array> apply a batch of Phase-4 decision tuples in one
+                            call (DESIGN §13.1, §21.2; Stage 2.5.B). Input
+                            is a JSON array of {id, score_phase4, decision,
+                            actionability, validation_result?, reason?,
+                            confirmed_strength?, related_parent_finding_id?}.
+                            The helper derives disposition per §13.1 and
+                            writes validation_result only for confirmed-band
+                            tuples. Per-tuple atomic write + halt on first
+                            failure (preceding tuples stay committed).
   --set field=value         mutate a scalar field (repeatable). With
                             --finding-id, targets a finding; without,
                             targets top-level artifact fields.
@@ -170,7 +179,7 @@ def _load_or_fail(path):
         sys.exit(c.EXIT_VALIDATION)
 
 
-def _write_and_emit(path, artifact, dry_run=False, before=None):
+def _write_and_emit(path, artifact, dry_run=False, before=None, silent=False):
     """Common write tail: bump generated_at, validate, then either write or print a diff.
 
     With dry_run=True:
@@ -180,7 +189,9 @@ def _write_and_emit(path, artifact, dry_run=False, before=None):
     With dry_run=False:
       - Invalid result: exit EXIT_VALIDATION (1) (post-patch invariant break
         shouldn't normally happen if the mode's pre-checks are correct).
-      - Valid result: atomic tmp+rename, log "wrote <path>" to stdout.
+      - Valid result: atomic tmp+rename, log "wrote <path>" to stdout unless
+        silent=True (used by --apply-decisions batch loop so the orchestrator
+        sees one summary line, not N per-tuple lines).
     """
     artifact["generated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     errors = c.validate(artifact)
@@ -217,7 +228,8 @@ def _write_and_emit(path, artifact, dry_run=False, before=None):
         return c.EXIT_OK
 
     c.atomic_write(path, artifact)
-    print(f"wrote {path}")
+    if not silent:
+        print(f"wrote {path}")
     return c.EXIT_OK
 
 
@@ -541,6 +553,214 @@ def cmd_delete_finding(args):
     return _write_and_emit(args.path, artifact, dry_run=args.dry_run, before=before)
 
 
+# ----- --apply-decisions: Phase-4 batch application (DESIGN §13.1, §21.2) ---
+#
+# Input is a JSON array of decision tuples. Each tuple has one finding's Phase-4
+# outcome: score_phase4 (number or null), optional decision/actionability,
+# optional validation_result (written only for confirmed-band dispositions),
+# optional reason / confirmed_strength / related_parent_finding_id.
+#
+# Derivation table (§13.1 Phase 4):
+#   score_phase4 == null → disposition=uncertain (parse-failure fallback,
+#                          see 05-validation step 4.4 prose)
+#   score_phase4 < 45    → disposition=disproven
+#   score_phase4 45-59   → disposition=uncertain
+#   score_phase4 >= 60   → needs actionability:
+#                            auto_fixable → confirmed_auto
+#                            manual       → confirmed_manual
+#                            report_only  → confirmed_report
+#                          confirmed_strength: moderate (60-74) / strong (75+)
+#
+# The score-wins-over-decision rule from 05-validation applies implicitly:
+# we derive disposition from score + actionability, ignoring the tuple's
+# `decision` field (which exists so the JSON is auditable but isn't
+# authoritative). A validator returning decision=disproven, score=70 with
+# actionability=auto_fixable routes to confirmed_auto.
+#
+# per-tuple atomic writes + first-failure-halts (plan §5.2): if tuple N
+# is invalid, tuples 0..N-1 have been written to disk; caller re-invokes
+# with the remainder.
+
+ALLOWED_DECISION_TUPLE_KEYS = frozenset({
+    "id",
+    "score_phase4",
+    "decision",                    # audit-only; derivation uses score + actionability
+    "actionability",
+    "validation_result",
+    "reason",
+    "confirmed_strength",          # tuple override for the derived strength
+    "related_parent_finding_id",
+})
+
+CONFIRMED_BAND = frozenset({"confirmed_auto", "confirmed_manual", "confirmed_report"})
+
+_ACTIONABILITY_TO_DISPOSITION = {
+    "auto_fixable": "confirmed_auto",
+    "manual": "confirmed_manual",
+    "report_only": "confirmed_report",
+}
+
+
+def _derive_phase4_disposition(tup, idx):
+    """Derive {disposition, confirmed_strength} per DESIGN §13.1 Phase 4.
+
+    On invalid input (bad score type, missing actionability for confirmed
+    band, unknown actionability), emits error-as-prompt and sys.exits with
+    EXIT_VALIDATION — caller's batch loop halts there.
+    """
+    fid = tup.get("id") or f"tuple #{idx}"
+    score = tup.get("score_phase4")
+
+    if score is None:
+        return {"disposition": "uncertain", "confirmed_strength": None}
+
+    if not isinstance(score, (int, float)) or isinstance(score, bool):
+        c.err_prompt(
+            f"--apply-decisions tuple #{idx} ({fid}): score_phase4 must be number or null, got {type(score).__name__}",
+            action="pass score_phase4 as an integer 0-100 or null (for parse-failure fallback)."
+        )
+        sys.exit(c.EXIT_VALIDATION)
+
+    if score < 45:
+        return {"disposition": "disproven", "confirmed_strength": None}
+    if score < 60:
+        return {"disposition": "uncertain", "confirmed_strength": None}
+
+    # Confirmed band — needs actionability.
+    actionability = tup.get("actionability")
+    if actionability is None:
+        c.err_prompt(
+            f"--apply-decisions tuple #{idx} ({fid}): score_phase4={score} is in the confirmed band (>=60) but no actionability provided",
+            valid_values=sorted(_ACTIONABILITY_TO_DISPOSITION.keys()),
+            action="add actionability to the tuple (auto_fixable/manual/report_only); the validator owns that classification."
+        )
+        sys.exit(c.EXIT_VALIDATION)
+    if actionability not in _ACTIONABILITY_TO_DISPOSITION:
+        c.err_prompt(
+            f"--apply-decisions tuple #{idx} ({fid}): unknown actionability '{actionability}'",
+            valid_values=sorted(_ACTIONABILITY_TO_DISPOSITION.keys()),
+            did_you_mean=c.suggest(actionability, _ACTIONABILITY_TO_DISPOSITION.keys()),
+            action="see DESIGN §5.2 / schema-v1.json for the actionability enum."
+        )
+        sys.exit(c.EXIT_VALIDATION)
+
+    return {
+        "disposition": _ACTIONABILITY_TO_DISPOSITION[actionability],
+        "confirmed_strength": "strong" if score >= 75 else "moderate",
+    }
+
+
+def cmd_apply_decisions(args):
+    """Apply a batch of Phase-4 decision tuples (§13.1, §21.2; Stage 2.5.B)."""
+    decisions = read_json_arg(args.apply_decisions, "--apply-decisions")
+
+    if not isinstance(decisions, list):
+        c.err_prompt(
+            f"--apply-decisions expects a JSON array, got {type(decisions).__name__}",
+            action="pass an array of decision tuples; see artifact-patch.py docstring for the shape."
+        )
+        return c.EXIT_USAGE
+
+    counts = {"confirmed_auto": 0, "confirmed_manual": 0, "confirmed_report": 0,
+              "uncertain": 0, "disproven": 0}
+
+    for idx, tup in enumerate(decisions):
+        if not isinstance(tup, dict):
+            c.err_prompt(
+                f"--apply-decisions tuple #{idx}: must be a JSON object, got {type(tup).__name__}",
+                action="each array element is {id, score_phase4, ...}; see the docstring."
+            )
+            return c.EXIT_VALIDATION
+
+        fid = tup.get("id")
+        if not fid:
+            c.err_prompt(
+                f"--apply-decisions tuple #{idx}: 'id' is required",
+                action="every tuple must name the finding it applies to."
+            )
+            return c.EXIT_VALIDATION
+
+        bad_keys = [k for k in tup.keys() if k not in ALLOWED_DECISION_TUPLE_KEYS]
+        if bad_keys:
+            c.err_prompt(
+                f"--apply-decisions tuple #{idx} ({fid}): unknown keys {sorted(bad_keys)}",
+                valid_values=sorted(ALLOWED_DECISION_TUPLE_KEYS),
+                action="remove unknown keys; disposition/is_actionable are derived by the helper, not supplied."
+            )
+            return c.EXIT_VALIDATION
+
+        derived = _derive_phase4_disposition(tup, idx)
+
+        # Load fresh per-tuple so preceding tuples' writes are visible on the
+        # next iteration's base state. Matches the "per-tuple atomic writes"
+        # semantics documented in the plan (Stage 2.5.B §5.2).
+        artifact = _load_or_fail(args.path)
+        finding = _find_finding(artifact, fid)
+
+        # Build --set pairs. _apply_finding_set handles the is_actionable
+        # derivation and the current_state↔disposition coupling checks for us.
+        set_pairs = [("disposition", derived["disposition"])]
+        if "score_phase4" in tup:
+            set_pairs.append(("score_phase4", tup["score_phase4"]))
+        # actionability: write only when non-null — schema requires a concrete
+        # enum value. A tuple passing `actionability: null` (valid for
+        # disproven/uncertain where it's not needed) leaves the finding's
+        # Phase-1-assigned actionability in place.
+        if tup.get("actionability") is not None:
+            set_pairs.append(("actionability", tup["actionability"]))
+
+        # confirmed_strength: tuple override beats derived. `null` from the
+        # tuple counts as an explicit override (e.g., downgrading from a
+        # prior-phase classification); use a sentinel check.
+        if "confirmed_strength" in tup:
+            set_pairs.append(("confirmed_strength", tup["confirmed_strength"]))
+        else:
+            set_pairs.append(("confirmed_strength", derived["confirmed_strength"]))
+
+        # reason: if the tuple provides one use it, else fill a disposition-
+        # appropriate default. Matches the prose in 05-validation step 4.4.
+        if "reason" in tup:
+            set_pairs.append(("reason", tup["reason"]))
+        else:
+            default_reason = {
+                "disproven": "disproven by Phase 4",
+                "uncertain": "uncertain (Phase 4 inconclusive)",
+            }.get(derived["disposition"])  # None for confirmed band, which is correct
+            set_pairs.append(("reason", default_reason))
+
+        if "related_parent_finding_id" in tup:
+            set_pairs.append(("related_parent_finding_id", tup["related_parent_finding_id"]))
+
+        _apply_finding_set(finding, set_pairs)
+
+        # validation_result: write only when the resolved disposition lands in
+        # the confirmed band. Schema requires nested non-null for the stored
+        # object, and disproven/uncertain validators don't produce the
+        # fix_proposal / verification_context sections.
+        vr = tup.get("validation_result")
+        if vr is not None and derived["disposition"] in CONFIRMED_BAND:
+            _apply_finding_set_json(finding, [("validation_result", vr)])
+
+        rc = _write_and_emit(args.path, artifact, silent=True)
+        if rc != c.EXIT_OK:
+            # _write_and_emit already emitted an error-as-prompt for invalid
+            # post-patch state. Halt the batch; preceding tuples persisted.
+            return rc
+
+        counts[derived["disposition"]] += 1
+
+    total = sum(counts.values())
+    print(
+        f"applied {total} decisions "
+        f"(confirmed_auto={counts['confirmed_auto']}, "
+        f"confirmed_manual={counts['confirmed_manual']}, "
+        f"confirmed_report={counts['confirmed_report']}, "
+        f"uncertain={counts['uncertain']}, "
+        f"disproven={counts['disproven']})"
+    )
+    return c.EXIT_OK
+
+
 def cmd_set_and_or_append(args):
     """Combined --set / --set-json / --append-fix-attempt (DESIGN §26).
 
@@ -648,6 +868,12 @@ def build_parser():
         metavar="FXXX",
         help="remove a finding by id (used by Phase 2 dedup)"
     )
+    mode.add_argument(
+        "--apply-decisions",
+        dest="apply_decisions",
+        metavar="DECISIONS_JSON",
+        help="apply a batch of Phase-4 decision tuples (inline JSON array, @file, or -); see docstring"
+    )
     return p
 
 
@@ -668,6 +894,12 @@ def main():
             if args.set or args.set_json or args.append_fix_attempt:
                 parser.error("--delete-finding cannot combine with --set / --set-json / --append-fix-attempt")
             return cmd_delete_finding(args)
+        if args.apply_decisions is not None:
+            if args.set or args.set_json or args.append_fix_attempt or args.finding_id:
+                parser.error("--apply-decisions cannot combine with --set / --set-json / --append-fix-attempt / --finding-id (tuples carry their own finding ids)")
+            if args.dry_run:
+                parser.error("--apply-decisions does not currently support --dry-run (batches write per tuple; run on a throwaway path or validate tuples upstream)")
+            return cmd_apply_decisions(args)
         if args.set or args.set_json or args.append_fix_attempt is not None:
             return cmd_set_and_or_append(args)
     except SystemExit:
@@ -680,7 +912,7 @@ def main():
         traceback.print_exc(file=sys.stderr)
         return c.EXIT_UNEXPECTED
 
-    parser.error("no mode selected (use --init, --add-finding, --delete-finding, --set, --set-json, or --append-fix-attempt)")
+    parser.error("no mode selected (use --init, --add-finding, --delete-finding, --apply-decisions, --set, --set-json, or --append-fix-attempt)")
 
 
 if __name__ == "__main__":

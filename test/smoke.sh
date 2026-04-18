@@ -571,6 +571,105 @@ else
     fail "V: schema should reject uppercase pr_state; code=$code stderr=$stderr"
 fi
 
+# W. --apply-decisions: mixed batch routes via §13.1 and writes validation_result
+# only for the confirmed band (Stage 2.5.B). Build a seed with 3 findings in
+# pending_validation, run one --apply-decisions call with a confirmed_auto +
+# uncertain + disproven tuple set, and check each finding's post-state.
+APPLY_DIR="$WORK/apply-decisions"
+mkdir -p "$APPLY_DIR"
+
+PV_SEED=$(jq '.review_id = "rev_applydecisions" | .findings = [
+  {"id":"F101","sources":["L1-diff-local"],"source_families":["structural-family"],
+   "impact_type":"correctness","origin":"introduced_by_pr","origin_confidence":"high",
+   "actionability":"auto_fixable","validation_lane":"deep",
+   "current_state":"open","disposition":"pending_validation","is_actionable":false,
+   "reason":null,"confirmed_strength":null,
+   "file":"src/a.ts","line_range":[10,20],"claim":"confirmed-band candidate",
+   "score_phase3":55,"score_phase4":null,
+   "score_history":[{"phase":"phase_3","score":55}],
+   "validation_result":null,"fix_attempts":[],
+   "introduced_in_sha":null,"suggested_follow_up":null,"related_parent_finding_id":null},
+  {"id":"F102","sources":["L2-structural"],"source_families":["structural-family"],
+   "impact_type":"correctness","origin":"introduced_by_pr","origin_confidence":"medium",
+   "actionability":"auto_fixable","validation_lane":"deep",
+   "current_state":"open","disposition":"pending_validation","is_actionable":false,
+   "reason":null,"confirmed_strength":null,
+   "file":"src/b.ts","line_range":[30,40],"claim":"uncertain-band candidate",
+   "score_phase3":50,"score_phase4":null,
+   "score_history":[{"phase":"phase_3","score":50}],
+   "validation_result":null,"fix_attempts":[],
+   "introduced_in_sha":null,"suggested_follow_up":null,"related_parent_finding_id":null},
+  {"id":"F103","sources":["L3-claude-md"],"source_families":["code-review"],
+   "impact_type":"policy","origin":"introduced_by_pr","origin_confidence":"low",
+   "actionability":"manual","validation_lane":"light",
+   "current_state":"open","disposition":"pending_validation","is_actionable":false,
+   "reason":null,"confirmed_strength":null,
+   "file":"src/c.ts","line_range":[1,5],"claim":"disproven-band candidate",
+   "score_phase3":45,"score_phase4":null,
+   "score_history":[{"phase":"phase_3","score":45}],
+   "validation_result":null,"fix_attempts":[],
+   "introduced_in_sha":null,"suggested_follow_up":null,"related_parent_finding_id":null}
+]' "$FIX/artifact-seed.json")
+
+"$TOOLS/artifact-patch.py" --init "$PV_SEED" --path "$APPLY_DIR/art.json" >/dev/null
+
+VR_JSON='{
+  "evidence":["src/a.ts:12 calls .user.id without null check"],
+  "blast_radius":{"writers":["src/a.ts:12"],"consumers":["src/b.ts:40"],
+                  "parallel_paths":[],"invariants_at_stake":["user non-null after login"]},
+  "fix_proposal":{"approach":"guard before deref",
+    "files_to_modify":[{"file":"src/a.ts","what":"add null check","why":"prevents crash"}]},
+  "verification_context":{"how_to_verify_fix":["run unit tests"],
+                          "edge_cases_to_preserve":["guest auth flow"],
+                          "what_would_break_if_incomplete":["crash on cold cache"]}
+}'
+
+BATCH=$(jq -n --argjson vr "$VR_JSON" '[
+  {id:"F101",score_phase4:80,decision:"confirmed",actionability:"auto_fixable",validation_result:$vr},
+  {id:"F102",score_phase4:50,decision:"uncertain",actionability:null},
+  {id:"F103",score_phase4:30,decision:"disproven",actionability:null,reason:"Phase 4: not reproducible"}
+]')
+
+out=$("$TOOLS/artifact-patch.py" --apply-decisions "$BATCH" --path "$APPLY_DIR/art.json" 2>&1); code=$?
+
+F101_DISP=$(jq -r '.findings[] | select(.id=="F101") | .disposition' "$APPLY_DIR/art.json")
+F101_IA=$(jq -r '.findings[] | select(.id=="F101") | .is_actionable' "$APPLY_DIR/art.json")
+F101_CS=$(jq -r '.findings[] | select(.id=="F101") | .confirmed_strength' "$APPLY_DIR/art.json")
+F101_VR=$(jq -r '.findings[] | select(.id=="F101") | if .validation_result == null then "null" else "object" end' "$APPLY_DIR/art.json")
+F102_DISP=$(jq -r '.findings[] | select(.id=="F102") | .disposition' "$APPLY_DIR/art.json")
+F102_VR=$(jq -r '.findings[] | select(.id=="F102") | .validation_result' "$APPLY_DIR/art.json")
+F103_DISP=$(jq -r '.findings[] | select(.id=="F103") | .disposition' "$APPLY_DIR/art.json")
+F103_VR=$(jq -r '.findings[] | select(.id=="F103") | .validation_result' "$APPLY_DIR/art.json")
+F103_REASON=$(jq -r '.findings[] | select(.id=="F103") | .reason' "$APPLY_DIR/art.json")
+
+if [[ "$code" == "0" ]] \
+    && [[ "$F101_DISP" == "confirmed_auto" && "$F101_IA" == "true" && "$F101_CS" == "strong" && "$F101_VR" == "object" ]] \
+    && [[ "$F102_DISP" == "uncertain" && "$F102_VR" == "null" ]] \
+    && [[ "$F103_DISP" == "disproven" && "$F103_VR" == "null" && "$F103_REASON" == "Phase 4: not reproducible" ]] \
+    && echo "$out" | grep -q "applied 3 decisions"; then
+    pass "W: --apply-decisions batch routes per §13.1; validation_result only for confirmed band (Stage 2.5.B)"
+else
+    fail "W: apply-decisions state mismatch" "code=$code F101=($F101_DISP,$F101_IA,$F101_CS,$F101_VR) F102=($F102_DISP,$F102_VR) F103=($F103_DISP,$F103_VR,$F103_REASON) out=$out"
+fi
+
+# X. --apply-decisions rejects a confirmed-band tuple that omits actionability.
+# Error-as-prompt names the failing tuple id so the caller can re-invoke with
+# the remainder. Reset state first: re-init so the earlier W writes don't
+# color this assertion's "nothing changed" guarantee.
+"$TOOLS/artifact-patch.py" --init "$PV_SEED" --path "$APPLY_DIR/art.json" >/dev/null
+BEFORE_SHA=$(sha_of "$APPLY_DIR/art.json")
+BAD_BATCH='[{"id":"F101","score_phase4":70}]'
+stderr=$("$TOOLS/artifact-patch.py" --apply-decisions "$BAD_BATCH" --path "$APPLY_DIR/art.json" 2>&1 >/dev/null); code=$?
+AFTER_SHA=$(sha_of "$APPLY_DIR/art.json")
+if [[ "$code" == "1" ]] \
+    && echo "$stderr" | grep -q "F101" \
+    && echo "$stderr" | grep -q "actionability" \
+    && [[ "$BEFORE_SHA" == "$AFTER_SHA" ]]; then
+    pass "X: --apply-decisions rejects confirmed-band tuple without actionability; leaves artifact unchanged"
+else
+    fail "X: expected EXIT_VALIDATION + stderr naming F101+actionability + unchanged file; code=$code sha_eq=$([[ "$BEFORE_SHA" == "$AFTER_SHA" ]] && echo Y || echo N) stderr=$stderr"
+fi
+
 echo
 echo "smoke: PASS ($N assertions)"
 exit 0
