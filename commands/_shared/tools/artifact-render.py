@@ -1,0 +1,455 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["jsonschema"]
+# ///
+"""artifact-render.py — JSON artifact → Markdown report (DESIGN §7, §21.6).
+
+Section selectors filter on `disposition` (§5.2.1), so report counts
+are deterministic derivations from the same machine-readable field
+Phase 8 eligibility uses. The first line of the output is the stable
+HTML-comment marker so artifact-publish.sh can locate prior PR
+comments regardless of review_id (§13.4).
+
+Usage:
+  artifact-render.py --input <artifact.json> [--output <artifact.md>]
+
+If --output is omitted, Markdown goes to stdout.
+"""
+
+import argparse
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+import _common as c  # noqa: E402
+
+
+MARKER = "<!-- adams-review-v1 -->"
+
+# Disposition → (section ordering key, human label, glyph).
+SECTION_LABEL = {
+    "confirmed_auto": ("01", "Auto-fixable", "✓"),
+    "confirmed_manual": ("02", "Requires manual attention", "⚠"),
+    "uncertain": ("03", "Uncertain", "ℹ"),
+    "confirmed_report": ("04", "Confirmed — informational", "ℹ"),
+    "pre_existing_report": ("05", "Pre-existing — report-only", "ℹ"),
+    "partial": ("06", "Partially fixed (retry-eligible)", "⚠"),
+    "regression": ("07", "Regression (reverted; retry-eligible)", "✗"),
+    "resolved": ("08", "Resolved", "✓"),
+}
+
+DEEP_AUTO_FIX_DISPOSITIONS = ("confirmed_auto", "partial", "regression", "resolved")
+
+
+# ----- Helpers ----------------------------------------------------------
+
+def findings_by_disposition(artifact):
+    buckets = defaultdict(list)
+    for f in artifact.get("findings", []):
+        buckets[f.get("disposition")].append(f)
+    return buckets
+
+
+def format_line_range(lr):
+    if not lr:
+        return ""
+    if len(lr) == 2 and lr[0] == lr[1]:
+        return f":{lr[0]}"
+    if len(lr) == 2:
+        return f":{lr[0]}-{lr[1]}"
+    return ""
+
+
+def file_link(finding):
+    return f"`{finding.get('file', '?')}{format_line_range(finding.get('line_range'))}`"
+
+
+def any_fix_attempts(artifact):
+    return any(f.get("fix_attempts") for f in artifact.get("findings", []))
+
+
+def latest_attempt(finding):
+    attempts = finding.get("fix_attempts") or []
+    return attempts[-1] if attempts else None
+
+
+def status_cell(finding):
+    """Return the post-fix Status column cell for a deep-auto finding."""
+    att = latest_attempt(finding)
+    if not att:
+        return ""
+    outcome = att.get("phase_9_outcome")
+    sha = att.get("output_sha")
+    sha_link = f"`{sha[:7]}`" if sha else "(no commit)"
+    if outcome == "verified":
+        return f"✓ verified ({sha_link})"
+    if outcome == "partial":
+        return f"⚠ partial ({sha_link})"
+    if outcome == "regression":
+        return f"✗ regression (reverted)"
+    if outcome is None:
+        return "—"
+    return str(outcome)
+
+
+def thousands(n):
+    try:
+        return f"{int(n):,}"
+    except (TypeError, ValueError):
+        return str(n)
+
+
+# ----- Section renderers ------------------------------------------------
+
+def render_header(artifact):
+    lines = []
+    head = artifact.get("head_branch", "?")
+    base = artifact.get("base_branch", "?")
+    lines.append("### Code review")
+    lines.append("")
+    lines.append(f"**Branch:** `{head}` → `{base}`")
+    if artifact.get("mode") == "pr" and artifact.get("pr_number"):
+        pr_state = artifact.get("pr_state")
+        suffix = f" ({pr_state})" if pr_state else ""
+        lines.append(f"**PR:** #{artifact['pr_number']}{suffix}")
+    else:
+        lines.append("**Mode:** local")
+    lines.append(f"**Review ID:** `{artifact.get('review_id', '?')}`")
+    if not any_fix_attempts(artifact):
+        lines.append("**Fix threshold:** not yet set (run `/adams-review-fix [threshold]` to apply fixes)")
+    tokens = artifact.get("subagent_tokens") or {}
+    total = tokens.get("total")
+    invs = tokens.get("invocations")
+    if total is not None and invs is not None:
+        lines.append(f"**Sub-agent tokens:** {thousands(total)} across {thousands(invs)} invocations")
+    if artifact.get("trivial_mode"):
+        lines.append("**Trivial mode:** on (downshifted pipeline per §13.9)")
+    return "\n".join(lines)
+
+
+def render_summary(buckets):
+    findings_count = sum(len(v) for v in buckets.values())
+    if findings_count == 0:
+        return "No findings."
+
+    deep = lambda k: [f for f in buckets.get(k, []) if f.get("validation_lane") == "deep"]
+    light = lambda k: [f for f in buckets.get(k, []) if f.get("validation_lane") == "light"]
+
+    deep_bits = []
+    for disp in ("confirmed_auto", "partial", "regression", "resolved",
+                 "confirmed_manual", "confirmed_report", "uncertain"):
+        n = len(deep(disp))
+        if n:
+            deep_bits.append(f"{n} {disp.replace('_', '-')}")
+
+    light_bits = []
+    for disp in ("confirmed_auto", "confirmed_manual", "confirmed_report"):
+        n = len(light(disp))
+        if n:
+            light_bits.append(f"{n} {disp.replace('_', '-')}")
+
+    pre_existing_n = len(buckets.get("pre_existing_report", []))
+
+    lines = [f"Found {findings_count} finding{'s' if findings_count != 1 else ''} across all lanes:"]
+    if deep_bits:
+        lines.append(f"- Deep lane (correctness/security): {', '.join(deep_bits)}")
+    if light_bits:
+        lines.append(f"- Light lane (ux/policy/architecture): {', '.join(light_bits)}")
+    if pre_existing_n:
+        lines.append(f"- Pre-existing (high-confidence origin, report-only): {pre_existing_n}")
+    return "\n".join(lines)
+
+
+def render_deep_auto(buckets, cross_cutting_groups):
+    rows = []
+    for disp in DEEP_AUTO_FIX_DISPOSITIONS:
+        for f in buckets.get(disp, []):
+            if f.get("validation_lane") == "deep":
+                rows.append(f)
+    # Sort by finding id so the table order is stable across dispositions
+    # (otherwise a partial F003 would appear before a resolved F001 just
+    # because the disposition order happens that way).
+    rows.sort(key=lambda f: f.get("id", ""))
+    if not rows:
+        return ""
+
+    show_status = any(f.get("fix_attempts") for f in rows)
+
+    lines = []
+    lines.append(f"### ✓ Auto-fixable ({len(rows)}) — `disposition: confirmed_auto | partial | regression | resolved`")
+    lines.append("")
+    if show_status:
+        lines.append("| # | Score | Impact | File | Issue | Status |")
+        lines.append("|---|-------|--------|------|-------|--------|")
+        for f in rows:
+            lines.append(
+                f"| {f.get('id')} | {f.get('score_phase4') or f.get('score_phase3') or ''} | "
+                f"{f.get('impact_type', '?')} | {file_link(f)} | {f.get('claim', '')} | "
+                f"{status_cell(f)} |"
+            )
+    else:
+        lines.append("| # | Score | Impact | File | Issue |")
+        lines.append("|---|-------|--------|------|-------|")
+        for f in rows:
+            lines.append(
+                f"| {f.get('id')} | {f.get('score_phase4') or f.get('score_phase3') or ''} | "
+                f"{f.get('impact_type', '?')} | {file_link(f)} | {f.get('claim', '')} |"
+            )
+
+    # Cross-cutting group callouts that include any of our rows.
+    row_ids = {f.get("id") for f in rows}
+    callouts = []
+    for g in cross_cutting_groups:
+        members_here = [fid for fid in g.get("finding_ids", []) if fid in row_ids]
+        if len(members_here) >= 2:
+            callouts.append(
+                f"**Cross-cutting group {g.get('id')}:** {' + '.join(members_here)} — {g.get('combined_approach', '')}"
+            )
+    if callouts:
+        lines.append("")
+        lines.extend(callouts)
+
+    # Details block; separate per-finding blocks with blank lines.
+    lines.append("")
+    lines.append("<details><summary>Details and fix proposals</summary>")
+    for detail in (_finding_detail(f) for f in rows):
+        lines.append("")
+        lines.append(detail)
+    lines.append("")
+    lines.append("</details>")
+
+    return "\n".join(lines)
+
+
+def _finding_detail(f):
+    lines = []
+    lines.append(f"#### {f.get('id')} — {f.get('claim', '')}")
+    lines.append("")
+    lines.append(f"**File:** {file_link(f)}")
+    score = f.get("score_phase4") or f.get("score_phase3")
+    strength = f.get("confirmed_strength")
+    score_line = f"**Score:** {score}" if score is not None else ""
+    if strength:
+        score_line = f"{score_line} ({strength})" if score_line else f"**Strength:** {strength}"
+    if score_line:
+        lines.append(score_line)
+    if f.get("reason"):
+        lines.append(f"**Reason:** {f['reason']}")
+
+    vr = f.get("validation_result") or {}
+    evidence = vr.get("evidence") or []
+    if evidence:
+        lines.append("")
+        lines.append("**Evidence:**")
+        for e in evidence:
+            lines.append(f"- {e}")
+
+    fp = vr.get("fix_proposal") or {}
+    if fp.get("approach"):
+        lines.append("")
+        lines.append(f"**Approach:** {fp['approach']}")
+    if fp.get("files_to_modify"):
+        lines.append("")
+        lines.append("**Files to modify:**")
+        for entry in fp["files_to_modify"]:
+            what = f" — {entry.get('what', '')}" if entry.get("what") else ""
+            why = f" (why: {entry['why']})" if entry.get("why") else ""
+            lines.append(f"- `{entry.get('file', '?')}`{what}{why}")
+
+    vc = vr.get("verification_context") or {}
+    verify = vc.get("how_to_verify_fix") or []
+    if verify:
+        lines.append("")
+        lines.append("**Verification:**")
+        for v in verify:
+            lines.append(f"- {v}")
+    edge = vc.get("edge_cases_to_preserve") or []
+    if edge:
+        lines.append("")
+        lines.append("**Edge cases to preserve:**")
+        for e in edge:
+            lines.append(f"- {e}")
+
+    # Last fix-attempt summary, if any.
+    att = latest_attempt(f)
+    if att:
+        lines.append("")
+        outcome = att.get("phase_9_outcome") or "(not classified)"
+        run_id = att.get("run_id", "?")
+        lines.append(f"**Latest fix attempt ({run_id}):** {outcome}")
+        if att.get("phase_9_finding"):
+            lines.append(f"- Phase 9 finding: {att['phase_9_finding']}")
+        rfp = att.get("revised_fix_proposal") or {}
+        if rfp.get("approach"):
+            lines.append(f"- Revised approach: {rfp['approach']}")
+
+    return "\n".join(lines)
+
+
+def render_deep_other(buckets, disposition):
+    rows = [f for f in buckets.get(disposition, []) if f.get("validation_lane") == "deep"]
+    if not rows:
+        return ""
+    _, label, glyph = SECTION_LABEL[disposition]
+    lines = [f"### {glyph} {label} ({len(rows)}) — `disposition: {disposition}`", ""]
+    if disposition == "confirmed_manual":
+        lines.append("| # | Score | Impact | File | Issue | Why manual |")
+        lines.append("|---|-------|--------|------|-------|-------------|")
+        for f in rows:
+            why = f.get("reason") or ""
+            lines.append(
+                f"| {f.get('id')} | {f.get('score_phase4') or ''} | {f.get('impact_type', '?')} | "
+                f"{file_link(f)} | {f.get('claim', '')} | {why} |"
+            )
+    else:  # uncertain, confirmed_report
+        lines.append("| # | Score | Impact | File | Issue |")
+        lines.append("|---|-------|--------|------|-------|")
+        for f in rows:
+            lines.append(
+                f"| {f.get('id')} | {f.get('score_phase4') or ''} | {f.get('impact_type', '?')} | "
+                f"{file_link(f)} | {f.get('claim', '')} |"
+            )
+    if disposition == "uncertain":
+        lines.append("")
+        lines.append("Phase 4 couldn't confirm decisively. Re-run `/adams-review` if you suspect this deserves")
+        lines.append("further investigation with fresh context.")
+    return "\n".join(lines)
+
+
+def render_light_lane(buckets):
+    rows = []
+    for disp in ("confirmed_auto", "confirmed_manual", "confirmed_report"):
+        for f in buckets.get(disp, []):
+            if f.get("validation_lane") == "light":
+                rows.append(f)
+    if not rows:
+        return ""
+    lines = ["## Light lane — ux, policy, architecture", ""]
+    lines.append("| # | Score | Impact | File | Finding | Disposition |")
+    lines.append("|---|-------|--------|------|---------|-------------|")
+    for f in rows:
+        lines.append(
+            f"| {f.get('id')} | {f.get('score_phase4') or ''} | {f.get('impact_type', '?')} | "
+            f"{file_link(f)} | {f.get('claim', '')} | {f.get('disposition', '')} |"
+        )
+    return "\n".join(lines)
+
+
+def render_pre_existing(buckets):
+    rows = buckets.get("pre_existing_report", [])
+    if not rows:
+        return ""
+    lines = [f"## Pre-existing — report-only ({len(rows)}) — `disposition: pre_existing_report`", ""]
+    lines.append("Shown only when `origin_confidence: high`. Never auto-fixed in v1 (§13.1 pre-existing override).")
+    lines.append("")
+    lines.append("| # | Score | File | Finding | Follow-up |")
+    lines.append("|---|-------|------|---------|-----------|")
+    for f in rows:
+        followup = f.get("suggested_follow_up") or ""
+        lines.append(
+            f"| {f.get('id')} | {f.get('score_phase4') or ''} | {file_link(f)} | "
+            f"{f.get('claim', '')} | {followup} |"
+        )
+    return "\n".join(lines)
+
+
+def render_fix_runs(artifact):
+    """Derive per-run summary by grouping finding.fix_attempts[] by run_id."""
+    runs = defaultdict(list)  # run_id -> list of (finding_id, attempt)
+    for f in artifact.get("findings", []):
+        for att in f.get("fix_attempts") or []:
+            runs[att.get("run_id")].append((f.get("id"), att))
+    if not runs:
+        return ""
+
+    lines = ["## Fix runs", ""]
+    for run_id, entries in sorted(runs.items(), key=lambda kv: (kv[1][0][1].get("timestamp") or "")):
+        outcomes = defaultdict(int)
+        shas = set()
+        for _, att in entries:
+            outcomes[att.get("phase_9_outcome") or "(no outcome)"] += 1
+            if att.get("output_sha"):
+                shas.add(att["output_sha"][:7])
+        ts = entries[0][1].get("timestamp", "")
+        sha_list = ", ".join(f"`{s}`" for s in sorted(shas)) if shas else "(no commit)"
+        parts = [f"{count} {outcome}" for outcome, count in outcomes.items()]
+        lines.append(f"- **{run_id}** ({ts}): {', '.join(parts)}. Commits: {sha_list}")
+    return "\n".join(lines)
+
+
+def render_footer(artifact):
+    return "🤖 Generated with Adam's Claude Code Review Command"
+
+
+# ----- Assembly ---------------------------------------------------------
+
+def render(artifact):
+    buckets = findings_by_disposition(artifact)
+    cross_cutting = artifact.get("cross_cutting_groups") or []
+
+    sections = [
+        MARKER,
+        render_header(artifact),
+        render_summary(buckets),
+        "---",
+        "## Deep lane — correctness & security" if any(
+            f.get("validation_lane") == "deep" for f in artifact.get("findings", [])
+        ) else "",
+        render_deep_auto(buckets, cross_cutting),
+        render_deep_other(buckets, "confirmed_manual"),
+        render_deep_other(buckets, "uncertain"),
+        render_deep_other(buckets, "confirmed_report"),
+        render_light_lane(buckets),
+        render_pre_existing(buckets),
+        render_fix_runs(artifact),
+        "---",
+        render_footer(artifact),
+    ]
+    # Collapse empty sections; separate non-empty ones with a blank line.
+    return "\n\n".join(s for s in sections if s) + "\n"
+
+
+# ----- CLI --------------------------------------------------------------
+
+def main():
+    p = argparse.ArgumentParser(
+        prog="artifact-render.py",
+        description="Render artifact.json -> artifact.md per DESIGN §7."
+    )
+    p.add_argument("--input", required=True, help="path to artifact.json")
+    p.add_argument("--output", help="path to artifact.md (stdout if omitted)")
+    args = p.parse_args()
+
+    try:
+        artifact = c.read_json(args.input)
+    except FileNotFoundError:
+        c.err_prompt(
+            f"artifact not found at {args.input}",
+            action="run artifact-patch.py --init first."
+        )
+        return c.EXIT_VALIDATION
+
+    errors = c.validate(artifact)
+    if errors:
+        shown = errors[:10]
+        overflow = [f"  (+{len(errors) - 10} more)"] if len(errors) > 10 else []
+        c.err_prompt(
+            f"input artifact is invalid ({len(errors)} schema violation(s))",
+            context=["  " + e for e in shown] + overflow,
+            action="fix the artifact, or re-run artifact-patch.py to regenerate."
+        )
+        return c.EXIT_VALIDATION
+
+    md = render(artifact)
+    if args.output:
+        Path(args.output).write_text(md)
+        print(f"wrote {args.output}")
+    else:
+        sys.stdout.write(md)
+    return c.EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())
