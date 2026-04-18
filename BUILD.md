@@ -8,15 +8,16 @@ If you are a Claude Code session starting fresh (after compaction or on a new da
 
 ## Current state
 
-**As of 2026-04-18 — Stage 3 COMPLETE.** `/adams-review-fix` now exists end-to-end: `commands/adams-review-fix.md` scaffold + three fragments (`08-fix-loader.md` Phase 7, `09-fix-execution.md` Phase 8, `10-post-fix-and-commit.md` Phase 9) + new helper `group-fixes.py` (§21.5 union-find) + two new batched `artifact-patch.py` modes (`--apply-fix-start`, `--apply-fix-outcomes` — §21.2 clarifications) + `artifact-render.py` enriched Fix runs section with per-run tables and overlap-abort labeling. The §24.4 terminal-cleanup invariant (artifact-records-commit-before-network) is codified in the 9e deterministic order; the leftover-`attempted` hard abort in Phase 7 step 4 and the Phase 9.pre overlap guard both emit audit fix_attempts with `output_sha: null` so the next run's staleness check stays accurate. `test/smoke.sh` passes 96 assertions (up from 71 at Stage 2.7 close). Real-repo end-to-end run deferred, same pattern as Stage 2.6/2.7 — fragment-level correctness covered by unit smoke; first integration signal comes from the first `/adams-review-fix` run on a live artifact.
+**As of 2026-04-18 — Stage 2.8 COMPLETE.** PR-comment freshness filter replaces the Stage-2 `--since review_started_at` time filter on `external-scrape.sh`. Bot comments are now filtered by code locality — `review_comment`/`review` records against `git diff commit_id..HEAD`; `issue_comment` records against `pulls/<pr>/commits` latest `committer.date` (policy C2, §13.13). New helper `comment-freshness.sh` (§21.10), new DESIGN sections §13.13 + §21.10, rewired `02-ensemble-adapter.md` step 1.5.3 to pipe scrape output through the new filter with `tee -a trace.md` audit flow. `--since` removed from `external-scrape.sh` entirely. `review_started_at` demoted to Phase-6 metrics anchor only. `test/smoke.sh` passes 105 assertions (up from 96 at Stage 3 close: CF-1..7 + CF-ES-1/2 + updated G).
 
-- Design doc: `DESIGN.md` (rev 8 + §21.2 exit-code footnote + §21.2 `--apply-decisions` clarification + **§21.2 `--apply-fix-start` clarification** + **§21.2 `--apply-fix-outcomes` clarification** + §5.2.1 `pending_validation` clarification + §9.2 reviews-root relocation + §8.7 sensitive-gate prose correction + §12.1 example fix + §13.10 base-branch freshness gate + §13.11 origin cross-check + §21.9 `origin-crosscheck.sh` spec + §13.12 detection parallelization)
+- Design doc: `DESIGN.md` (rev 8 + §21.2 exit-code footnote + §21.2 `--apply-decisions` clarification + §21.2 `--apply-fix-start` clarification + §21.2 `--apply-fix-outcomes` clarification + §5.2.1 `pending_validation` clarification + §9.2 reviews-root relocation + §8.7 sensitive-gate prose correction + §12.1 example fix + §13.10 base-branch freshness gate + §13.11 origin cross-check + §21.9 `origin-crosscheck.sh` spec + §13.12 detection parallelization + **§13.13 PR comment freshness** + **§21.10 `comment-freshness.sh` spec** + **§21.8 `--since` removal**)
 - Stage 1 plan: `plans/stage-1-foundation.md` (user-approved; closed out)
 - Stage 2 plan: `plans/stage-2-review.md` (user-approved; closed out)
 - Stage 2.5 plan: `plans/stage-2.5-hardening.md` (user-approved; closed out)
 - Stage 2.6 plan: `plans/stage-2.6-freshness-origin.md` (user-approved 2026-04-18; closed out)
 - Stage 2.7 plan: `plans/stage-2.7-detection-parallel.md` (user-approved 2026-04-18; closed out)
 - Stage 3 plan: `plans/stage-3-fix.md` (plan-and-execute 2026-04-18; closed out)
+- Stage 2.8 plan: `plans/stage-2.8-comment-freshness.md` (user-approved 2026-04-18; closed out)
 - Symlink `~/.claude/commands/_shared → commands/_shared` is live
 - `uv` (`/opt/homebrew/bin/uv 0.7.15`) supplies `jsonschema` to Python scripts via PEP 723 inline-script shebangs
 - Default reviews root: `~/.adams-reviews/<slug>/<branch>/<review_id>/` (override via `$ADAMS_REVIEW_REVIEWS_ROOT`)
@@ -62,6 +63,7 @@ bd6b610      Bootstrap repo with design doc (rev 8) and build journal
 | 2.6 | Base-branch freshness gate (§13.10) + origin cross-check (§13.11) + renderer surfacing | **done** | `plans/stage-2.6-freshness-origin.md` | [Stage 2.6 section](#stage-26--base-branch-freshness--origin-cross-check) |
 | 2.7 | Parallelize Phase 1 (internal lenses) + Phase 1.5 (ensemble) — wall-clock hardening | **done** | `plans/stage-2.7-detection-parallel.md` | [Stage 2.7 section](#stage-27--detection-parallelization-phase-1--phase-15) |
 | 3 | `/adams-review-fix` (Phases 7–9 + terminal cleanup) | **done** | `plans/stage-3-fix.md` | [Stage 3 section](#stage-3--adams-review-fix) |
+| 2.8 | PR comment freshness filter (replace `--since` with code-locality check) | **done** | `plans/stage-2.8-comment-freshness.md` | [Stage 2.8 section](#stage-28--pr-comment-freshness) |
 | 4 | Fragment shrink + helper externalization (context-budget hardening) | not started | `plans/stage-4-fragment-shrink.md` | — |
 
 ### Stage 1 — Foundation
@@ -574,6 +576,64 @@ c1cb863       Stage 3.B: artifact-patch.py --apply-fix-start + --apply-fix-outco
 
 ---
 
+### Stage 2.8 — PR comment freshness
+
+**Rationale.** Stage-2's Phase-1.5 scrape used `--since review_started_at` to drop bot comments posted before the review started. Observation during review of `beta-briefing` PR #199: Greptile summary comments posted days before the review — on files that hadn't changed since — were silently dropped. Newness is the wrong relevance axis. Code locality is the right one: include a bot comment iff the code it refers to hasn't changed between when it was posted and HEAD.
+
+**Scope (landed):**
+
+- **2.8.A** — new helper `comment-freshness.sh` (§21.10) implementing the three-kind filter: `review_comment` (diff `commit_id..HEAD -- path`), `review` (diff intersected with `reviewed_files_all`), `issue_comment` (policy C2 — `created_at > max(committer.date)` from `pulls/<pr>/commits`).
+- **2.8.B** — `--since` removed from `external-scrape.sh`; helper now pure "fetch + bot-filter + normalize".
+- **2.8.C** — `02-ensemble-adapter.md` step 1.5.3 rewired to pipe scrape → freshness filter; `00-preflight.md` step 0.5 prose loosened (`review_started_at` capture no longer needs to precede mutations); `adams-review.md` grants `comment-freshness.sh`.
+- **2.8.D** — this close-out.
+
+**Status:** done (2026-04-18).
+
+**Stage 2.8 commits (on `main`, newest first):**
+
+```
+(this commit) Close Stage 2.8: BUILD.md + stage index + plan copy
+2599166       Stage 2.8.C: rewire Phase 1.5 scrape through comment-freshness.sh
+79f2ac1       Stage 2.8.B: remove --since from external-scrape.sh (§21.8)
+0765eeb       Stage 2.8.A: comment-freshness.sh helper + DESIGN §13.13/§21.10
+```
+
+**Files landed:**
+
+- **2.8.A** (commit `0765eeb`):
+  - `commands/_shared/tools/comment-freshness.sh` — new Bash helper; stdin @- / file / inline for `--comments`; csv / @- for `--reviewed-files`; lazy-fetch `pulls/<pr>/commits` with fixture-replay support; force-push `git fetch` fallback for unreachable commit_ids; API-failure fallback (policy A) for issue_comments when the commits API fails; one audit line per record to stderr with hyphenated `reason=<verb>` (matches §21.9 convention).
+  - `DESIGN.md` — new §13.13 "PR comment freshness" (algorithm table, C2 rationale, reachability fallback, API fallback, placement, rationale, implementation pointer); new §21.10 `comment-freshness.sh` spec (interface, algorithm, fixture replay, errors, cost).
+  - `test/smoke.sh` — CF-1..CF-7 assertions (+7) against a scratch 2-commit repo plus fixture `pr_commits.json`. Covers all six action verbs (`fresh`, `stale`, `fresh-summary`, `stale-summary`, `unreachable`, and — via CF-ES-2 later — usage-error paths) and the reason prose.
+
+- **2.8.B** (commit `79f2ac1`):
+  - `commands/_shared/tools/external-scrape.sh` — `--since` removed from arg parse + usage + jq filter; `iso_gt_eq` helper dropped (no longer called).
+  - `DESIGN.md` — §21.8 interface updated; new "Freshness filtering" paragraph names the removal and points at §21.10; §4 Phase 1.5 step 1 signature updated; step 4 now runs the freshness filter before the normalizer (renumbering 4→6); §10 helper table updated + `comment-freshness.sh` row added.
+  - `test/smoke.sh` — G assertion updated (ids now `[2,5]` — age is no longer filtered at the scrape layer); CF-ES-1 exercises the fixture-replay happy path without `--since`; CF-ES-2 asserts `--since` now returns exit 64 (unknown-arg) rather than silent ignore.
+
+- **2.8.C** (commit `2599166`):
+  - `commands/_shared/02-ensemble-adapter.md` step 1.5.3 — pipe scrape output into `comment-freshness.sh` with `2> >(tee -a "$trace_log_path" >&2)` so per-record audit lines land in `trace.md` inline. Helper-failure fallback falls back to the raw scrape and tags `phase_1_5_freshness_helper_failed` — Phase 1.5 never aborts on a filter bug.
+  - `commands/_shared/00-preflight.md` step 0.5 — the "before any push or mutation" invariant is gone; `review_started_at` is now metrics-only.
+  - `commands/adams-review.md` — `comment-freshness.sh` added to `allowed-tools`.
+
+- **2.8.D — this close-out:**
+  - `BUILD.md` — this section + Current state + stage index row.
+  - `plans/stage-2.8-comment-freshness.md` — plan copied from `~/.claude/plans/mutable-churning-squirrel.md` to match Stage 2.5/2.6/2.7/3 convention.
+
+**Verification evidence:**
+
+- `test/smoke.sh` passes **105 assertions**, up from 96 at Stage 3 close. Additions: CF-1..CF-7 (comment-freshness.sh — 7), CF-ES-1/2 (external-scrape.sh --since removal — 2). The existing G assertion was amended (same count) to reflect that age no longer filters at the scrape layer.
+- **Helper manual smoke** (during development, pre-CF-* assertions): scratch 2-commit repo with a.txt changed / b.txt unchanged; hand-built review_comment / review / issue_comment records. All six action verbs fired on first attempt against the expected inputs; no mid-stage fixes needed.
+- **Real-repo ensemble re-run deferred.** Same pattern as Stage 2.6/2.7/3. Integration signal will come from the first `/adams-review --ensemble` run on a PR with pre-existing bot comments (e.g., re-running `beta-briefing` PR #199 after 2.8 ships). `trace.md` should show `comment_freshness: id=... action=...` lines, one per scraped record, and the Phase-1.5-sourced findings should reflect only fresh inputs.
+
+**Open issues / deviations:**
+
+- **`pulls/<pr>/commits` is fetched lazily — only when a record without `commit_id` is in the input.** If all input records carry `commit_id` (pure inline review_comments / review submissions; zero issue_comments), the API call is skipped entirely. This is a small ergonomic win and avoids a rate-limit hit on PRs where issue comments are all human-authored (and thus already filtered out by the bot filter). If a future caller wants to pre-warm the cache for audit consistency, add `--prefetch-commits` later.
+- **Policy C2 (issue_comment diff-wide timestamp compare) is strictly stronger than "include all" and simpler than per-comment timeline lookup.** Worth noting: any subsequent push after a summary comment invalidates the summary (the latest-committer-date advances past the comment's created_at). For diff-wide comments this is the correct behavior — a later commit means the summary's mental model of the diff is at least partially stale — but it does mean bot summaries are volatile. If a future PR workflow makes summary stickiness important, surface and consider a laxer policy (A) or per-comment timeline (C full).
+- **Force-pushed PR with orphaned commit_ids.** One `git fetch origin +refs/pull/<pr>/head` retry is attempted in non-fixtures mode. If the force-push happened before any local `git fetch` and the PR ref was never pulled, the retry brings the commit back. If the remote itself has garbage-collected the orphaned commit (rare — GitHub retains PR refs aggressively), the record is dropped with `action=unreachable`. No known real-repo run has hit this yet.
+- **No real-repo integration smoke at stage close.** Budget: first `--ensemble` run on a PR with pre-existing bot comments. If the filter shape is off in production, the most likely symptom is `action=stale-summary` on a Greptile comment that the user expects to be fresh — check `trace.md` for the audit lines and compare against the actual commit timeline of the PR.
+
+---
+
 ### Stage 4 — Fragment shrink + helper externalization (context-budget hardening)
 
 **Rationale.** `/adams-review` invocation currently expands to ~30k tokens of command + fragments alone (`commands/adams-review.md` inlines 10 fragments via `!cat` preprocessor; total ~117k chars / 2876 lines). On top of the Claude Code harness + user's MCP/plugin surface, a typical session lands at 90k+ context before any review work runs. Stage 2.5 cross-stage notes flagged this pattern as "Lever #4: fragment prose shrink — deferred"; Stage 2.6's Phase-0 expansion (step 0.2a added ~4k chars of inline Bash) nudged the number further. This stage executes that deferred work plus its natural companion: moving cohesive Bash snippets out of fragments and into helper scripts with 10-line contracts.
@@ -733,6 +793,8 @@ Bias is toward **making DESIGN track reality**, not defending the rev-8 wording.
 - **2026-04-18 — Stage 3 Fix-group agent delete/rename enforcement is layered, not single-point.** §19.8 forbids `rm`/`git rm`/`git mv`. Enforcement layers: (a) explicit prohibition in the fix-group agent prompt (09-fix-execution.md step 8.5); (b) belt-and-suspenders check at 9.pre that scans `git status --porcelain` for any `D <path>` entries and short-circuits to overlap-abort with a `<delete-detected>` file marker if any appear. The Agent tool's current API doesn't expose a reliable way to restrict a spawned sub-agent's `Bash` grant to a subset of the parent's, so we can't enforce at the tool layer. If a real-repo run surfaces a fix agent that leaks a delete past both layers, add a post-agent tree walk comparing against the pre-Phase-8 file list (`ls -R`) to catch the drift before Phase 9a runs.
 
 - **2026-04-18 — Top-level command install is still manual; the TBD install script from Stage 1 hasn't landed.** BUILD.md §Conventions line 634 notes: *"All scripts live at `~/.claude/commands/_shared/tools/` per DESIGN §9. Symlinked from this repo during development, or copied via install script at stage close-out (TBD — decide in Stage 1 planning)."* Stage 1 deferred the decision; Stages 2/2.5/2.6/2.7/3 kept deferring it. The gap surfaced when Stage 3 shipped `adams-review-fix.md` in the repo but `/adams-review-fix` wasn't reachable — `~/.claude/commands/` needed a per-command `ln -s` that no stage plan prompted. The `_shared` symlink is at the directory level, so fragments + helpers propagate automatically; it's only top-level `.md` commands that need the explicit link. **Interim rule until an install script exists:** any new top-level command file in `commands/*.md` requires a matching `ln -s $PWD/commands/<name>.md ~/.claude/commands/<name>.md` as part of the stage close-out, and the stage's *Files landed* entry for that file should note the symlink was created. **Install-script candidate scope when we build one:** idempotent `ln -sf` for every `commands/*.md` plus the `commands/_shared` directory link, dry-run flag, and a check that no destination already points somewhere else. Stage 4 plan should either include it or explicitly punt again with a rationale.
+
+- **2026-04-18 — Stage 2.8 PR-comment freshness filter: time axis replaced with code-locality axis.** `external-scrape.sh` used to accept `--since <iso-8601>` and drop bot comments older than that timestamp (anchored to `review_started_at`). Stage 2.8 removed the arg and introduced `comment-freshness.sh` (§21.10) which filters per-record by whether the referenced code has changed between the comment's posting and HEAD. `review_comment` + `review` kinds use `commit_id` + `git diff` (targeted or intersected with `reviewed_files_all`); `issue_comment` kinds (no `commit_id`) use policy C2 — include iff `created_at > max(committer.date)` from `pulls/<pr>/commits`. **Knock-on effects:** `review_started_at` is now purely a Phase-6 metrics anchor (no longer gates scraper behavior); `00-preflight.md` step 0.5's pre-mutation invariant is relaxed accordingly; DESIGN §4 Phase 1.5 gains a new step between scrape and normalizer; `02-ensemble-adapter.md` step 1.5.3 pipes scrape → filter with `tee -a trace.md` audit flow (matches `origin-crosscheck.sh` convention). **Design decision pinned:** policy C2 (stronger than "include all", simpler than per-comment timeline lookup via `pulls/<pr>/commits`). If a future run surfaces a case C2 misclassifies, upgrade to full policy C with a dedicated `--policy` flag on the helper rather than silent tuning. **Breaking change:** `--since` now exits 64 (unknown-arg) instead of silent ignore, so any stale scripts fail loudly.
 
 - **2026-04-18 — Stage 2.5.D renderer fix: light-lane `uncertain` was silently dropped from PR comments.** `artifact-render.py` lines 148 (summary) and 323 (table) iterated only `(confirmed_auto, confirmed_manual, confirmed_report)` for the light lane; DESIGN §13.1 Phase-4 "score 45-59 → uncertain" applies regardless of lane, so light-lane findings with `disposition: uncertain` were present in `artifact.json` but invisible in the rendered `artifact.md`. `findings_count` still counted them in the "Found N findings" total (the buckets iteration at render_summary line 133 sums all dispositions), producing a subtle count mismatch: "Found 6 findings" but only 5 enumerated per-section. **Real-world impact.** C13's ray-finance `feat/import-apple` run had three light-lane uncertain findings (F021 `src/cli/ink/mount.ts:11-13`, F022 `src/cli/ink/ChatApp.tsx:108-116`, F032 `src/cli/commands.ts:808-812`) that were present in the artifact but silently missing from PR comment `4274059620` — exactly the findings the user most needs to decide on manually. **Fix.** Two-tuple-literal edit adding `"uncertain"` to both iteration tuples; `render_light_lane()`'s existing single-table-with-Disposition-column shape accommodates mixed dispositions with no structural change. Re-rendering the C13 artifact locally now surfaces all three findings in the Light lane table. **Defence in depth.** Fixture seed extended with F006 (architecture/uncertain/light) so the existing `diff expected.md` assertion (step 9) would surface any regression; added a belt-and-suspenders smoke assertion Y grepping for F006 in the rendered output with a clear "light uncertain dropped" signal. **Adjacent rendering quirk.** `render_summary()` still counts `below_gate` in the "Found N findings" total but doesn't list it per-lane (no section displays sub-threshold findings, so they exist in the artifact for debuggability but don't surface). That's intentional per the Stage 1 close-out note; this Stage 2.5.D fix is orthogonal and does not touch `below_gate` handling.
 
