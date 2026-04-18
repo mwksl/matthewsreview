@@ -393,7 +393,10 @@ else
     fail "M: --set-json top-level exit non-zero"
 fi
 
-# G. external-scrape.sh fixture-replay: bot filter + deny list + time window
+# G. external-scrape.sh fixture-replay: bot filter + deny list (no time window —
+# see Stage 2.8: --since removed because code locality, not newness, is
+# the right relevance axis. Both coderabbit bot comments now survive; the
+# "too old" case is kept because age no longer matters at this layer).
 EXT="$WORK/ext"
 mkdir -p "$EXT"
 cat > "$EXT/issue_comments.json" <<'JSON'
@@ -401,19 +404,19 @@ cat > "$EXT/issue_comments.json" <<'JSON'
   {"id":1,"user":{"login":"humanuser","type":"User"},"created_at":"2026-02-01T00:00:00Z","body":"human comment"},
   {"id":2,"user":{"login":"coderabbit-ai[bot]","type":"Bot"},"created_at":"2026-02-01T00:00:00Z","body":"bot finding"},
   {"id":3,"user":{"login":"dependabot[bot]","type":"Bot"},"created_at":"2026-02-01T00:00:00Z","body":"dep bump"},
-  {"id":5,"user":{"login":"coderabbit-ai[bot]","type":"Bot"},"created_at":"2025-01-01T00:00:00Z","body":"too old"}
+  {"id":5,"user":{"login":"coderabbit-ai[bot]","type":"Bot"},"created_at":"2025-01-01T00:00:00Z","body":"age no longer filtered"}
 ]
 JSON
 echo '[]' > "$EXT/reviews.json"
 echo '[]' > "$EXT/review_comments.json"
 # Default config (no --config) — DEFAULT_DENY applies, allow=null.
 out=$(ADAMS_REVIEW_FIXTURES_USER=smokeuser "$TOOLS/external-scrape.sh" \
-        --since 2026-01-01T00:00:00Z --fixtures-dir "$EXT")
+        --fixtures-dir "$EXT")
 ids=$(echo "$out" | jq -c '[.[].id] | sort')
-if [[ "$ids" == "[2]" ]]; then
-    pass "G: external-scrape fixture replay keeps coderabbit, drops human/dep-bump/old"
+if [[ "$ids" == "[2,5]" ]]; then
+    pass "G: external-scrape fixture replay keeps both coderabbit records, drops human + dep-bump"
 else
-    fail "G: expected ids [2], got $ids" "out=$out"
+    fail "G: expected ids [2,5], got $ids" "out=$out"
 fi
 
 # N. pending_validation is a valid disposition enum (R2 fix)
@@ -1666,6 +1669,31 @@ if [[ "$len" == "0" ]] && grep -q "action=unreachable" "$CF_DIR/cf7.err" \
     pass "CF-7 (§21.10): unreachable commit_id excluded with action=unreachable"
 else
     fail "CF-7: expected unreachable; got len=$len stderr=$(cat "$CF_DIR/cf7.err")"
+fi
+
+# ------------------------------------------------------------------ Stage 2.8.B guards
+# These two assertions confirm --since is actually gone (not just ignored).
+# CF-ES-1 also exercises the fixture-replay happy path without --since — was
+# previously a usage error before Stage 2.8 because --since was required.
+
+# CF-ES-1: external-scrape.sh --fixtures-dir succeeds without --since.
+es_out=$(ADAMS_REVIEW_FIXTURES_USER=smokeuser "$TOOLS/external-scrape.sh" \
+            --fixtures-dir "$EXT" 2>"$CF_DIR/es1.err")
+es_rc=$?
+es_type=$(echo "$es_out" | jq -r 'type' 2>/dev/null)
+if [[ "$es_rc" == "0" && "$es_type" == "array" ]]; then
+    pass "CF-ES-1 (§21.8): external-scrape.sh succeeds without --since (post-2.8 default)"
+else
+    fail "CF-ES-1: expected rc=0 + array; got rc=$es_rc type=$es_type stderr=$(cat "$CF_DIR/es1.err")"
+fi
+
+# CF-ES-2: external-scrape.sh --since <iso> is rejected (unknown-arg usage error).
+es_stderr=$("$TOOLS/external-scrape.sh" --since 2026-01-01T00:00:00Z \
+              --fixtures-dir "$EXT" 2>&1 >/dev/null); es_code=$?
+if [[ "$es_code" == "64" ]] && echo "$es_stderr" | grep -q "unknown arg '--since'"; then
+    pass "CF-ES-2 (§21.8): external-scrape.sh --since is rejected with exit 64 + unknown-arg"
+else
+    fail "CF-ES-2: expected exit 64 + unknown-arg; got code=$es_code stderr=$es_stderr"
 fi
 
 echo

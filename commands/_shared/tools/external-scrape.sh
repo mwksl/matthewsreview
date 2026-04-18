@@ -2,13 +2,20 @@
 # external-scrape.sh — Phase 1.5 bot-comment scraper (DESIGN §21.8, §13.8).
 #
 # Queries the three GitHub PR comment endpoints in parallel, filters to
-# bot authors posted after --since, applies the allow/deny policy from
-# the user config, and emits a normalized JSON array to stdout suitable
-# for the Phase 1.5 Sonnet normalizer (§19.2a).
+# bot authors, applies the allow/deny policy from the user config, and
+# emits a normalized JSON array to stdout suitable for the Phase 1.5
+# Sonnet normalizer (§19.2a).
+#
+# Code-locality (freshness) filtering is NOT done here — pipe this
+# helper's output into comment-freshness.sh (§21.10) for that. Stage 2.8
+# removed the `--since` time-window filter that used to live at this
+# layer; code locality (not newness) is the right axis for relevance,
+# and running that decision on the full unfiltered set is simpler to
+# reason about than two filters in series at different layers.
 #
 # Usage:
-#   external-scrape.sh --pr <num> --since <iso-8601-utc> [--config <path>]
-#   external-scrape.sh --since <iso> --fixtures-dir <dir>    (offline replay)
+#   external-scrape.sh --pr <num> [--config <path>]
+#   external-scrape.sh --fixtures-dir <dir>    (offline replay)
 #
 # --config overrides the config-precedence chain (useful for testing).
 # --fixtures-dir replays pre-fetched endpoint outputs from
@@ -62,12 +69,13 @@ set -euo pipefail
 usage() {
     cat >&2 <<USAGE
 Usage:
-  $(basename "$0") --pr <num> --since <iso-8601-utc> [--config <path>]
-  $(basename "$0") --since <iso> --fixtures-dir <dir>    (offline replay)
+  $(basename "$0") --pr <num> [--config <path>]
+  $(basename "$0") --fixtures-dir <dir>    (offline replay)
 
-Queries GitHub for bot-authored comments on a PR posted after --since,
-applies the external_reviewer_bots allow/deny config, and emits a
-normalized JSON array to stdout.
+Queries GitHub for bot-authored comments on a PR, applies the
+external_reviewer_bots allow/deny config, and emits a normalized JSON
+array to stdout. Pipe into comment-freshness.sh (§21.10) to drop
+records whose referenced code has changed since posting.
 
 --fixtures-dir replays pre-fetched JSON from a directory — used by smoke
 tests and ad-hoc replays. No gh calls in that mode.
@@ -80,22 +88,18 @@ USAGE
 die_usage() { echo "ERROR: $1" >&2; usage; exit 64; }
 
 PR_NUM=""
-SINCE=""
 CONFIG_OVERRIDE=""
 FIXTURES_DIR=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --pr)            PR_NUM="${2:-}"; shift 2 ;;
-        --since)         SINCE="${2:-}"; shift 2 ;;
         --config)        CONFIG_OVERRIDE="${2:-}"; shift 2 ;;
         --fixtures-dir)  FIXTURES_DIR="${2:-}"; shift 2 ;;
         -h|--help)       usage; exit 0 ;;
         *) die_usage "unknown arg '$1'" ;;
     esac
 done
-
-[[ -n "$SINCE" ]] || die_usage "--since <iso-8601-utc> is required"
 
 if [[ -z "$FIXTURES_DIR" ]]; then
     [[ -n "$PR_NUM" ]] || die_usage "--pr is required (or use --fixtures-dir for offline testing)"
@@ -231,11 +235,9 @@ fi
 jq -s \
     --argjson allow "$ALLOW" \
     --argjson deny "$DENY" \
-    --arg since "$SINCE" \
     --arg current_user "$CURRENT_USER" \
     '
     def is_bot_login: test("\\[bot\\]$");
-    def iso_gt_eq($a; $b): ($a | fromdateiso8601) >= ($b | fromdateiso8601);
 
     # Normalize each endpoint.
     def norm_issue:
@@ -277,10 +279,8 @@ jq -s \
 
     (.[0] | norm_issue) + (.[1] | norm_review) + (.[2] | norm_review_comment)
     | map(. as $c | select(
-        # time window
-        iso_gt_eq($c.created_at; $since)
         # bot (Bot type OR [bot] suffix)
-        and ($c.author_type == "Bot" or ($c.author_login | is_bot_login))
+        ($c.author_type == "Bot" or ($c.author_login | is_bot_login))
         # not the current gh user (skip self-authored review comments)
         and $c.author_login != $current_user
         # deny list (piping $deny rebinds . — hence $c capture above)

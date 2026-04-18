@@ -175,14 +175,15 @@ The CLI readiness gate that used to live here has been hoisted into Phase 1's fr
 
 **Steps:**
 
-1. Call `external-scrape.sh --pr <num> --since <review_started_at>` which runs:
+1. Call `external-scrape.sh --pr <num>` which runs:
    - `gh api repos/{owner}/{repo}/issues/{num}/comments`
    - `gh api repos/{owner}/{repo}/pulls/{num}/reviews`
    - `gh api repos/{owner}/{repo}/pulls/{num}/comments`
-2. Filter each to: (`user.type == "Bot"` OR `user.login` ends with `[bot]`), `created_at >= review_started_at`, and author is not the current `gh auth` user.
+2. Filter each to: (`user.type == "Bot"` OR `user.login` ends with `[bot]`) and author is not the current `gh auth` user.
 3. Apply config deny-list (default: `dependabot[bot]`, `renovate[bot]`, `github-actions[bot]`, `codecov[bot]` — these are automation/status bots, not reviewers). If user config has an explicit `allow` list, intersect with it instead.
-4. Pipe the filtered comment list to a Sonnet normalizer sub-agent that emits candidates in the same schema as other lenses, with `sources: ["external-pr:<bot-login>"]` and `source_family: "external-deep-family"`. `origin_confidence: low` (same rule as other external findings — must corroborate internally to be treated as high-signal).
-5. Candidates join the Phase 2 dedup pool alongside internal and codex/coderabbit-adapter candidates.
+4. Pipe the scrape output through `comment-freshness.sh --pr <num> --reviewed-files <csv>` (§21.10 / §13.13) so records whose referenced code has changed since the comment was posted are dropped. Per-record audit lines (`comment_freshness: id=… action=…`) flow into `trace.md` via `tee -a`.
+5. Pipe the freshness-filtered comment list to a Sonnet normalizer sub-agent that emits candidates in the same schema as other lenses, with `sources: ["external-pr:<bot-login>"]` and `source_family: "external-deep-family"`. `origin_confidence: low` (same rule as other external findings — must corroborate internally to be treated as high-signal).
+6. Candidates join the Phase 2 dedup pool alongside internal and codex/coderabbit-adapter candidates.
 
 **Scope boundary:** this scrape runs exactly once. Late-posting bot comments (after Phase 1.5 closes) are not retroactively picked up — they'd miss dedup and validation. Rationale: deterministic window; user can re-run `/adams-review --ensemble` if they want to pick up late additions.
 
@@ -866,7 +867,8 @@ All writers support `--dry-run` to validate without applying.
 | `claude-md-paths.sh --repo-root <path> --files <f>[,<f>...]` | Walk up from each file to repo root; collect `CLAUDE.md`; dedupe; root-first. Pure Bash — no LLM. |
 | `staleness.sh --reviewed-sha <s> --reviewed-files <f>...` | File-overlap classification: safe / warn / unsafe |
 | `group-fixes.py --artifact <path> --eligible-finding-ids <list>` | Union-find fix grouping — orchestrator passes the pre-filtered eligible list |
-| `external-scrape.sh --pr <num> --since <iso-8601>` | Query GitHub for issue / review / review-comment streams; filter to bot authors not on the deny-list; emit normalized comment JSON for the Sonnet normalizer. |
+| `external-scrape.sh --pr <num>` | Query GitHub for issue / review / review-comment streams; filter to bot authors not on the deny-list; emit normalized comment JSON for `comment-freshness.sh` and the Sonnet normalizer. |
+| `comment-freshness.sh --pr <num> --reviewed-files <csv\|@->` | Code-locality filter on the scrape output — drops bot comments whose referenced code has changed between when they were posted and HEAD (§13.13). |
 | `log-phase.sh --phase <n> --name <name> --summary <text>` | Append to `trace.md` |
 | `log-phase.sh --phase <n> --record <json>` | Append a record to `phases.jsonl` |
 
@@ -1001,7 +1003,7 @@ Top-level command files are thin shells: frontmatter + sequence of `` !`cat` `` 
             └── phases.jsonl             ← one line per completed phase
 ```
 
-- `<repo-slug>` derivation: `git remote get-url origin 2>/dev/null` → strip scheme, replace `/` `:` with `-`, lowercase, allow only `[a-z0-9._-]` (substitute `_` for anything else). Example: `git@github.com:adammiller/projects-foo.git` → `github.com-adammiller-projects-foo`. Fallback if no remote: sanitized absolute path of repo root (prefixed `local-`). This avoids collisions between distinct repos that happen to share a directory name and keeps the slug stable across checkouts.
+- `<repo-slug>` derivation: `git remote get-url origin 2>/dev/null` → strip scheme, strip leading `git@`, replace `:` with `/`, **strip trailing `.git`**, lowercase, replace `/` with `-`, allow only `[a-z0-9._-]` (substitute `_` for anything else). Example: `git@github.com:adammiller/projects-foo.git` → `github.com-adammiller-projects-foo`. Fallback if no remote: sanitized absolute path of repo root (prefixed `local-`). Canonical implementation: `commands/_shared/tools/repo-slug.sh` — Phase 0 (step 0.3) and Phase 7 (fix-loader step 7.2) both call this helper so the two paths cannot drift; the trailing-`.git` strip is the step prose readers historically missed (rev-7 build-journal note 2026-04-18, first-run `/adams-review-fix` produced a slug that didn't match Phase 0's on-disk directory). This avoids collisions between distinct repos that happen to share a directory name and keeps the slug stable across checkouts.
 - `latest.txt` is a tiny file with the `review_id` of the most recent review on this branch. Helper scripts read this to find "current" without explicit args. Atomic writes (temp + rename).
 - No `sub-agent-transcripts/` directory: Claude Code already persists each sub-agent's full conversation to `~/.claude/projects/<project-slug>/<session-id>/subagents/agent-<agentId>.jsonl`. Recording the `agentId` in `trace.md` is sufficient to locate any transcript on demand.
 - History is preserved: old reviews stay in place. Rough disk usage: ~200KB–1MB per review. A future `/adams-review-cleanup` command can prune if needed.
@@ -1895,7 +1897,7 @@ The orchestrator passes `artifact.reviewed_files_all` as the `--reviewed-files` 
 
 ### 21.8 `external-scrape.sh`
 
-**Interface:** `external-scrape.sh --pr <num> --since <iso-8601> [--config <path>]`
+**Interface:** `external-scrape.sh --pr <num> [--config <path>]` (or `--fixtures-dir <dir>` for offline replay)
 **Algorithm:**
 1. Resolve owner/repo from `gh repo view --json owner,name` (or from git remote if `gh` isn't configured for this repo).
 2. Load config: per-repo `.claude/review-config.json` overrides global `~/.adams-reviews/review-config.json`. Extract `external_reviewer_bots.allow` (may be null) and `external_reviewer_bots.deny` (array; merge with built-in defaults if user didn't replace).
@@ -1904,13 +1906,14 @@ The orchestrator passes `artifact.reviewed_files_all` as the `--reviewed-files` 
    - `gh api "repos/{owner}/{repo}/pulls/{pr}/reviews"`
    - `gh api "repos/{owner}/{repo}/pulls/{pr}/comments"`
 4. Union the results. For each entry:
-   - Require `created_at >= since`
    - Require (`user.type == "Bot"` OR `user.login` ends with `[bot]`)
    - Require `user.login != current_gh_user` (skip self-authored, including our previous review comments)
    - Apply deny-list: drop if `user.login` appears in `deny`
    - If `allow` is a non-null array: drop unless `user.login` appears in `allow`
 5. Emit JSON array to stdout: `[{id, author_login, author_type, created_at, body, kind, path?, line?, commit_id?}]`. The `kind` field tags which endpoint the entry came from (issue_comment / review / review_comment) so downstream consumers can handle inline-review comments specifically.
 **Errors:** `gh` rate-limit (HTTP 429, 403 with `X-RateLimit-Remaining: 0`) → non-zero with message naming reset time; orchestrator handles per §24 (log and skip scrape, continue pipeline).
+
+**Freshness filtering (Stage 2.8, §13.13).** This helper no longer applies a time filter. Newness of a comment doesn't correlate with whether its referenced code is still current. Callers pipe the output through `comment-freshness.sh` (§21.10) for code-locality filtering. Pre-Stage-2.8, this helper accepted `--since <iso-8601>` and dropped comments older than that timestamp; the arg has been removed and any script passing `--since` now hits the unknown-arg branch of `die_usage`. `review_started_at` (§4 Phase 0 step 4) survives as the Phase-6 metrics anchor only; it no longer parameterizes any scrape window.
 
 ### 21.9 `origin-crosscheck.sh`
 
