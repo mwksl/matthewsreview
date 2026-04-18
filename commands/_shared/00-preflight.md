@@ -178,14 +178,17 @@ lens-prompt references.
 
 ### 0.3. Derive repo slug
 
-Slug derivation follows DESIGN §9.2:
+Delegate to the canonical helper (DESIGN §9.2 — single source of truth
+shared with Phase 7's fix-loader so the two paths cannot drift):
 
-1. Run `git remote get-url origin 2>/dev/null`. If it returns a URL, strip the
-   scheme, replace `/` and `:` with `-`, lowercase everything, and substitute
-   `_` for any character outside `[a-z0-9._-]`. Example:
-   `git@github.com:adammiller/projects-foo.git` → `github.com-adammiller-projects-foo`.
-2. If no remote, use the fallback: sanitized absolute path of `$repo_root`,
-   prefixed with `local-`.
+```bash
+repo_slug=$(~/.claude/commands/_shared/tools/repo-slug.sh --repo-root "$repo_root")
+```
+
+The helper runs `git remote get-url origin`, strips scheme + `git@` +
+trailing `.git`, normalizes separators, and lowercases. No remote → falls
+back to `local-<sanitized-path>`. See `tools/repo-slug.sh` for the exact
+algorithm and test matrix.
 
 Capture as `repo_slug`.
 

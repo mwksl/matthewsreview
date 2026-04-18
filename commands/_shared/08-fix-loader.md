@@ -27,19 +27,11 @@ head_branch=$(git rev-parse --abbrev-ref HEAD)
 repo_root=$(git rev-parse --show-toplevel)
 ```
 
-Derive `repo_slug` the same way Phase 0 step 0.3 does (DESIGN §9.2):
+Derive `repo_slug` via the shared helper — identical call to Phase 0
+step 0.3 so the two phases resolve the same directory (DESIGN §9.2):
 
 ```bash
-remote_url=$(git remote get-url origin 2>/dev/null || true)
-if [[ -n "$remote_url" ]]; then
-    repo_slug=$(printf '%s' "$remote_url" \
-        | sed -E 's#^[a-z]+://##; s#^git@##; s#:#/#; s#\.git$##' \
-        | tr 'A-Z' 'a-z' \
-        | tr '/' '-' \
-        | sed -E 's#[^a-z0-9._-]#_#g')
-else
-    repo_slug="local-$(printf '%s' "$repo_root" | sed -E 's#[^a-z0-9._-]#_#g' | tr 'A-Z' 'a-z')"
-fi
+repo_slug=$(~/.claude/commands/_shared/tools/repo-slug.sh --repo-root "$repo_root")
 latest_path="$reviews_root/$repo_slug/$head_branch/latest.txt"
 ```
 
