@@ -156,7 +156,7 @@ Prompt essence (per §19.6):
 > }
 > ```
 
-### 4.4. Apply §13.1 Phase-4 decision table (per candidate)
+### 4.4. Apply §13.1 Phase-4 decision table (batched)
 
 For each Wave 1 result, first log tokens:
 
@@ -168,20 +168,22 @@ For each Wave 1 result, first log tokens:
   --tokens <N or null>
 ```
 
-Then apply the decision table. Derive inputs from the sub-agent's
-return: `score_phase4` takes precedence over `decision` when the two
-disagree. A validator that returns `decision: "confirmed"` with
-`score_phase4: 40` is treated as disproven (the row the score lands on
-wins); a validator returning `decision: "disproven"` with
-`score_phase4: 70` is treated as confirmed. Orchestrator should log
-the conflict to `trace.md` but trust the score. Validators shouldn't
-return such mismatches, but err toward the structured field over the
-natural-language label.
+Then collect every Wave 1 sub-agent response into a single JSON array
+and hand it to `artifact-patch.py --apply-decisions` in one call. The
+helper derives `disposition`, `is_actionable`, `confirmed_strength`,
+and default `reason` per §13.1 internally (Stage 2.5.B clarification,
+DESIGN §21.2). This collapses what was previously a per-finding loop
+of `--set … --set-json validation_result=@…` invocations into one
+helper invocation per wave, so the orchestrator's working context
+sees a single summary line instead of N per-finding prose blocks.
+
+**Derivation (performed by `--apply-decisions`):**
 
 | Score | Rule | Disposition | is_actionable | Other |
 |---|---|---|---|---|
-| `< 45` | disproven | `disproven` | false | reason: "disproven by Phase 4: <summary>" |
-| `45-59` | uncertain | `uncertain` | false | reason: "uncertain (Phase 4 inconclusive)" |
+| `null` | parse failure | `uncertain` | false | reason default: "uncertain (Phase 4 inconclusive)" |
+| `< 45` | disproven | `disproven` | false | reason default: "disproven by Phase 4" |
+| `45-59` | uncertain | `uncertain` | false | reason default: "uncertain (Phase 4 inconclusive)" |
 | `60-74` AND `actionability=auto_fixable` | | `confirmed_auto` | true | confirmed_strength: moderate |
 | `60-74` AND `actionability=manual` | | `confirmed_manual` | false | confirmed_strength: moderate |
 | `60-74` AND `actionability=report_only` | | `confirmed_report` | false | confirmed_strength: moderate |
@@ -189,67 +191,67 @@ natural-language label.
 | `75+` AND `actionability=manual` | | `confirmed_manual` | false | confirmed_strength: strong |
 | `75+` AND `actionability=report_only` | | `confirmed_report` | false | confirmed_strength: strong |
 
-Apply via one `artifact-patch.py` call per finding. Capture the
-resolved disposition into a shell variable — the validation_result
-write below keys off it:
+The helper applies `score_phase4` takes-precedence-over-`decision`
+automatically: derivation runs off `score_phase4 + actionability`, so
+a validator returning `decision: "confirmed", score_phase4: 40` routes
+to `disproven` via the score row; `decision: "disproven",
+score_phase4: 70, actionability: "auto_fixable"` routes to
+`confirmed_auto`. Validators shouldn't emit such mismatches, but when
+they do the structured fields win. Include the raw `decision` field
+in each tuple for audit-trail legibility — it's accepted by the helper
+but not authoritative.
+
+**Building the batch.** For each Wave-1 validator response, compose
+one tuple. `validation_result` in the tuple comes from the sub-agent's
+outer response envelope — extract the nested object via
+`jq -c '.validation_result // .'` (the `// .` no-ops when the response
+is already the inner object). Pass the sub-agent's `reason` through
+when it provides one; otherwise let the helper fill the
+disposition-appropriate default. The helper writes `validation_result`
+only when the derived disposition lands in the confirmed band; pass
+it for every deep-lane tuple — uncertain / disproven tuples have it
+silently ignored.
 
 ```bash
-# Example for score=72, actionability=auto_fixable.
-resolved_disposition=confirmed_auto
-~/.claude/commands/_shared/tools/artifact-patch.py \
-  --path "$artifact_path" --finding-id "$id" \
-  --set "score_phase4=72" \
-  --set "disposition=$resolved_disposition" \
-  --set confirmed_strength=moderate \
-  --set actionability=auto_fixable \
-  --set reason=null
+scratch="/tmp/adams-review-$review_id"
+mkdir -p "$scratch"
+
+# Compose one tuple per Wave-1 validator response. $validator_responses
+# is an orchestrator-side list keyed by finding id; the snippet below
+# is the intended shape — the orchestrator fills it in as each
+# sub-agent returns.
+jq -cn --argjson responses "$validator_responses" '
+  $responses
+  | to_entries
+  | map({
+      id: .key,
+      score_phase4: (.value.score_phase4 // null),
+      decision: (.value.decision // null),
+      actionability: (.value.actionability // null),
+      reason: (.value.reason // null),
+      validation_result: (.value.validation_result // .value)
+    })
+' > "$scratch/phase4-wave1-decisions.json"
+
+out=$(~/.claude/commands/_shared/tools/artifact-patch.py \
+        --path "$artifact_path" \
+        --apply-decisions "@$scratch/phase4-wave1-decisions.json")
+echo "$out"  # e.g. "applied 18 decisions (confirmed_auto=4, confirmed_manual=1, confirmed_report=0, uncertain=3, disproven=10)"
 ```
 
-For deep-lane candidates in the **confirmed band** (post-rule
-disposition ∈ `{confirmed_auto, confirmed_manual, confirmed_report}`,
-i.e. `score_phase4 >= 60`), ALSO persist `validation_result`. Gate
-the write on the resolved disposition, NOT on the sub-agent's
-`decision` label — the score-wins-over-decision precedence rule
-(stated above) means a validator returning
-`decision: "disproven", score_phase4: 70` is treated as confirmed
-by the table; its `validation_result` must still persist or Phase 5
-and the rendered report lose their fix-proposal / blast-radius
-context.
+**On score parse failure** (sub-agent returned unparseable JSON even
+after one retry): emit `score_phase4: null` in the tuple and the
+helper routes to `uncertain` automatically. Override the default
+reason by including `reason: "Phase 4 parse failure — manual review"`
+in that tuple so the rendered report explains why Phase 4 didn't
+confirm.
 
-The schema at `finding.validation_result`
-(`schema-v1.json` §defs.validation_result) is the NESTED object — the
-sub-agent's outer response includes `{validation_result, score_phase4,
-decision, actionability, related_candidates_to_investigate}`, so you
-must extract `.validation_result` before writing:
-
-```bash
-# Gate on resolved disposition (post score-decision precedence rule),
-# not on the sub-agent's decision label. Only confirmed band gets a
-# stored validation_result: schema requires every nested field of
-# validation_result to be non-null, and disproven/uncertain findings
-# don't run the sub-agent all the way through producing the fix_proposal
-# + verification_context sections.
-case "$resolved_disposition" in
-    confirmed_auto|confirmed_manual|confirmed_report)
-        # Extract just the nested validation_result object; if the outer
-        # response shape is already just the inner object, `// .` is a
-        # no-op.
-        jq -c '.validation_result // .' <<<"$subagent_response_json" \
-            > "/tmp/val-$id.json"
-        ~/.claude/commands/_shared/tools/artifact-patch.py \
-          --path "$artifact_path" --finding-id "$id" \
-          --set-json "validation_result=@/tmp/val-$id.json"
-        ;;
-esac
-rm -f "/tmp/val-$id.json"
-```
-
-(Write the validation_result JSON to a temp file first; the `@file`
-form avoids quoting hell on large objects.)
-
-On score parse failure (sub-agent returned unparseable JSON even after
-one retry): leave `score_phase4=null`, set `disposition=uncertain`,
-`reason="Phase 4 parse failure — manual review"`.
+**On apply-decisions exit non-zero:** the batch halted at the first
+invalid tuple (stderr names the failing finding id). Tuples preceding
+the failure are already committed to the artifact. Fix the offending
+tuple and re-invoke with just the remainder; do NOT re-send the whole
+batch (the committed tuples would be re-applied, and `_apply_finding_set`
+would re-append score_history entries — audit-trail pollution).
 
 ### 4.5. Wave 2 (chain retry — optional)
 
@@ -308,7 +310,9 @@ If the resulting list is non-empty AND we haven't already done Wave 2:
    gate, same prompt as Wave 1 BUT add: "This is Wave 2 — do NOT emit
    further `related_candidates_to_investigate` entries." (Hard-cap
    enforcement: §4 says "Hard cap at 2 waves.")
-4. Apply the decision table per step 4.4 for Wave 2 results.
+4. Apply the decision table per step 4.4 for Wave 2 results — build
+   a second tuple array at `$scratch/phase4-wave2-decisions.json` and
+   invoke `--apply-decisions @…` once for the whole Wave 2 batch.
 
 If the list is empty, proceed to step 4.6.
 
