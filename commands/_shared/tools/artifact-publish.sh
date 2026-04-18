@@ -6,17 +6,20 @@
 # this unconditionally in every mode.)
 #
 # Usage:
-#   artifact-publish.sh --mode pr --review-id <id> --pr <num> --md-path <path>
-#                       [--comment-id <n>] [--review-dir <path>]
+#   artifact-publish.sh --mode pr --review-id <id> --pr <num> \
+#                       (--md-path <path> | --repo-slug <slug> --branch <name>) \
+#                       [--comment-id <n>] [--review-dir <path>] [--dry-run]
 #   artifact-publish.sh --mode local --review-id <id> [--review-dir <path>]
 #
-# Stage-1 note: --md-path is a Stage-1 extension. DESIGN §21.6 assumes
-# latest.txt resolution (Phase 0, Stage 2); in Stage 1 we pass the .md
-# path explicitly so the harness doesn't need to stub
-# ~/.claude/reviews/<slug>/<branch>/latest.txt. Stage 2 will make
-# --md-path optional with latest.txt fallback. This does not change the
-# orchestrator-facing contract — callers that want latest.txt resolution
-# simply omit --md-path in Stage 2.
+# md-path resolution (first match wins):
+#   1. --md-path <path>        (explicit override; used by Stage 1 smoke harness)
+#   2. --review-dir <path>     (review dir set by caller; reads <dir>/artifact.md)
+#   3. --repo-slug + --branch  (latest.txt fallback — DESIGN §13.4):
+#        <reviews-root>/<slug>/<branch>/latest.txt → <review_id> →
+#        <reviews-root>/<slug>/<branch>/<review_id>/artifact.md
+#      where <reviews-root> is $ADAMS_REVIEW_REVIEWS_ROOT (default
+#      ~/.claude/reviews). If the resolved review_id disagrees with
+#      --review-id, exit 1 with a staleness note.
 #
 # Comment discovery (§13.4, in order):
 #   1. --comment-id passed → verify + PATCH.
@@ -27,26 +30,36 @@
 #   3. Create: POST new comment → emit {"comment_id": N}.
 #   4. PATCH-fails fallback: POST new, log failure to trace.md, emit new id.
 #
-# Exits: 0 success; 1 gh/network error; 64 usage.
+# --dry-run: exits 0 after arg validation + md-path resolution; prints the
+# resolved md path to stdout. No gh api calls. Useful for smoke tests and
+# orchestrator-side debugging.
+#
+# Exits: 0 success; 1 gh/network/resolution error; 64 usage.
 
 set -euo pipefail
 
 usage() {
     cat >&2 <<USAGE
 Usage:
-  $(basename "$0") --mode pr    --review-id <id> --pr <num> --md-path <path> \\
-                                [--comment-id <n>] [--review-dir <path>]
+  $(basename "$0") --mode pr    --review-id <id> --pr <num> \\
+                                (--md-path <path> | --repo-slug <slug> --branch <name>) \\
+                                [--comment-id <n>] [--review-dir <path>] [--dry-run]
   $(basename "$0") --mode local --review-id <id> [--review-dir <path>]
 
 Modes:
   pr     Post or edit the rendered artifact.md on a GitHub PR via gh.
-         Requires --pr and --md-path. Comment discovery order:
+         Requires --pr plus one of --md-path, --review-dir, or
+         (--repo-slug AND --branch). Comment discovery order:
          --comment-id → marker search → create. Emits {"comment_id": N}
          to stdout when a new comment is created or an existing one is
          located via marker search.
   local  No-op. If --review-dir is given, appends a one-line entry to
          <review-dir>/trace.md so the orchestrator's trace reflects
          that publish ran.
+
+Flags:
+  --dry-run  Validate args + resolve md path, print resolved path, exit 0.
+             No gh api calls.
 USAGE
 }
 
@@ -58,6 +71,9 @@ PR_NUM=""
 MD_PATH=""
 COMMENT_ID=""
 REVIEW_DIR=""
+REPO_SLUG=""
+BRANCH=""
+DRY_RUN=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -67,6 +83,9 @@ while [[ $# -gt 0 ]]; do
         --md-path)    MD_PATH="${2:-}"; shift 2 ;;
         --comment-id) COMMENT_ID="${2:-}"; shift 2 ;;
         --review-dir) REVIEW_DIR="${2:-}"; shift 2 ;;
+        --repo-slug)  REPO_SLUG="${2:-}"; shift 2 ;;
+        --branch)     BRANCH="${2:-}"; shift 2 ;;
+        --dry-run)    DRY_RUN=1; shift ;;
         -h|--help)    usage; exit 0 ;;
         *)            die_usage "unknown arg '$1'" ;;
     esac
@@ -101,11 +120,59 @@ emit_comment_id() {
     printf '{"comment_id": %s}\n' "$1"
 }
 
+# resolve_md_path — populates MD_PATH via the 3-tier fallback described in
+# the header. Exits 1 with error-as-prompt if none of the tiers resolves.
+resolve_md_path() {
+    # Tier 1: explicit override (Stage 1 smoke compat).
+    if [[ -n "$MD_PATH" ]]; then
+        return 0
+    fi
+
+    # Tier 2: --review-dir/artifact.md (caller knows the review dir).
+    if [[ -n "$REVIEW_DIR" ]]; then
+        MD_PATH="$REVIEW_DIR/artifact.md"
+        return 0
+    fi
+
+    # Tier 3: latest.txt under <reviews-root>/<slug>/<branch>/.
+    if [[ -n "$REPO_SLUG" && -n "$BRANCH" ]]; then
+        local reviews_root_base="${ADAMS_REVIEW_REVIEWS_ROOT:-$HOME/.claude/reviews}"
+        local reviews_root="$reviews_root_base/$REPO_SLUG/$BRANCH"
+        local latest_file="$reviews_root/latest.txt"
+        if [[ ! -f "$latest_file" ]]; then
+            echo "ERROR: latest.txt not found at $latest_file" >&2
+            echo "Context: expected for --repo-slug=$REPO_SLUG --branch=$BRANCH" >&2
+            echo "Action: run /adams-review against this branch first, or pass --md-path explicitly." >&2
+            exit 1
+        fi
+        local resolved_id
+        resolved_id=$(tr -d '[:space:]' < "$latest_file")
+        if [[ -z "$resolved_id" ]]; then
+            echo "ERROR: latest.txt at $latest_file is empty" >&2
+            echo "Action: rerun /adams-review to repopulate, or pass --md-path explicitly." >&2
+            exit 1
+        fi
+        if [[ "$resolved_id" != "$REVIEW_ID" ]]; then
+            echo "ERROR: latest.txt points to review_id='$resolved_id' but caller passed --review-id='$REVIEW_ID'" >&2
+            echo "Context: the 'latest' pointer has moved since the caller captured it (concurrent run, or stale context)." >&2
+            echo "Action: use the resolved id explicitly via --md-path=$reviews_root/$resolved_id/artifact.md, or re-capture review_id from latest.txt." >&2
+            exit 1
+        fi
+        MD_PATH="$reviews_root/$resolved_id/artifact.md"
+        return 0
+    fi
+
+    echo "ERROR: cannot resolve md path" >&2
+    echo "Valid sources (one required for --mode=pr): --md-path, --review-dir, or (--repo-slug AND --branch)." >&2
+    echo "Action: pass one of those args." >&2
+    exit 1
+}
+
 require_pr_args() {
-    [[ -n "$PR_NUM" ]]   || die_usage "--pr is required when --mode=pr"
-    [[ -n "$MD_PATH" ]]  || die_usage "--md-path is required when --mode=pr"
-    [[ -f "$MD_PATH" ]]  || {
-        echo "ERROR: --md-path file not found: $MD_PATH" >&2
+    [[ -n "$PR_NUM" ]] || die_usage "--pr is required when --mode=pr"
+    resolve_md_path
+    [[ -f "$MD_PATH" ]] || {
+        echo "ERROR: resolved md path not found: $MD_PATH" >&2
         echo "Action: run artifact-render.py first to produce artifact.md." >&2
         exit 1
     }
@@ -138,6 +205,11 @@ fi
 # ------------------------------------------------------------------ pr mode
 
 require_pr_args
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "$MD_PATH"
+    exit 0
+fi
 
 OWNER_REPO=$(gh_owner_repo) || {
     echo "ERROR: could not resolve owner/repo via 'gh repo view'" >&2

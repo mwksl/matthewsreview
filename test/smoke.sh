@@ -195,6 +195,39 @@ else
     fail "B2: publish --mode bogus should exit 64, got $code"
 fi
 
+# B3. publish --mode pr with no md source → non-zero + "cannot resolve md path"
+stderr=$("$TOOLS/artifact-publish.sh" --mode pr --review-id rev_x --pr 1 --dry-run 2>&1 >/dev/null); code=$?
+if [[ "$code" != "0" ]] && echo "$stderr" | grep -q "cannot resolve md path"; then
+    pass "B3: publish --mode pr with no md source rejected with resolution error"
+else
+    fail "B3: expected non-zero + 'cannot resolve md path', got code=$code stderr=$stderr"
+fi
+
+# B4. publish --mode pr --dry-run with latest.txt resolves + prints path
+FAKE_ROOT="$WORK/reviews"
+mkdir -p "$FAKE_ROOT/fake-slug/fake-branch/rev_fake"
+echo "rev_fake" > "$FAKE_ROOT/fake-slug/fake-branch/latest.txt"
+echo "# rendered" > "$FAKE_ROOT/fake-slug/fake-branch/rev_fake/artifact.md"
+out=$(ADAMS_REVIEW_REVIEWS_ROOT="$FAKE_ROOT" "$TOOLS/artifact-publish.sh" \
+        --mode pr --review-id rev_fake --pr 1 \
+        --repo-slug fake-slug --branch fake-branch --dry-run 2>&1); code=$?
+expected_path="$FAKE_ROOT/fake-slug/fake-branch/rev_fake/artifact.md"
+if [[ "$code" == "0" ]] && [[ "$out" == "$expected_path" ]]; then
+    pass "B4: publish --dry-run resolves latest.txt → $expected_path"
+else
+    fail "B4: dry-run resolution mismatch" "code=$code out=$out expected=$expected_path"
+fi
+
+# B5. publish --mode pr with latest.txt disagreeing with --review-id → non-zero + staleness note
+stderr=$(ADAMS_REVIEW_REVIEWS_ROOT="$FAKE_ROOT" "$TOOLS/artifact-publish.sh" \
+        --mode pr --review-id rev_stale --pr 1 \
+        --repo-slug fake-slug --branch fake-branch --dry-run 2>&1 >/dev/null); code=$?
+if [[ "$code" != "0" ]] && echo "$stderr" | grep -q "latest.txt points to review_id='rev_fake'"; then
+    pass "B5: publish rejects --review-id mismatch against latest.txt"
+else
+    fail "B5: expected staleness error, got code=$code stderr=$stderr"
+fi
+
 # C. claude-md-paths synthetic tree: root + a/CLAUDE.md expected, root-first
 mkdir -p "$WORK/cm/a/b" "$WORK/cm/a/c"
 touch "$WORK/cm/CLAUDE.md" "$WORK/cm/a/CLAUDE.md" "$WORK/cm/a/b/file.ts" "$WORK/cm/a/c/file.ts"
