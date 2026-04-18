@@ -103,6 +103,40 @@ def thousands(n):
 
 # ----- Section renderers ------------------------------------------------
 
+def render_freshness_line(artifact):
+    """Return the base-freshness header line per §13.10, or '' when omitted.
+
+    Absent for `fresh`, `no_remote`, or missing `base_context` (pre-§13.10
+    artifacts). The warning glyphs escalate by severity: fast_forwarded
+    reports the prior behind count as context, used_remote_ref flags that
+    the review used the remote ref, proceeded_stale flags data loss.
+    """
+    bc = artifact.get("base_context") or {}
+    freshness = bc.get("freshness")
+    if not freshness or freshness in ("fresh", "no_remote"):
+        return ""
+    base = artifact.get("base_branch", "?")
+    behind = bc.get("behind_count")
+    behind_phrase = f"{behind} commits behind" if behind else "behind"
+    if freshness == "fast_forwarded":
+        return (f"**Base freshness:** local `{base}` was {behind_phrase} "
+                f"`origin/{base}` at run start; fast-forwarded before review")
+    if freshness == "used_remote_ref":
+        return (f"**Base freshness:** ⚠ local `{base}` is {behind_phrase} "
+                f"`origin/{base}`; this review compared against "
+                f"`origin/{base}` instead")
+    if freshness == "proceeded_stale":
+        return (f"**Base freshness:** ⚠⚠ compared against stale local `{base}` "
+                f"({behind_phrase} `origin/{base}`). Re-run after `git pull` "
+                f"for accurate results.")
+    if freshness == "no_fetch":
+        return (f"**Base freshness:** could not fetch `origin/{base}` "
+                f"(offline?); compared against local `{base}`")
+    # Unknown freshness values — should be caught by schema validation, but
+    # render a best-effort line rather than silently dropping.
+    return f"**Base freshness:** `{freshness}` (see trace.md)"
+
+
 def render_header(artifact):
     lines = []
     head = artifact.get("head_branch", "?")
@@ -117,6 +151,9 @@ def render_header(artifact):
     else:
         lines.append("**Mode:** local")
     lines.append(f"**Review ID:** `{artifact.get('review_id', '?')}`")
+    freshness_line = render_freshness_line(artifact)
+    if freshness_line:
+        lines.append(freshness_line)
     if not any_fix_attempts(artifact):
         lines.append("**Fix threshold:** not yet set (run `/adams-review-fix [threshold]` to apply fixes)")
     tokens = artifact.get("subagent_tokens") or {}

@@ -980,6 +980,103 @@ else
     fail "OC-7: expected exit 1; got code=$code stderr=$stderr"
 fi
 
+# ------------------------------------------------------------------ Stage 2.6.C
+# Renderer surfaces §13.10 freshness state in the header when non-default.
+
+RH_DIR="$WORK/render-header"
+mkdir -p "$RH_DIR"
+
+# Helper: build an artifact with a given base_context and render it. Returns
+# the rendered markdown's header block.
+render_with_freshness() {
+    local freshness="$1"
+    local behind="$2"
+    local remote_sha_arg
+    if [[ "$freshness" == "no_fetch" || "$freshness" == "no_remote" ]]; then
+        remote_sha_arg=null
+    else
+        remote_sha_arg='"abc1234"'
+    fi
+    local id="rev_$(echo "$freshness" | tr -d '_')"
+    local seed
+    seed=$(jq --arg f "$freshness" \
+              --arg id "$id" \
+              --argjson rs "$remote_sha_arg" \
+              --argjson bc "$behind" \
+              '.review_id = $id
+               | .base_context = {freshness: $f, comparison_ref: "main", remote_sha: $rs, behind_count: $bc}' \
+              "$FIX/artifact-seed.json")
+    "$TOOLS/artifact-patch.py" --init "$seed" --path "$RH_DIR/art-$freshness.json" >/dev/null
+    "$TOOLS/artifact-render.py" --input "$RH_DIR/art-$freshness.json"
+}
+
+# Assertion RH-1: freshness=fresh → NO "Base freshness:" line (happy path
+# stays quiet so the header isn't cluttered for 99% of runs).
+md=$(render_with_freshness fresh 0)
+if ! echo "$md" | grep -q "Base freshness:"; then
+    pass "RH-1 (§13.10/§7): freshness=fresh renders WITHOUT a Base freshness line"
+else
+    fail "RH-1: fresh should render quietly; saw: $(echo "$md" | grep 'Base freshness')"
+fi
+
+# Assertion RH-2: fast_forwarded → single ⚠-free line noting the prior behind count.
+md=$(render_with_freshness fast_forwarded 12)
+if echo "$md" | grep -q "Base freshness:" \
+    && echo "$md" | grep -q "fast-forwarded before review" \
+    && echo "$md" | grep -q "12 commits behind"; then
+    pass "RH-2 (§13.10/§7): fast_forwarded renders prior behind-count with fast-forwarded note"
+else
+    fail "RH-2: expected fast_forwarded header; saw: $md"
+fi
+
+# Assertion RH-3: used_remote_ref → single ⚠ with the review-used-remote phrasing.
+md=$(render_with_freshness used_remote_ref 12)
+if echo "$md" | grep -q "Base freshness:" \
+    && echo "$md" | grep -q "compared against" \
+    && echo "$md" | grep -q 'origin/main' \
+    && echo "$md" | grep -q "⚠"; then
+    pass "RH-3 (§13.10/§7): used_remote_ref renders ⚠ + 'compared against origin/main'"
+else
+    fail "RH-3: expected used_remote_ref header with ⚠; saw: $md"
+fi
+
+# Assertion RH-4: proceeded_stale → ⚠⚠ with explicit data-loss warning.
+md=$(render_with_freshness proceeded_stale 12)
+if echo "$md" | grep -q "⚠⚠" \
+    && echo "$md" | grep -q "stale local" \
+    && echo "$md" | grep -q "git pull"; then
+    pass "RH-4 (§13.10/§7): proceeded_stale renders ⚠⚠ + explicit stale warning + git pull hint"
+else
+    fail "RH-4: expected proceeded_stale header with ⚠⚠; saw: $md"
+fi
+
+# Assertion RH-5: no_fetch → offline note. No ⚠ (offline is a soft degradation).
+md=$(render_with_freshness no_fetch 0)
+if echo "$md" | grep -q "could not fetch" \
+    && echo "$md" | grep -q "offline"; then
+    pass "RH-5 (§13.10/§7): no_fetch renders 'could not fetch (offline?)' note"
+else
+    fail "RH-5: expected no_fetch header; saw: $md"
+fi
+
+# Assertion RH-6: no_remote → no line rendered (local-only repo is normal,
+# not a warning-worthy state).
+md=$(render_with_freshness no_remote 0)
+if ! echo "$md" | grep -q "Base freshness:"; then
+    pass "RH-6 (§13.10/§7): no_remote renders silently (no warning for local-only repos)"
+else
+    fail "RH-6: no_remote should render quietly; saw: $(echo "$md" | grep 'Base freshness')"
+fi
+
+# Assertion RH-7: artifacts without base_context (pre-§13.10) render without
+# any freshness line — backward compat.
+md=$("$TOOLS/artifact-render.py" --input "$ART")
+if ! echo "$md" | grep -q "Base freshness:"; then
+    pass "RH-7 (§13.10/§7): pre-§13.10 artifact (no base_context) renders without freshness line"
+else
+    fail "RH-7: pre-§13.10 artifact should not render freshness; saw: $(echo "$md" | grep 'Base freshness')"
+fi
+
 echo
 echo "smoke: PASS ($N assertions)"
 exit 0
