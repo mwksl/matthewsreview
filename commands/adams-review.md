@@ -37,7 +37,11 @@ This matters because:
 - **Parallel fan-outs are expensive.** Phase 1's six internal lenses and
   Phase 3/4's per-candidate agents all dispatch in single-turn parallel
   batches. Re-running a phase because you lost your place costs real
-  tokens.
+  tokens. Under `--ensemble`, Phase 1 and Phase 1.5 also dispatch as a
+  joint fan-out in one orchestrator turn (DESIGN §13.12). The TaskList
+  can still carry two tasks — mark both `in_progress` when you fire the
+  dispatch turn, and both `completed` after the join step at
+  01-detection.md 1.5 commits the pooled findings.
 - **The artifact is the single source of truth.** Every state change
   goes through `artifact-patch.py` (with full re-validation). Never hold
   state in shell variables that aren't also written to the artifact.

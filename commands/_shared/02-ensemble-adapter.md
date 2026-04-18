@@ -7,21 +7,32 @@ step 0.1). Log one line to `trace.md` and proceed to Phase 2:
 Phase 1.5 skipped — --ensemble not set
 ```
 
-When `--ensemble` IS set, Phase 1.5 pulls additional candidates from three
-external channels:
+**Dispatch under §13.12.** When `--ensemble` IS set, Phase 1.5's CLI
+launches and PR scrape fire in the same orchestrator turn as the
+Phase 1 lens `Agent` dispatches — see 01-detection.md step 1.3. This
+fragment documents the Phase-1.5-owned work (readiness pointer,
+launch specs, normalizer, token logging, summary); execution sequencing
+is orchestrated from 01-detection.md. The readiness gate moved to
+01-detection.md step 1.2a so missing-CLI prompts surface before any
+token spend.
+
+Phase 1.5 pulls additional candidates from three external channels:
 
 1. **CodeRabbit CLI** — `coderabbit review --agent -t all --base <base>`, a
    local Claude-like review that emits findings to stdout (does not post to
-   the PR). Runs in background; result awaited at the end of this phase.
+   the PR). Runs in background; result awaited before the normalizer dispatch.
 2. **Codex CLI** — `node "$CODEX_COMPANION" task --prompt-file <file>`, a
    local Codex-based review. Same shape.
 3. **GitHub PR comment scrape** — `external-scrape.sh` pulls bot-authored
    comments posted to the PR since `review_started_at`. Only runs when
    `mode == pr`. Local mode can't scrape a PR that doesn't exist.
 
-All three feed a single Sonnet normalizer sub-agent that emits standard
-candidates. The orchestrator appends them to `artifact.findings[]` with
-`source_family: "external-deep-family"` and `origin_confidence: "low"`.
+All three feed a single Sonnet normalizer sub-agent that emits
+standard candidates. The normalizer's output pools into the
+orchestrator-context `external_candidates` variable; the join step at
+01-detection.md 1.5 assigns ids and commits to `artifact.findings[]`
+with `source_family: "external-deep-family"` and
+`origin_confidence: "low"`.
 
 **Token accounting.** The CodeRabbit and Codex CLIs are EXTERNAL processes —
 their token spend is billed separately by their respective providers and is
@@ -30,64 +41,46 @@ orchestration tokens tracked" language — with CLI dispatch there is no
 Claude wrapper sub-agent to track). Only the Sonnet normalizer is logged,
 under `phase_1_5`.
 
-### 1.5.1. Readiness check (up-front, before any launch)
+### 1.5.1. Readiness — already done in the Phase 1 fragment (§13.12)
 
-Capture `phase_1_5_start_epoch=$(date +%s)`. Create a scratch directory
-under `/tmp` for transient CLI outputs — DESIGN §9.3 keeps
-`$review_dir` clean of ephemeral noise:
+Under §13.12, the readiness check, scratch-dir creation, Codex prompt
+file write, and `phase_1_5_start_epoch` capture all moved into
+`01-detection.md` step 1.2a — they run BEFORE any dispatch so
+missing-CLI prompts surface ahead of token spend.
 
-```bash
-scratch_dir="/tmp/adams-review-$review_id"
-mkdir -p "$scratch_dir"
+By the time execution reaches this fragment, the following are already
+in your working context:
+
+- `coderabbit_available` (bool) and, if false, `coderabbit_reason`
+- `codex_available` (bool) and, if false, `codex_reason`
+- `CODEX_COMPANION` (path, if Codex available)
+- `scratch_dir` (`/tmp/adams-review-$review_id`)
+- `phase_1_5_start_epoch` (captured at gate, not at this fragment)
+- Codex prompt file at `/tmp/adams-review-codex-$review_id.md` (if
+  Codex available)
+
+If `ensemble_mode != true`, this entire fragment is skipped — trace.md
+gets one line:
+
+```
+Phase 1.5 skipped — --ensemble not set
 ```
 
-(Cleanup happens at the end of Phase 1.5, step 1.5.5. The review-
-persistent copies of anything worth keeping — only the normalized
-candidate set — lands in the artifact via `--add-finding` at 1.5.6.)
+…and execution proceeds to Phase 2. Under `ensemble_mode=true`,
+continue with step 1.5.2.
 
-Check CodeRabbit availability:
+### 1.5.2. Launch CLI reviewers (background Bash; dispatched from 01 step 1.3)
 
-```bash
-coderabbit --version 2>&1 && coderabbit auth status 2>&1 | head -3
-```
+These launches are tool-use blocks in the **01-detection.md step 1.3
+dispatch turn** — alongside the 6 lens `Agent` blocks (§13.12). This
+section is the authoritative spec for the commands themselves; refer
+back from step 1.3 to find the command strings.
 
-If either returns non-zero, record `coderabbit_available=false` with the
-specific failure reason (e.g., "not installed", "not authenticated —
-run `coderabbit auth login`"). Otherwise `coderabbit_available=true`.
-
-Check Codex availability:
-
-```bash
-CODEX_COMPANION="$(find ~/.claude/plugins -type f -name codex-companion.mjs -path '*codex*' 2>/dev/null | head -1)"
-if [[ -z "$CODEX_COMPANION" ]]; then
-    codex_available=false
-    codex_reason="companion script not found — run /codex:setup"
-else
-    if node "$CODEX_COMPANION" ready 2>&1 | grep -q ready; then
-        codex_available=true
-    else
-        codex_available=false
-        codex_reason="ready check failed — run /codex:setup to diagnose"
-    fi
-fi
-```
-
-If **both** are available, proceed silently. If **either** is unavailable,
-use `AskUserQuestion` **once** with two options:
-
-- **Proceed with what's available** — continue with the available reviewer(s)
-  plus the PR scrape. Note skipped reviewers in the final report's source
-  breakdown and in `trace.md`.
-- **Stop so I can set them up first** — exit the command. Print the exact
-  remediation commands and let the user fix first.
-
-### 1.5.2. Launch CLI reviewers (background Bash)
-
-For each available CLI reviewer, launch in background and capture the shell
-id. The diff used is `$comparison_ref..HEAD` (§13.10 — the freshness-
-reconciled ref, not the literal `$base_branch` name, so ensemble reviewers
-see the same diff surface as the internal lenses under option (b)
-`used_remote_ref`).
+For each available CLI reviewer, launch in background and capture the
+shell id. The diff used is `$comparison_ref..HEAD` (§13.10 — the
+freshness-reconciled ref, not the literal `$base_branch` name, so
+ensemble reviewers see the same diff surface as the internal lenses
+under option (b) `used_remote_ref`).
 
 **CodeRabbit:**
 
@@ -96,39 +89,28 @@ coderabbit review --agent -t all --base "$comparison_ref" \
   > "$scratch_dir/coderabbit.out" 2> "$scratch_dir/coderabbit.err"
 ```
 
-(If CodeRabbit rejects a remote-ref `--base` like `origin/main`, fall back
-to `base_branch` and record the degradation in `trace.md`. In practice
-CodeRabbit accepts any revspec git understands.)
+(If CodeRabbit rejects a remote-ref `--base` like `origin/main`, fall
+back to `base_branch` and record the degradation in `trace.md`. In
+practice CodeRabbit accepts any revspec git understands.)
 
 Launch with the Bash tool using `run_in_background: true`. Capture the
-returned shell id as `coderabbit_shell_id`. If `coderabbit_available == false`,
-skip this launch.
+returned shell id as `coderabbit_shell_id`. If `coderabbit_available ==
+false`, skip this launch.
 
 **Codex:**
 
-Write a brief prompt file first:
-
-```bash
-cat > "/tmp/adams-review-codex-$review_id.md" <<'PROMPT'
-Review the code changes in this repository between <comparison-ref> and HEAD.
-Focus on potential bugs, correctness issues, security concerns, and violations
-of project conventions. Return a structured list of findings with file, line
-range, and concrete description for each.
-PROMPT
-# (substitute $comparison_ref into the actual prompt text)
-```
-
-Then launch:
+The prompt file was already written in 01-detection.md step 1.2a (the
+readiness gate). Just invoke the CLI:
 
 ```bash
 node "$CODEX_COMPANION" task --prompt-file "/tmp/adams-review-codex-$review_id.md" \
   > "$scratch_dir/codex.out" 2> "$scratch_dir/codex.err"
 ```
 
-Launch with `run_in_background: true`; capture shell id as `codex_shell_id`.
-If `codex_available == false`, skip.
+Launch with `run_in_background: true`; capture shell id as
+`codex_shell_id`. If `codex_available == false`, skip.
 
-### 1.5.3. PR comment scrape (PR mode only)
+### 1.5.3. PR comment scrape (PR mode only; dispatched from 01 step 1.3)
 
 While the CLI reviewers are running, synchronously scrape bot comments.
 Guard the exit-code capture with `||` so `set -e` orchestrator context
@@ -266,7 +248,33 @@ Dispatch via `Agent` with `model: sonnet`. Prompt essence:
 > `origin_confidence` is ALWAYS `"low"` for external candidates —
 > internal corroboration in Phase 4 decides whether they surface.
 
-### 1.5.6. Append external candidates + log tokens
+**After the normalizer returns**, repair missing location info and
+emit the result to `external_candidates` for the join step at
+01-detection.md step 1.5. Do NOT call `--add-finding` here (§13.12 —
+ids are assigned atomically at the join, not per-phase).
+
+**Schema guard for missing location info.** The normalizer prompt
+allows `file: null` / `line_range: null` for candidates whose body
+text didn't specify a location. Schema (`schema-v1.json`) requires
+`file` non-null with `minLength:1` and `line_range` as `[int,int]`
+with both items `>=1`. Repair before pooling — default to a sentinel
+so the finding is still stored (Phase 2 dedup + Phase 4 validation may
+still match it against an internal finding with proper location):
+
+```bash
+external_candidates=$(echo "$normalizer_output" | jq -c '
+  [ .[] | . + {
+      file:       (.file // "(unknown)"),
+      line_range: (.line_range // [1,1])
+    } ]
+')
+```
+
+Leave a one-line `trace.md` note per repaired candidate so the user
+knows where the ambiguity came from (iterate with `jq -r` to produce
+the notes before the merge).
+
+### 1.5.6. Log normalizer tokens
 
 Log the normalizer's tokens under `phase_1_5`:
 
@@ -277,47 +285,9 @@ Log the normalizer's tokens under `phase_1_5`:
   --model sonnet --tokens <N or null>
 ```
 
-For each normalized candidate, build a full schema-valid finding and
-append via `artifact-patch.py --add-finding`. Continue the F0xx id
-sequence from Phase 1 (if Phase 1 produced F001–F030, external starts
-at F031). The same transformation Phase 1.4 step 3 performs is
-required here:
-
-- **Preserve** `sources[]` as the normalizer emitted it (e.g.
-  `["external-pr:greptile-apps[bot]"]`, `["codex"]`, `["coderabbit"]`).
-- **Rename** the normalizer's singular `source_family` into the
-  schema's plural `source_families: [<family>]`.
-- **Strip** `evidence_snippet` — candidate-only field, rejected by the
-  schema's `additionalProperties: false` on findings.
-- **Default** schema-required-but-optional fields the normalizer
-  doesn't set: `disposition: "pending_validation"`, `is_actionable: false`,
-  `current_state: "open"`, `reason: null`, `confirmed_strength: null`,
-  `score_phase3: null`, `score_phase4: null`, `score_history: []`,
-  `validation_result: null`, `fix_attempts: []`, `introduced_in_sha: null`,
-  `suggested_follow_up: null`, `related_parent_finding_id: null`,
-  `actionability` per `impact_type`, `validation_lane` per
-  `impact_type` (or `"light"` under trivial_mode).
-- `origin_confidence` stays `"low"` per the normalizer's output.
-
-Use the same `jq -n` + `del(.source_family, .evidence_snippet)` idiom
-as 01-detection.md step 1.4 to avoid hand-escaping.
-
-**Schema guard for missing location info.** The normalizer prompt
-allows `file: null` / `line_range: null` for candidates whose body text
-didn't specify a location. Schema (`schema-v1.json`) requires `file`
-non-null with `minLength:1` and `line_range` as `[int,int]` with both
-items `>=1`. Repair before `--add-finding` — default to a sentinel so
-the finding is still stored (Phase 2 dedup + Phase 4 validation may
-still match it against an internal finding with proper location):
-
-```bash
-# Before --add-finding, if candidate.file is null: set to "(unknown)"
-# and line_range to [1,1]. Leave a one-line trace.md note per finding
-# so the user knows where the ambiguity came from.
-file=$(echo "$candidate" | jq -r '.file // "(unknown)"')
-line_range_json=$(echo "$candidate" | jq -c '(.line_range // [1,1])')
-# Merge back into the candidate before building the full finding.
-```
+(The `--add-finding` sweep moved to 01-detection.md step 1.5 per
+§13.12 — it runs once across the combined internal + external pool
+after ids are assigned. Do not `--add-finding` here.)
 
 ### 1.5.6b. Clean up scratch_dir
 
@@ -352,8 +322,12 @@ Where `coderabbit_status` is one of `success|failed|skipped|timed_out`
 
 ### Working-set delta after Phase 1.5
 
-- `artifact.findings[]` grew by the external candidates.
+- `external_candidates` (orchestrator-context pool) holds the
+  normalized + location-repaired candidates. The join step at
+  01-detection.md 1.5 consumes it; `artifact.findings[]` does NOT grow
+  until then.
 - `tokens.jsonl` grew one entry for the normalizer (not for the CLI
   reviewers — those are external processes).
-- `phases.jsonl` grew a Phase 1.5 record.
+- `phases.jsonl` grew a Phase 1.5 record (ts overlaps Phase 1's under
+  §13.12 joint dispatch).
 - `trace.md` grew a Phase 1.5 section.

@@ -29,7 +29,7 @@ Skipped lenses get a one-line note in `trace.md`:
 Phase 1: L2/L5/L6 skipped (trivial_mode=true)
 ```
 
-Log them via `log-phase.sh --summary` at step 1.4 as part of the Phase 1
+Log them via `log-phase.sh --summary` at step 1.6 as part of the Phase 1
 summary.
 
 ### 1.2. Build the shared input
@@ -49,6 +49,98 @@ diff; L2 additionally reads surrounding files.
 For lenses that receive CLAUDE.md content (L3, L4, L5, L6), pass
 `claude_md_paths` (the list captured in Phase 0, step 0.7). Each lens
 reads only what it needs.
+
+### 1.2a. Ensemble readiness gate (§13.12)
+
+This gate runs before the dispatch turn so missing-CLI prompts surface
+ahead of any token spend. Under `ensemble_mode=false` it's a one-line
+no-op; under `ensemble_mode=true` it probes CodeRabbit + Codex, may
+prompt the user via `AskUserQuestion`, and prepares the scratch
+directory + Codex prompt file for the joint dispatch at step 1.3.
+
+**When `ensemble_mode != true`:**
+
+Skip the gate. Record one line in `trace.md`:
+
+```
+Phase 1 ensemble readiness gate skipped — --ensemble not set
+```
+
+Set `coderabbit_available=false`, `codex_available=false` in your
+working context (so downstream fragments can short-circuit uniformly)
+and continue to step 1.3.
+
+**When `ensemble_mode == true`:**
+
+Capture `phase_1_5_start_epoch`:
+
+```bash
+phase_1_5_start_epoch=$(date +%s)
+```
+
+Phase 1.5's elapsed clock starts here — immediately before dispatch —
+so `phase_1_5.elapsed_sec` at 02-ensemble-adapter.md step 1.5.7
+reflects the wall-clock from dispatch to normalizer return.
+
+Create the scratch directory for CLI outputs (DESIGN §9.3 keeps
+`$review_dir` free of transient noise):
+
+```bash
+scratch_dir="/tmp/adams-review-$review_id"
+mkdir -p "$scratch_dir"
+```
+
+Check CodeRabbit availability:
+
+```bash
+coderabbit --version 2>&1 && coderabbit auth status 2>&1 | head -3
+```
+
+If either returns non-zero, record `coderabbit_available=false` with
+the specific failure reason (e.g., "not installed", "not authenticated
+— run `coderabbit auth login`"). Otherwise `coderabbit_available=true`.
+
+Check Codex availability:
+
+```bash
+CODEX_COMPANION="$(find ~/.claude/plugins -type f -name codex-companion.mjs -path '*codex*' 2>/dev/null | head -1)"
+if [[ -z "$CODEX_COMPANION" ]]; then
+    codex_available=false
+    codex_reason="companion script not found — run /codex:setup"
+else
+    if node "$CODEX_COMPANION" ready 2>&1 | grep -q ready; then
+        codex_available=true
+    else
+        codex_available=false
+        codex_reason="ready check failed — run /codex:setup to diagnose"
+    fi
+fi
+```
+
+**If both CLIs are available**, proceed silently. **If either is
+unavailable**, dispatch `AskUserQuestion` **once** with two options:
+
+- **Proceed with what's available** — continue with the available
+  reviewer(s) plus the PR scrape. Note skipped reviewers in the final
+  report's source breakdown and in `trace.md`.
+- **Stop so I can set them up first** — exit the command. Print the
+  exact remediation commands (`coderabbit auth login`, `/codex:setup`)
+  and let the user fix first.
+
+Stopping here costs zero lens tokens — the whole point of hoisting the
+gate ahead of dispatch.
+
+**If `codex_available=true`**, also write the Codex prompt file here so
+the dispatch turn at 1.3 is pure launches with no side effects:
+
+```bash
+cat > "/tmp/adams-review-codex-$review_id.md" <<PROMPT
+Review the code changes in this repository between $comparison_ref and HEAD.
+Focus on potential bugs, correctness issues, security concerns, and violations
+of project conventions. Return a structured list of findings with file, line
+range, and concrete description for each.
+PROMPT
+```
 
 ### 1.3. Dispatch the lenses (one turn, one Agent call per applicable lens)
 
@@ -191,7 +283,55 @@ Prompt essence:
 > Return the same candidate shape as L1 with `impact_type: "security"`,
 > `source_family: "security-family"`.
 
-### 1.4. Collect lens results + log tokens
+#### Ensemble fan-out (same turn, when `ensemble_mode == true`)
+
+Per DESIGN §13.12, the dispatch turn also launches the external
+reviewers and PR scrape when `ensemble_mode=true`. These run as
+tool-use blocks in the same orchestrator turn as the lens `Agent`
+dispatches above — waiting a turn between them serializes what's
+meant to be parallel and negates the whole point of §13.12.
+
+Total tool-use blocks in the dispatch turn:
+
+| Condition | Blocks |
+|---|---|
+| `ensemble_mode=false` | applicable lenses (6 max) |
+| `ensemble_mode=true`, both CLIs available, `mode=pr` | lenses + 2 background Bash + 1 foreground Bash |
+| `ensemble_mode=true`, both CLIs available, `mode=local` | lenses + 2 background Bash |
+| `ensemble_mode=true`, one CLI unavailable | lenses + 1 background Bash + (1 foreground Bash if PR mode) |
+
+The ensemble launch specs live in `02-ensemble-adapter.md`:
+
+- **CodeRabbit** (background Bash) — see `02-ensemble-adapter.md`
+  step 1.5.2. Skip if `coderabbit_available=false`. Capture
+  `coderabbit_shell_id`.
+- **Codex** (background Bash) — see `02-ensemble-adapter.md` step
+  1.5.2. Skip if `codex_available=false`. The prompt file was already
+  written in step 1.2a; the launch block just invokes `node
+  "$CODEX_COMPANION" task …`. Capture `codex_shell_id`.
+- **PR comment scrape** (foreground Bash, PR mode only) — see
+  `02-ensemble-adapter.md` step 1.5.3. Skipped in local mode. This
+  call is synchronous, but it's short (seconds of `gh api`) so staying
+  foreground in the dispatch turn doesn't meaningfully delay the
+  background launches — it just means the turn returns a hair later.
+
+Under `ensemble_mode=false`, none of these launches happen; the
+02-ensemble-adapter fragment's top-level skip note fires at step 1.5.
+
+### 1.4. Collect lens candidates into pool
+
+Collection runs per-lens as each sub-agent result returns — but under
+§13.12 nothing gets an `id` and nothing is `--add-finding`'d during
+collection. Candidates accumulate in an in-context pool
+(`internal_candidates`) and are committed at the join step 1.5.
+
+Initialize the pool and capture the phase epoch before the first lens
+dispatch (at the top of step 1.3's dispatch turn):
+
+```bash
+phase_1_start_epoch=$(date +%s)
+internal_candidates='[]'
+```
 
 For each sub-agent result, in the order it returns:
 
@@ -212,7 +352,7 @@ For each sub-agent result, in the order it returns:
    `<lens-name>` is one of `lens_1_diff_local`, `lens_2_structural`,
    `lens_3_claude_md`, `lens_4_comments`, `lens_5_ux`, `lens_6_security`.
    The paired per-finding `sources[]` entry — used in the jq builder at
-   step 3 — is the shorter lens tag: `L1-diff-local`, `L2-structural`,
+   step 1.5 — is the shorter lens tag: `L1-diff-local`, `L2-structural`,
    `L3-claude-md`, `L4-comments`, `L5-ux`, `L6-security` (DESIGN §6).
 
 2. **Light JSON repair** if the output isn't a parseable array — strip code
@@ -221,14 +361,14 @@ For each sub-agent result, in the order it returns:
    the JSON array described in the schema." If still unparseable, log to
    `trace.md` and drop that lens's output per §24.1.
 
-2a. **Origin cross-check (§13.11).** Before building the full finding
-   shape, hand the lens's candidate array to `origin-crosscheck.sh` so
-   any candidate whose blame range is entirely ancestor of
-   `$comparison_ref` gets `origin=pre_existing, origin_confidence=high`
-   — which then triggers the §13.1 pre-existing override at Phase 3.
-   `introduced_by_pr` candidates that blame confirms as PR-modified
-   are respected; lens-supplied `pre_existing` whose blame disagrees
-   gets downgraded to medium confidence so the override doesn't fire.
+2a. **Origin cross-check (§13.11).** Hand the lens's candidate array to
+   `origin-crosscheck.sh` so any candidate whose blame range is entirely
+   ancestor of `$comparison_ref` gets `origin=pre_existing,
+   origin_confidence=high` — which then triggers the §13.1 pre-existing
+   override at Phase 3. `introduced_by_pr` candidates that blame confirms
+   as PR-modified are respected; lens-supplied `pre_existing` whose blame
+   disagrees gets downgraded to medium confidence so the override doesn't
+   fire.
 
    ```bash
    corrected_candidates=$(
@@ -248,121 +388,139 @@ For each sub-agent result, in the order it returns:
    `$lens_candidates_json` unchanged — respecting the lens across the
    board is the safe default when cross-check can't run.
 
-3. **Build a complete finding object and append it.** `artifact-patch.py
-   --add-finding` does NOT default fields — it validates the payload
-   against the full schema and rejects if anything required is missing.
-   The lens sub-agent returns a PARTIAL candidate (with keys like
-   `file`, `line_range`, `claim`, `evidence_snippet`, `impact_type`,
-   `origin`, `origin_confidence`, `source_family` — singular). You must
-   transform it into the full schema shape before passing to
-   `--add-finding`.
+3. **Tag with `sources` and append to the pool.** Do NOT call
+   `--add-finding` here; do NOT assign an id. The full-finding jq build
+   moves to step 1.5 where ids are assigned atomically across the
+   combined pool.
 
-   Iterate over `$corrected_candidates` from step 2a (it has the same
-   shape as the lens's partial candidate array, with `origin` and
-   `origin_confidence` possibly corrected per §13.11). For each
-   element, bind it to `$candidate_from_lens` in the jq call below.
-
-   Build the complete finding object per candidate. Monotonically assign
-   finding ids (`F001`, `F002`, ... across all lenses — keep a counter in
-   your working context):
-
-   ```
-   {
-     "id":                        "F###",
-     "sources":                   ["<lens-tag>"],                # lens-specific per DESIGN §6: L1-diff-local | L2-structural | L3-claude-md | L4-comments | L5-ux | L6-security
-     "source_families":           ["<lens's source_family>"],    # singular → array; Phase 2 may union
-     "impact_type":               "<from lens output>",
-     "origin":                    "<from lens, default introduced_by_pr>",
-     "origin_confidence":         "<from lens, default high>",
-     "actionability":             "auto_fixable"                 # if impact_type ∈ {correctness, security}
-                                  | "manual"                     # ux/policy
-                                  | "report_only",               # architecture
-     "validation_lane":           "deep" if impact_type ∈ {correctness, security} AND trivial_mode != true
-                                  else "light",
-     "current_state":             "open",
-     "disposition":               "pending_validation",          # parking state; Phase 3 gate-fail → below_gate, Phase 4 → confirmed_* / disproven / uncertain / pre_existing_report
-     "is_actionable":             false,                         # must agree with disposition per §5.2.1
-     "reason":                    null,
-     "confirmed_strength":        null,
-     "file":                      "<from lens>",
-     "line_range":                [<start>, <end>],              # [int, int]
-     "claim":                     "<from lens>",
-     "score_phase3":              null,                          # Phase 3 sets
-     "score_phase4":              null,
-     "score_history":             [],
-     "validation_result":         null,
-     "fix_attempts":              [],
-     "introduced_in_sha":         null,
-     "suggested_follow_up":       null,
-     "related_parent_finding_id": null
-   }
-   ```
-
-   Use `jq -n` to build this from the lens's partial candidate without
-   escaping-hell:
+   Tag each corrected candidate with `sources: [<lens-tag>]` so the
+   join step's helper (`assign-finding-ids.sh`) can sort by source
+   priority. The lens-tag is the same short tag used in the token log
+   above (`L1-diff-local`, `L2-structural`, etc., per DESIGN §6):
 
    ```bash
-   full_finding=$(jq -n \
-     --arg id "F$(printf '%03d' $finding_counter)" \
-     --arg lens_tag "$lens_source_tag" \
-     --arg sf "$lens_source_family_singular" \
-     --argjson trivial "$trivial_mode" \
-     --argjson lens "$candidate_from_lens" \
-     '$lens + {
-       id: $id,
-       sources: [$lens_tag],
-       source_families: [$sf],
-       actionability: (if ($lens.impact_type == "correctness" or $lens.impact_type == "security") then "auto_fixable"
-                      elif ($lens.impact_type == "architecture") then "report_only"
-                      else "manual" end),
-       validation_lane: (if $trivial then "light"
-                         elif ($lens.impact_type == "correctness" or $lens.impact_type == "security") then "deep"
-                         else "light" end),
-       current_state: "open",
-       disposition: "pending_validation",
-       is_actionable: false,
-       reason: null,
-       confirmed_strength: null,
-       score_phase3: null,
-       score_phase4: null,
-       score_history: [],
-       validation_result: null,
-       fix_attempts: [],
-       introduced_in_sha: null,
-       suggested_follow_up: null,
-       related_parent_finding_id: null
-     } | del(.source_family, .evidence_snippet)')   # strip candidate-only fields — schema additionalProperties:false
+   tagged=$(echo "$corrected_candidates" \
+     | jq --arg tag "$lens_source_tag" '[.[] | . + {sources: [$tag]}]')
+
+   internal_candidates=$(jq -nc \
+     --argjson accum "$internal_candidates" \
+     --argjson new "$tagged" \
+     '$accum + $new')
    ```
 
-   For trivial-mode runs (`trivial_mode=true`), the jq builder above
-   forces `validation_lane="light"` for every candidate — Phase 4b
-   handles the whole pool per §19.6. The `$trivial` argjson binding
-   drives that branch so the stored lane is honest.
+   The pool lives in your working context, not on disk — no intermediate
+   artifact writes. If the orchestrator loses context mid-collection,
+   Phase 1 has to re-run from dispatch.
 
-   Then append:
+   A common lens failure is `line_range: null` instead of `[N, N]`.
+   Default to `[1, 1]` with a one-line `trace.md` note at collection
+   time so the join step's jq builder doesn't blow up on a schema-
+   invalid pool entry:
 
    ```bash
-   ~/.claude/commands/_shared/tools/artifact-patch.py \
-     --path "$artifact_path" --add-finding "$full_finding"
+   tagged=$(echo "$tagged" \
+     | jq '[.[] | .line_range //= [1,1]]')
    ```
 
-   On non-zero exit, read the error-as-prompt (it names the offending
-   field), adjust your `jq` build, retry once. A common failure is a
-   lens returning `line_range` as `null` instead of `[N, N]` — default
-   to `[1, 1]` with a `trace.md` note when that happens.
+### 1.5. Join + assign IDs + add-finding (§13.12)
 
-   **`pending_validation` is the Phase-1 parking disposition.**
-   Schema requires `disposition` non-null, so we can't leave it unset.
-   `is_actionable: false` + `disposition: "pending_validation"` keeps the
-   §5.2.1 coupling happy. Phase 3's gate either locks a gate-fail finding
-   into `below_gate` with the "below validation gate (score X)" reason,
-   or leaves it at `pending_validation` for Phase 4 to overwrite with
-   the final verdict. Pre-existing overrides set `pre_existing_report`
-   at Phase 3.1 before any of that runs.
+Wait until every internal lens has returned AND (if `ensemble_mode ==
+true`) the ensemble normalizer has emitted its candidate array into
+`external_candidates` per `02-ensemble-adapter.md` step 1.5.5. Under
+`ensemble_mode=false`, `external_candidates` defaults to `[]`.
 
-### 1.5. Log Phase 1 summary
+**Step 1. Combine the two pools:**
 
-After every lens result is aggregated:
+```bash
+pooled=$(jq -nc \
+  --argjson internal "$internal_candidates" \
+  --argjson external "${external_candidates:-[]}" \
+  '$internal + $external')
+```
+
+**Step 2. Assign monotonic finding ids via the helper:**
+
+```bash
+ided=$(printf '%s' "$pooled" \
+  | ~/.claude/commands/_shared/tools/assign-finding-ids.sh)
+```
+
+`assign-finding-ids.sh` sorts by source priority (L1, L2, L3, L4, L5,
+L6, external-pr, codex, coderabbit — stable within source = input
+order preserved) and assigns `F001…F0NN`. See the helper's header for
+the full priority table.
+
+On non-zero exit (malformed pool JSON), log stderr to `trace.md` and
+bail — the whole detection phase must re-run because the pool is
+corrupt. This is a structural failure, not a per-candidate drop.
+
+**Step 3. Build full schema-valid findings + single `--add-finding`
+sweep.** `artifact-patch.py --add-finding` does NOT default fields —
+it validates the payload against the full schema and rejects if
+anything required is missing. Partial candidates (from lenses) and
+normalizer candidates both need to be fleshed out to schema shape.
+
+For each element in `$ided`, bind it to `$candidate` in the jq call
+below and call `--add-finding`. The jq builder matches the pre-§13.12
+logic (DESIGN §6 shape) with `.id` already populated from the helper:
+
+```bash
+for candidate in $(echo "$ided" | jq -c '.[]'); do
+    full_finding=$(jq -n \
+      --argjson trivial "$trivial_mode" \
+      --argjson cand "$candidate" \
+      '$cand + {
+        source_families: [($cand.source_family // "diff-family")],
+        actionability: (if ($cand.impact_type == "correctness" or $cand.impact_type == "security") then "auto_fixable"
+                       elif ($cand.impact_type == "architecture") then "report_only"
+                       else "manual" end),
+        validation_lane: (if $trivial then "light"
+                          elif ($cand.impact_type == "correctness" or $cand.impact_type == "security") then "deep"
+                          else "light" end),
+        current_state: "open",
+        disposition: "pending_validation",
+        is_actionable: false,
+        reason: null,
+        confirmed_strength: null,
+        score_phase3: null,
+        score_phase4: null,
+        score_history: [],
+        validation_result: null,
+        fix_attempts: [],
+        introduced_in_sha: null,
+        suggested_follow_up: null,
+        related_parent_finding_id: null
+      } | del(.source_family, .evidence_snippet)')   # strip candidate-only fields — schema additionalProperties:false
+
+    ~/.claude/commands/_shared/tools/artifact-patch.py \
+      --path "$artifact_path" --add-finding "$full_finding"
+done
+```
+
+For trivial-mode runs (`trivial_mode=true`), the jq builder above
+forces `validation_lane="light"` for every candidate — Phase 4b
+handles the whole pool per §19.6. The `$trivial` argjson binding
+drives that branch so the stored lane is honest.
+
+On non-zero exit for any single `--add-finding`, read the error-as-
+prompt (it names the offending field and id), adjust your `jq` build,
+retry once. On second failure, log the finding id to `trace.md` and
+drop it — the rest of the pool still commits. This matches the pre-
+§13.12 per-candidate failure policy.
+
+**`pending_validation` is the Phase-1 parking disposition.** Schema
+requires `disposition` non-null, so we can't leave it unset.
+`is_actionable: false` + `disposition: "pending_validation"` keeps the
+§5.2.1 coupling happy. Phase 3's gate either locks a gate-fail finding
+into `below_gate` with the "below validation gate (score X)" reason,
+or leaves it at `pending_validation` for Phase 4 to overwrite with the
+final verdict. Pre-existing overrides set `pre_existing_report` at
+Phase 3.1 before any of that runs.
+
+### 1.6. Log Phase 1 summary
+
+After every lens result is aggregated and the join step has committed
+the pool to the artifact:
 
 ```bash
 phase_1_elapsed=$(( $(date +%s) - phase_1_start_epoch ))
@@ -388,12 +546,17 @@ total_candidates=$(~/.claude/commands/_shared/tools/artifact-read.sh \
     '{name:$name, elapsed_sec:$elapsed, counts_by_state:{open:$total}, counts_by_disposition:{pending_validation:$total}, delta:"+\($total) open"}')"
 ```
 
-Capture `phase_1_start_epoch` via `phase_1_start_epoch=$(date +%s)` immediately
-before the first Agent dispatch.
+Under joint dispatch (§13.12), `phase_1_elapsed` and the Phase 1.5
+elapsed logged by `02-ensemble-adapter.md` step 1.5.7 will overlap
+because both phases share a dispatch-turn start boundary. That overlap
+is the intended observability signal.
 
 ### Working-set delta after Phase 1
 
-- `artifact.findings[]` populated with candidates.
+- `internal_candidates` (orchestrator-context pool) was built during
+  1.4 and consumed at 1.5.
+- `artifact.findings[]` populated with IDed candidates at 1.5.
 - `tokens.jsonl` grew one entry per lens sub-agent.
-- `phases.jsonl` grew a Phase 1 record.
+- `phases.jsonl` grew a Phase 1 record (ts overlaps Phase 1.5's under
+  `--ensemble` per §13.12).
 - `trace.md` grew a Phase 1 section.
