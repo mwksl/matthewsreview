@@ -214,10 +214,13 @@ pr_is_draft=$(jq -r '.isDraft' <<<"$pr_json")
 
 - `state == "CLOSED"` or `"MERGED"` → abort with the user-visible
   message "PR #$pr_number is $pr_raw_state; fixes not applied."
-  Pop stash if taken.
+  Pop stash if taken (so the user's working tree is restored before
+  the abort surfaces).
 - `state == "OPEN"` → proceed. Capture `pr_state="draft"` if
   `isDraft` else `"open"`.
-- Any `gh` error (auth, network) → surface stderr per §24.2 and abort.
+- Any `gh` error (auth, network) → surface stderr per §24.2. Pop
+  stash if taken, then abort. The abort should NOT try to re-run
+  `gh pr view` — it already failed; don't compound the error.
 
 If `mode == "local"` or `pr_number` empty: skip this step; local-mode
 fixes still run (they just don't publish to a PR comment in 9e).

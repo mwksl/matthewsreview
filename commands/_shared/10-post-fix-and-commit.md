@@ -59,7 +59,8 @@ fi
 
 3. Build `--apply-fix-outcomes` tuples for every finding attempted
    this run (every eligible finding from 8.1 — they're all
-   `current_state=attempted` on disk from 8.4). Each tuple:
+   `current_state=attempted` on disk from 8.4). Each tuple follows
+   this shape (tuple required-keys per §21.2):
 
    ```json
    {
@@ -81,6 +82,27 @@ fi
    Phase 9.pre step 5):
 
    ```bash
+   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+   overlap_file_list=$(echo "$overlap_files" | jq -r '[.[].file] | join(", ")')
+   phase_9_finding_text="run aborted: fix agents touched overlapping files across groups — $overlap_file_list"
+
+   overlap_abort_tuples=$(jq -nc \
+       --arg run_id "$run_id" --arg input_sha "$input_sha" \
+       --arg ts "$ts" --arg pf "$phase_9_finding_text" \
+       --argjson groups "$fix_groups_with_actual" '
+       [ $groups[] as $g
+         | $g.finding_ids[]
+         | {id: .,
+            run_id: $run_id,
+            fix_group_id: $g.id,
+            input_sha: $input_sha,
+            output_sha: null,
+            phase_9_outcome: null,
+            timestamp: $ts,
+            phase_9_finding: $pf}
+       ]
+   ')
+
    echo "$overlap_abort_tuples" | \
        ~/.claude/commands/_shared/tools/artifact-patch.py \
          --path "$artifact_path" --apply-fix-outcomes @-
@@ -294,9 +316,18 @@ Log to trace, set `revert_failure=true`, jump to 9e no-commit branch
 leaving the tree as-is. The user inspects manually. Do NOT pop stash
 (tree is in an unknown state).
 
-**All-regression degenerate case** (`surviving_count == 0`): reverts
-already ran (above); tree is restored. Nothing to commit. Set
-`commit_sha=null` and jump to 9e no-commit branch.
+**All-regression degenerate case** (`surviving_count == 0` AND
+`reverted_count >= 1`): reverts already ran (above); tree is restored.
+Nothing to commit. Set:
+
+```bash
+commit_sha=null
+all_regression=true
+```
+
+Jump to 9e no-commit branch. (9e will build `--apply-fix-outcomes`
+tuples for every attempted finding with `phase_9_outcome: regression`,
+`output_sha: null` — see 9e no-commit step 1.)
 
 **Mixed case** (`surviving_count >= 1`): proceed to 9c.
 
