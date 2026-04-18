@@ -6,10 +6,11 @@
 """artifact-patch.py — canonical writer for artifact.json (DESIGN §8.2, §21.2).
 
 Modes (CLI flags; mutually exclusive):
-  --init <seed>         create fresh artifact at --path
+  --init <seed>             create fresh artifact at --path
+  --add-finding <finding>   append a new finding to findings[]
 
-Later modes added in subsequent commits: --add-finding, --set,
---append-fix-attempt, --dry-run.
+Later modes added in subsequent commits: --set, --append-fix-attempt,
+--dry-run.
 
 JSON arguments (seed, finding payload, etc.) accept three forms:
   inline     --init '{"schema_version":1,...}'
@@ -106,6 +107,69 @@ def cmd_init(args):
     return c.EXIT_OK
 
 
+def _load_or_fail(path):
+    """Read the artifact at `path`, or emit an error-as-prompt and exit."""
+    try:
+        return c.read_json(path)
+    except FileNotFoundError:
+        c.err_prompt(
+            f"artifact not found at {path}",
+            action="run `artifact-patch.py --init ...` first, or pass the correct --path."
+        )
+        sys.exit(c.EXIT_VALIDATION)
+    except json.JSONDecodeError as e:
+        c.err_prompt(
+            f"artifact at {path} is not valid JSON: {e.msg} (line {e.lineno}, col {e.colno})",
+            action="the on-disk file is corrupted — restore from git or re-run --init."
+        )
+        sys.exit(c.EXIT_VALIDATION)
+
+
+def _write_and_emit(path, artifact):
+    """Common write tail: bump generated_at, validate, atomic write."""
+    artifact["generated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    errors = c.validate(artifact)
+    if errors:
+        shown = errors[:10]
+        overflow = [f"  (+{len(errors) - 10} more)"] if len(errors) > 10 else []
+        c.err_prompt(
+            f"patched artifact is invalid ({len(errors)} schema violation(s))",
+            context=["  " + e for e in shown] + overflow,
+            action="this indicates a bug in the patch mode or a malformed input value."
+        )
+        return c.EXIT_VALIDATION
+    c.atomic_write(path, artifact)
+    print(f"wrote {path}")
+    return c.EXIT_OK
+
+
+def cmd_add_finding(args):
+    """Append a new finding to findings[] (§8.2)."""
+    finding = read_json_arg(args.add_finding, "--add-finding")
+
+    if not isinstance(finding, dict):
+        c.err_prompt(
+            f"--add-finding expects a JSON object, got {type(finding).__name__}",
+            action="pass a finding object matching DESIGN §6."
+        )
+        return c.EXIT_USAGE
+
+    artifact = _load_or_fail(args.path)
+
+    existing_ids = {f.get("id") for f in artifact.get("findings", [])}
+    new_id = finding.get("id")
+    if new_id in existing_ids:
+        c.err_prompt(
+            f"finding id '{new_id}' already exists in {args.path}",
+            valid_values=f"existing ids: {sorted(existing_ids)}",
+            action="use --set to mutate an existing finding, or pick a fresh id."
+        )
+        return c.EXIT_VALIDATION
+
+    artifact.setdefault("findings", []).append(finding)
+    return _write_and_emit(args.path, artifact)
+
+
 # ----- CLI ---------------------------------------------------------------
 
 def build_parser():
@@ -124,6 +188,11 @@ def build_parser():
         metavar="SEED_JSON",
         help="create fresh artifact from seed (inline JSON, @file, or -)"
     )
+    mode.add_argument(
+        "--add-finding",
+        metavar="FINDING_JSON",
+        help="append a new finding to findings[] (inline JSON, @file, or -)"
+    )
     return p
 
 
@@ -134,6 +203,8 @@ def main():
     try:
         if args.init is not None:
             return cmd_init(args)
+        if args.add_finding is not None:
+            return cmd_add_finding(args)
     except SystemExit:
         raise
     except Exception as e:
