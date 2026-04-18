@@ -82,18 +82,26 @@ For each group:
 as-is.
 
 **Group of size ≥ 2** — pick the first id as the "keeper". Union the
-`sources` and `source_families` arrays across all group members into the
-keeper. Delete every non-keeper.
+`sources` and `source_families` arrays across all group members into
+the keeper. Reconcile the three routing fields that can disagree
+across group members. Delete every non-keeper.
 
-**`origin_confidence` on merge.** The keeper's existing
-`origin_confidence` stays. If the group members disagree
-(e.g. internal L2 `high` + external candidate `low`), this means
-first-id-wins deterministically. The rationale: internal findings
-typically hold lower ids (Phase 1 writes first; Phase 1.5 appends
-later), so the internal high-confidence signal wins over external
-low-confidence corroboration. If you want the merged keeper to adopt
-the HIGHER confidence explicitly, add a `--set origin_confidence=<v>`
-after the union patch — but by default leave it alone.
+**Routing-field reconciliation rules** (applied to the keeper after
+the array union, before deleting the dupes):
+
+- `origin_confidence`: take the HIGHEST across the group (`high` >
+  `medium` > `low`). Corroboration raises confidence.
+- `validation_lane`: `deep` wins over `light` if any group member is
+  deep. Safer routing — deep validation of a potentially-light issue
+  costs more tokens, but light validation of a deep issue risks
+  missing blast radius.
+- `actionability`: `auto_fixable` > `manual` > `report_only` (most-
+  actionable wins). Corroborating evidence tends to sharpen
+  actionability.
+
+Leave `impact_type` and `origin` on the keeper — those rarely vary
+meaningfully across duplicate candidates and picking a merge rule is
+not worth the complexity.
 
 Concretely, for each group `[K, D1, D2, ...]` (K = keeper, Di = dupes):
 
@@ -114,16 +122,40 @@ Concretely, for each group `[K, D1, D2, ...]` (K = keeper, Di = dupes):
     union_families=$(jq -c '[.[].source_families[]] | unique' <<<"$group_json")
     ```
 
-3. Apply to the keeper in one patch:
+3. Compute the reconciled routing-field values across the group:
+
+    ```bash
+    # highest origin_confidence across group: high > medium > low
+    max_conf=$(jq -r '
+      [.[].origin_confidence] | map({high:3, medium:2, low:1}[.]) | max
+      | {3:"high", 2:"medium", 1:"low"}[tostring]
+    ' <<<"$group_json")
+
+    # deep wins over light if any member is deep
+    max_lane=$(jq -r '
+      if any(.[].validation_lane; . == "deep") then "deep" else "light" end
+    ' <<<"$group_json")
+
+    # most actionable: auto_fixable > manual > report_only
+    max_act=$(jq -r '
+      [.[].actionability] | map({auto_fixable:3, manual:2, report_only:1}[.]) | max
+      | {3:"auto_fixable", 2:"manual", 1:"report_only"}[tostring]
+    ' <<<"$group_json")
+    ```
+
+4. Apply to the keeper in one patch:
 
     ```bash
     ~/.claude/commands/_shared/tools/artifact-patch.py \
       --path "$artifact_path" --finding-id K \
       --set-json "sources=$union_sources" \
-      --set-json "source_families=$union_families"
+      --set-json "source_families=$union_families" \
+      --set "origin_confidence=$max_conf" \
+      --set "validation_lane=$max_lane" \
+      --set "actionability=$max_act"
     ```
 
-4. Delete each dupe:
+5. Delete each dupe:
 
     ```bash
     for dupe in D1 D2; do

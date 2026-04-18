@@ -202,27 +202,42 @@ Apply via one `artifact-patch.py` call per finding. Example for
   --set reason=null
 ```
 
-For deep-lane candidates whose `decision == "confirmed"`, ALSO persist
-`validation_result`. The schema at `finding.validation_result`
+For deep-lane candidates in the **confirmed band** (post-rule
+disposition ∈ `{confirmed_auto, confirmed_manual, confirmed_report}`,
+i.e. `score_phase4 >= 60`), ALSO persist `validation_result`. Gate
+the write on the resolved disposition, NOT on the sub-agent's
+`decision` label — the score-wins-over-decision precedence rule
+(stated above) means a validator returning
+`decision: "disproven", score_phase4: 70` is treated as confirmed
+by the table; its `validation_result` must still persist or Phase 5
+and the rendered report lose their fix-proposal / blast-radius
+context.
+
+The schema at `finding.validation_result`
 (`schema-v1.json` §defs.validation_result) is the NESTED object — the
 sub-agent's outer response includes `{validation_result, score_phase4,
 decision, actionability, related_candidates_to_investigate}`, so you
 must extract `.validation_result` before writing:
 
 ```bash
-# Only confirmed findings get validation_result — disproven/uncertain
-# skip the write (their reason line is enough). Schema requires every
-# nested field of validation_result to be non-null, so writing a
-# partial object for uncertain findings would fail validation.
-if [[ "$decision" == "confirmed" ]]; then
-    # Extract just the nested validation_result object; if the outer
-    # response shape is already just the inner object, this is a no-op.
-    jq -c '.validation_result // .' <<<"$subagent_response_json" \
-        > "/tmp/val-$id.json"
-    ~/.claude/commands/_shared/tools/artifact-patch.py \
-      --path "$artifact_path" --finding-id "$id" \
-      --set-json "validation_result=@/tmp/val-$id.json"
-fi
+# Gate on resolved disposition (post score-decision precedence rule),
+# not on the sub-agent's decision label. Only confirmed band gets a
+# stored validation_result: schema requires every nested field of
+# validation_result to be non-null, and disproven/uncertain findings
+# don't run the sub-agent all the way through producing the fix_proposal
+# + verification_context sections.
+case "$resolved_disposition" in
+    confirmed_auto|confirmed_manual|confirmed_report)
+        # Extract just the nested validation_result object; if the outer
+        # response shape is already just the inner object, `// .` is a
+        # no-op.
+        jq -c '.validation_result // .' <<<"$subagent_response_json" \
+            > "/tmp/val-$id.json"
+        ~/.claude/commands/_shared/tools/artifact-patch.py \
+          --path "$artifact_path" --finding-id "$id" \
+          --set-json "validation_result=@/tmp/val-$id.json"
+        ;;
+esac
 rm -f "/tmp/val-$id.json"
 ```
 
