@@ -1525,6 +1525,149 @@ else
     fail "FX-RF-6: expected fixrun_new before fixrun_old, got new=$line_new old=$line_old"
 fi
 
+# ------------------------------------------------------------------ Stage 2.8
+# PR comment freshness filter (§21.10, §13.13). Replaces the Stage-2
+# `--since` time filter with a per-record code-locality check.
+#
+# Scratch 2-commit repo: C1 creates a.txt + b.txt; C2 modifies a.txt.
+# Review comments pinned to C1 are fresh if their path wasn't touched in
+# C1..HEAD, stale otherwise. Review submissions (no path) intersect the
+# C1..HEAD diff with --reviewed-files. Issue comments (no commit_id) use
+# a fixture pr_commits.json with known committer.date values.
+
+CF_DIR="$WORK/comment-freshness"
+mkdir -p "$CF_DIR/repo" "$CF_DIR/fixtures"
+(
+    cd "$CF_DIR/repo"
+    git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+    git config user.email "smoke@example.com"
+    git config user.name "smoke"
+    git symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+    echo "alpha" > a.txt
+    echo "beta"  > b.txt
+    git add a.txt b.txt
+    git commit --quiet -m "c1: add a + b"
+    echo "alpha-modified" > a.txt
+    git add a.txt
+    git commit --quiet -m "c2: modify a"
+)
+CF_C1=$(cd "$CF_DIR/repo" && git rev-parse HEAD~1)
+CF_C2=$(cd "$CF_DIR/repo" && git rev-parse HEAD)
+
+# Fixture pr_commits.json mimics pulls/<pr>/commits shape — an array of
+# records with .commit.committer.date. Latest date = 2026-04-18T12:00:00Z.
+cat > "$CF_DIR/fixtures/pr_commits.json" <<JSON
+[
+  {"sha":"aaa111","commit":{"committer":{"date":"2026-04-18T10:00:00Z"}}},
+  {"sha":"bbb222","commit":{"committer":{"date":"2026-04-18T12:00:00Z"}}}
+]
+JSON
+
+# Assertion CF-1: review_comment pinned to C1, path b.txt (untouched in
+# C1..HEAD). Freshness helper includes it; audit action=fresh.
+in_json=$(jq -nc --arg sha "$CF_C1" \
+    '[{id:1,author_login:"bot[bot]",author_type:"Bot",created_at:"2026-04-18T15:00:00Z",body:"x",kind:"review_comment",path:"b.txt",line:1,commit_id:$sha}]')
+out=$(cd "$CF_DIR/repo" && echo "$in_json" \
+    | "$TOOLS/comment-freshness.sh" --fixtures-dir "$CF_DIR/fixtures" \
+        --reviewed-files "a.txt,b.txt" 2>"$CF_DIR/cf1.err")
+len=$(echo "$out" | jq 'length')
+if [[ "$len" == "1" ]] && grep -q "action=fresh" "$CF_DIR/cf1.err" \
+    && grep -q "reason=path-unchanged" "$CF_DIR/cf1.err"; then
+    pass "CF-1 (§21.10): review_comment on unchanged path is included (action=fresh)"
+else
+    fail "CF-1: expected include + action=fresh; got len=$len stderr=$(cat "$CF_DIR/cf1.err")"
+fi
+
+# Assertion CF-2: review_comment pinned to C1, path a.txt (touched in
+# C1..HEAD). Freshness helper excludes it; audit action=stale.
+in_json=$(jq -nc --arg sha "$CF_C1" \
+    '[{id:2,author_login:"bot[bot]",author_type:"Bot",created_at:"2026-04-18T15:00:00Z",body:"x",kind:"review_comment",path:"a.txt",line:1,commit_id:$sha}]')
+out=$(cd "$CF_DIR/repo" && echo "$in_json" \
+    | "$TOOLS/comment-freshness.sh" --fixtures-dir "$CF_DIR/fixtures" \
+        --reviewed-files "a.txt,b.txt" 2>"$CF_DIR/cf2.err")
+len=$(echo "$out" | jq 'length')
+if [[ "$len" == "0" ]] && grep -q "action=stale" "$CF_DIR/cf2.err" \
+    && grep -q "reason=path-touched" "$CF_DIR/cf2.err"; then
+    pass "CF-2 (§21.10): review_comment on touched path is excluded (action=stale)"
+else
+    fail "CF-2: expected exclude + action=stale; got len=$len stderr=$(cat "$CF_DIR/cf2.err")"
+fi
+
+# Assertion CF-3: review submission (no path) pinned to C1, reviewed_files
+# includes only b.txt. Diff C1..HEAD touches a.txt but not b.txt → empty
+# intersection → include.
+in_json=$(jq -nc --arg sha "$CF_C1" \
+    '[{id:3,author_login:"bot[bot]",author_type:"Bot",created_at:"2026-04-18T15:00:00Z",body:"x",kind:"review",path:null,line:null,commit_id:$sha}]')
+out=$(cd "$CF_DIR/repo" && echo "$in_json" \
+    | "$TOOLS/comment-freshness.sh" --fixtures-dir "$CF_DIR/fixtures" \
+        --reviewed-files "b.txt" 2>"$CF_DIR/cf3.err")
+len=$(echo "$out" | jq 'length')
+if [[ "$len" == "1" ]] && grep -q "action=fresh" "$CF_DIR/cf3.err"; then
+    pass "CF-3 (§21.10): review submission with no reviewed-file touched is included"
+else
+    fail "CF-3: expected include; got len=$len stderr=$(cat "$CF_DIR/cf3.err")"
+fi
+
+# Assertion CF-4: review submission pinned to C1, reviewed_files includes
+# a.txt. Diff C1..HEAD touches a.txt → non-empty intersection → exclude.
+in_json=$(jq -nc --arg sha "$CF_C1" \
+    '[{id:4,author_login:"bot[bot]",author_type:"Bot",created_at:"2026-04-18T15:00:00Z",body:"x",kind:"review",path:null,line:null,commit_id:$sha}]')
+out=$(cd "$CF_DIR/repo" && echo "$in_json" \
+    | "$TOOLS/comment-freshness.sh" --fixtures-dir "$CF_DIR/fixtures" \
+        --reviewed-files "a.txt,b.txt" 2>"$CF_DIR/cf4.err")
+len=$(echo "$out" | jq 'length')
+if [[ "$len" == "0" ]] && grep -q "action=stale" "$CF_DIR/cf4.err" \
+    && grep -q "reason=reviewed-file-touched" "$CF_DIR/cf4.err"; then
+    pass "CF-4 (§21.10): review submission with touched reviewed-file is excluded"
+else
+    fail "CF-4: expected exclude; got len=$len stderr=$(cat "$CF_DIR/cf4.err")"
+fi
+
+# Assertion CF-5: issue_comment (no commit_id) with created_at newer than
+# the latest committer.date in the fixture → included (action=fresh-summary).
+# Fixture latest = 2026-04-18T12:00:00Z.
+in_json='[{"id":5,"author_login":"greptile[bot]","author_type":"Bot","created_at":"2026-04-18T13:00:00Z","body":"nits","kind":"issue_comment","path":null,"line":null,"commit_id":null}]'
+out=$(cd "$CF_DIR/repo" && echo "$in_json" \
+    | "$TOOLS/comment-freshness.sh" --fixtures-dir "$CF_DIR/fixtures" \
+        --reviewed-files "a.txt,b.txt" 2>"$CF_DIR/cf5.err")
+len=$(echo "$out" | jq 'length')
+if [[ "$len" == "1" ]] && grep -q "action=fresh-summary" "$CF_DIR/cf5.err" \
+    && grep -q "reason=newer-than-latest-commit" "$CF_DIR/cf5.err"; then
+    pass "CF-5 (§21.10): issue_comment posted after latest commit is included (C2 policy)"
+else
+    fail "CF-5: expected fresh-summary + include; got len=$len stderr=$(cat "$CF_DIR/cf5.err")"
+fi
+
+# Assertion CF-6: issue_comment with created_at older than the latest
+# committer.date → excluded (action=stale-summary).
+in_json='[{"id":6,"author_login":"greptile[bot]","author_type":"Bot","created_at":"2026-04-18T08:00:00Z","body":"old","kind":"issue_comment","path":null,"line":null,"commit_id":null}]'
+out=$(cd "$CF_DIR/repo" && echo "$in_json" \
+    | "$TOOLS/comment-freshness.sh" --fixtures-dir "$CF_DIR/fixtures" \
+        --reviewed-files "a.txt,b.txt" 2>"$CF_DIR/cf6.err")
+len=$(echo "$out" | jq 'length')
+if [[ "$len" == "0" ]] && grep -q "action=stale-summary" "$CF_DIR/cf6.err" \
+    && grep -q "reason=latest-commit-newer" "$CF_DIR/cf6.err"; then
+    pass "CF-6 (§21.10): issue_comment posted before latest commit is excluded (C2 policy)"
+else
+    fail "CF-6: expected stale-summary + exclude; got len=$len stderr=$(cat "$CF_DIR/cf6.err")"
+fi
+
+# Assertion CF-7: review_comment pinned to a commit_id that doesn't exist
+# in the scratch repo (simulates force-push / shallow clone). Fetch fallback
+# is skipped in --fixtures-dir mode, so the helper excludes with
+# action=unreachable.
+in_json='[{"id":7,"author_login":"bot[bot]","author_type":"Bot","created_at":"2026-04-18T15:00:00Z","body":"x","kind":"review_comment","path":"a.txt","line":1,"commit_id":"deadbeef00000000000000000000000000000000"}]'
+out=$(cd "$CF_DIR/repo" && echo "$in_json" \
+    | "$TOOLS/comment-freshness.sh" --fixtures-dir "$CF_DIR/fixtures" \
+        --reviewed-files "a.txt,b.txt" 2>"$CF_DIR/cf7.err")
+len=$(echo "$out" | jq 'length')
+if [[ "$len" == "0" ]] && grep -q "action=unreachable" "$CF_DIR/cf7.err" \
+    && grep -q "reason=commit_id-not-in-history" "$CF_DIR/cf7.err"; then
+    pass "CF-7 (§21.10): unreachable commit_id excluded with action=unreachable"
+else
+    fail "CF-7: expected unreachable; got len=$len stderr=$(cat "$CF_DIR/cf7.err")"
+fi
+
 echo
 echo "smoke: PASS ($N assertions)"
 exit 0

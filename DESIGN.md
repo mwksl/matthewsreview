@@ -1399,6 +1399,30 @@ On `--ensemble` runs, Phase 1 (six internal lens `Agent` dispatches) and Phase 1
 
 **Implementation pointer.** Readiness gate lives in `01-detection.md` step 1.2a. Joint dispatch is documented in `01-detection.md` step 1.3 with launch specs referenced from `02-ensemble-adapter.md`. Join + ID assignment lives at `01-detection.md` step 1.5 and calls `assign-finding-ids.sh`. Non-ensemble short-circuits are handled per-step with `ensemble_mode` guards.
 
+### 13.13 PR comment freshness (Phase 1.5 post-scrape filter)
+
+Phase 1.5's PR-comment scrape (`external-scrape.sh`, §21.8) returns every bot-authored comment from the three GitHub PR-comment endpoints. Not every one is still relevant: a bot comment whose referenced code has changed since it was posted is stale signal. Time-axis filters ("only comments posted after the review started") don't correlate with relevance — a three-week-old inline comment on an unchanged file is still actionable; a minute-old summary on a file that just got rewritten isn't. This section defines a code-locality filter applied between the scraper and the Sonnet normalizer.
+
+**Per-record decision (keyed on the `kind` field the scraper emits):**
+
+| `kind` | `commit_id` | `path` | Check |
+|---|---|---|---|
+| `review_comment` (inline) | present | present | `git diff --name-only <commit_id>..HEAD -- <path>` empty → include. Non-empty → exclude. |
+| `review` (submission) | present | null | `git diff --name-only <commit_id>..HEAD` ∩ `reviewed_files_all` empty → include. Non-empty → exclude. |
+| `issue_comment` (general) | null | null | Fetch `pulls/<pr>/commits`; `latest = max(.commit.committer.date)`. Include iff `comment.created_at > latest`. Otherwise exclude. |
+
+**Issue-comment policy (C2).** Diff-wide comments carry no code coord, so the closest-equivalent freshness signal is "did any commit land on the PR branch after this comment was posted." A PR-level summary (e.g. Greptile posting an overall review) posted *after* the latest commit is included; any subsequent push invalidates prior summaries. This is strictly stronger than the simpler "include all issue_comments" (policy A) and simpler than per-comment timeline lookup (policy C). For PRs where the strictness matters — a bot summary posted before a later commit landed — the summary is excluded deliberately: a later commit implies the summary's mental model of the diff is at least partially stale.
+
+**Reachability edge case.** `commit_id` in the GitHub API points at the commit that was HEAD of the PR branch when the comment was attached. Force-push or shallow clone can leave that SHA unreachable from local history. Attempt one `git fetch origin +refs/pull/<pr>/head` to pull the PR ref; retry `git cat-file -e`. Still missing → exclude with `action=unreachable` (the comment's referenced code state can't be compared).
+
+**API-failure fallback.** If the `pulls/<pr>/commits` fetch fails (rate limit, auth, network) AND any record is an `issue_comment`, emit `comment_freshness_api_failed` to trace.md once and fall back to **include all issue_comments unchanged** (policy A). Records with real `commit_id`s still get their normal check — the API failure only affects the diff-wide path. This mirrors Phase 1.5's broader "degrade gracefully, never abort the pipeline" stance (§24.2).
+
+**Placement.** Runs as a post-scrape step inside Phase 1.5, after `external-scrape.sh` returns and before the Sonnet normalizer sees any candidates. The normalizer's inputs are already-filtered; downstream (Phase 2 dedup, Phase 3 scoring) never sees stale-coded comments.
+
+**Rationale — why not a time filter.** `review_started_at` was the Stage-2 filter anchor; two observations during Stage-2 real-repo ensemble runs made it clearly wrong. (1) A bot summary posted a week before the review is still signal if the files it talks about haven't changed since; the time filter drops it. (2) A bot summary posted five minutes before the review starts but referring to a file that was force-pushed into a different shape is noise; the time filter keeps it. Newness does not correlate with relevance. Code locality does.
+
+**Implementation.** `comment-freshness.sh` (§21.10) takes `--pr <num>` + `--reviewed-files <csv|@->` + `--comments <path|@->`, emits the filtered array on stdout, and writes one `comment_freshness: id=<...> kind=<...> action=<fresh|stale|fresh-summary|stale-summary|unreachable|api-degraded>` line per record to stderr.
+
 ---
 
 ## 14. Rollout metrics
@@ -1901,6 +1925,26 @@ The orchestrator passes `artifact.reviewed_files_all` as the `--reviewed-files` 
 4. Apply the §13.11 decision table: all-ancestor → override to `pre_existing/high`; any-non-ancestor with lens=`pre_existing` → downgrade confidence to `medium`; otherwise → respect.
 **Errors:** missing `git` (EXIT_MISSING_DEP), unknown `--comparison-ref` (EXIT_VALIDATION with suggestions via `git rev-parse --symbolic --branches`), malformed JSON (EXIT_VALIDATION with jq error). Per-candidate blame/blame-parse failures do NOT abort; they emit `action=skipped` and flow through as respected.
 **Cost:** 1 blame + N ancestry checks per candidate; ~50ms on typical repos. No LLM tokens.
+
+### 21.10 `comment-freshness.sh`
+
+**Interface:**
+```
+comment-freshness.sh --pr <num> --reviewed-files <csv|@-> [--comments <path|@->]
+comment-freshness.sh --fixtures-dir <dir> --reviewed-files <csv|@-> [--comments <path|@->]
+```
+Only one of `--reviewed-files` / `--comments` may use `@-` per invocation (both consume stdin). Default `--comments` is `@-` so the helper pipes cleanly from `external-scrape.sh`.
+**Input:** JSON array matching `external-scrape.sh`'s output schema — each record has `{id, kind, created_at, commit_id?, path?, line?, ...}` plus any pass-through fields.
+**Output (stdout):** filtered array in the same shape. Records passing the freshness check are emitted unchanged; records failing are dropped.
+**Output (stderr):** one audit line per input record,
+```
+comment_freshness: id=<n> kind=<issue_comment|review|review_comment> action=<fresh|stale|fresh-summary|stale-summary|unreachable|api-degraded> [reason=<short>]
+```
+intended for `trace.md` flushing via `tee -a` (mirrors §21.9 origin-crosscheck.sh convention).
+**Algorithm:** per-record check per the §13.13 table. `pulls/<pr>/commits` is fetched lazily (only when a record needs the diff-wide timestamp compare) and cached across records. Commit-reachability probes are cached per `commit_id`.
+**Fixture replay (`--fixtures-dir`).** Reads `<dir>/pr_commits.json` instead of calling `gh`. The fetch-fallback for unreachable commit_ids is skipped in this mode (no network). Used by `test/smoke.sh` for deterministic CF-* coverage.
+**Errors:** missing `git` / `jq` / `gh` (exit 1 with a named dep); bad stdin JSON (exit 1); conflicting `@-` use on both list args (exit 64 usage). Per-record decisions never abort the run; unreachable / api-degraded records produce audit lines and move on.
+**Cost:** one `gh api --paginate pulls/<pr>/commits` call if any issue_comment is present (otherwise zero gh calls). Each `commit_id`-bearing record does one `git cat-file -e` + one `git diff --name-only`. Typical runs are under 2 seconds; bound is proportional to distinct commit_ids, not record count.
 
 ---
 
