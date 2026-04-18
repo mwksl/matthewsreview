@@ -292,6 +292,81 @@ else
     fail "F: validator should reject bad-disposition fixture" "exit=$code stderr=$stderr"
 fi
 
+# H. --delete-finding removes the finding
+# (Make a disposable copy so we don't disturb the main $ART.)
+cp "$ART" "$WORK/art-del.json"
+before_count=$(jq '.findings | length' "$WORK/art-del.json")
+if "$TOOLS/artifact-patch.py" --path "$WORK/art-del.json" --delete-finding F099 >/dev/null; then
+    after_count=$(jq '.findings | length' "$WORK/art-del.json")
+    if [[ "$after_count" == "$((before_count - 1))" ]] && \
+       ! jq -e '.findings[] | select(.id == "F099")' "$WORK/art-del.json" >/dev/null 2>&1; then
+        pass "H: --delete-finding F099 removes the finding"
+    else
+        fail "H: count before=$before_count after=$after_count; F099 still present?"
+    fi
+else
+    fail "H: --delete-finding F099 exit non-zero"
+fi
+
+# I. --delete-finding on unknown id → non-zero with did-you-mean
+stderr=$("$TOOLS/artifact-patch.py" --path "$ART" --delete-finding F999 2>&1 >/dev/null); code=$?
+if [[ "$code" != "0" ]] && echo "$stderr" | grep -q "no finding with id"; then
+    pass "I: --delete-finding on unknown id rejected with error-as-prompt"
+else
+    fail "I: expected error for unknown id; got code=$code stderr=$stderr"
+fi
+
+# J. --set-json writes an array field (sources)
+cp "$ART" "$WORK/art-sj.json"
+if "$TOOLS/artifact-patch.py" --path "$WORK/art-sj.json" --finding-id F001 \
+        --set-json "sources=[\"detection\",\"codex\"]" >/dev/null; then
+    actual=$(jq -c '.findings[] | select(.id=="F001") | .sources' "$WORK/art-sj.json")
+    if [[ "$actual" == '["detection","codex"]' ]]; then
+        pass "J: --set-json sources=<array> writes correctly"
+    else
+        fail "J: sources after --set-json = $actual"
+    fi
+else
+    fail "J: --set-json exit non-zero"
+fi
+
+# K. --set-json with @file reads from disk
+echo '["external-pr:greptile-apps[bot]"]' > "$WORK/sj.json"
+if "$TOOLS/artifact-patch.py" --path "$WORK/art-sj.json" --finding-id F001 \
+        --set-json "sources=@$WORK/sj.json" >/dev/null; then
+    actual=$(jq -c '.findings[] | select(.id=="F001") | .sources' "$WORK/art-sj.json")
+    if [[ "$actual" == '["external-pr:greptile-apps[bot]"]' ]]; then
+        pass "K: --set-json @file reads JSON from disk"
+    else
+        fail "K: expected greptile source, got $actual"
+    fi
+else
+    fail "K: --set-json @file exit non-zero"
+fi
+
+# L. --set-json on non-whitelisted field rejects
+stderr=$("$TOOLS/artifact-patch.py" --path "$WORK/art-sj.json" --finding-id F001 \
+        --set-json 'fix_attempts=[]' 2>&1 >/dev/null); code=$?
+if [[ "$code" != "0" ]] && echo "$stderr" | grep -q "cannot touch"; then
+    pass "L: --set-json rejects fix_attempts (append-only via --append-fix-attempt)"
+else
+    fail "L: expected rejection; got code=$code stderr=$stderr"
+fi
+
+# M. --set-json --top-level (no --finding-id) writes artifact-level JSON field
+# Schema requires CCG id ^G[0-9]+$ and finding_ids length >= 2.
+if "$TOOLS/artifact-patch.py" --path "$WORK/art-sj.json" \
+        --set-json "cross_cutting_groups=[{\"id\":\"G1\",\"finding_ids\":[\"F001\",\"F002\"],\"combined_approach\":\"x\"}]" >/dev/null; then
+    actual=$(jq -c '.cross_cutting_groups | length' "$WORK/art-sj.json")
+    if [[ "$actual" == "1" ]]; then
+        pass "M: --set-json writes top-level cross_cutting_groups"
+    else
+        fail "M: cross_cutting_groups length = $actual"
+    fi
+else
+    fail "M: --set-json top-level exit non-zero"
+fi
+
 # G. external-scrape.sh fixture-replay: bot filter + deny list + time window
 EXT="$WORK/ext"
 mkdir -p "$EXT"

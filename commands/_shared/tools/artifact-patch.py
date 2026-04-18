@@ -8,16 +8,19 @@
 Modes (CLI flags; mutually exclusive):
   --init <seed>             create fresh artifact at --path
   --add-finding <finding>   append a new finding to findings[]
+  --delete-finding FXXX     remove a finding by id (used by Phase 2 dedup)
   --set field=value         mutate a scalar field (repeatable). With
                             --finding-id, targets a finding; without,
                             targets top-level artifact fields.
+  --set-json field=<json-or-@file>  mutate a structured (array/object)
+                            field (repeatable). Same --finding-id
+                            targeting as --set; separate whitelist of
+                            allowed fields (arrays/objects only).
   --append-fix-attempt <json>  append an entry to a finding's fix_attempts[]
                                (requires --finding-id). Combinable with
                                --set in a single call (DESIGN §26 worked
                                example: set current_state=resolved and
                                append the attempt in one patch).
-
-Later modes added in subsequent commits: --dry-run.
 
 ### --set semantics
 
@@ -245,6 +248,28 @@ SETTABLE_ARTIFACT_FIELDS = frozenset({
     "pr_number",
 })
 
+# ----- --set-json: structured (array/object) fields ---------------------
+#
+# Separate whitelist from --set (which is scalar-only). --set-json accepts
+# values as inline JSON, @<file> for file-read, or - for stdin. Same
+# --finding-id targeting: with --finding-id, matches FINDING fields; without,
+# matches ARTIFACT fields. fix_attempts is intentionally not here — that's
+# append-only via --append-fix-attempt.
+
+JSON_SETTABLE_FINDING_FIELDS = frozenset({
+    "sources",
+    "source_families",
+    "validation_result",
+    "score_history",
+})
+
+JSON_SETTABLE_ARTIFACT_FIELDS = frozenset({
+    "cross_cutting_groups",
+    "subagent_tokens",
+    "metrics",
+    "reviewer_sources",
+})
+
 
 def parse_set_pair(pair):
     """Parse one '--set K=V' pair into (key, value).
@@ -433,18 +458,99 @@ def _apply_artifact_set(artifact, pairs):
     return set(pair_map.keys())
 
 
-def cmd_set_and_or_append(args):
-    """Combined --set + --append-fix-attempt (DESIGN §26).
+def parse_set_json_pair(pair):
+    """Parse one '--set-json K=V' pair into (key, parsed_value).
 
-    Either or both can be present. Both operate on --finding-id when
-    given (or top-level, for --set only). Order: --set first (so state
-    transitions apply before the fix-attempt record lands), then
-    append. One atomic write.
+    Value parsing: inline JSON, @<file> for file-read, or '-' for stdin.
+    Raises SystemExit on malformed pair or unparseable JSON.
+    """
+    if "=" not in pair:
+        c.err_prompt(
+            f"--set-json expects 'field=<json-or-@file>', got '{pair}'",
+            action="use --set-json field=<inline-json>, field=@<path>, or field=-"
+        )
+        sys.exit(c.EXIT_USAGE)
+    key, _, raw = pair.partition("=")
+    key = key.strip()
+    if not key:
+        c.err_prompt(
+            f"--set-json has empty field name in '{pair}'",
+            action="use --set-json field=value."
+        )
+        sys.exit(c.EXIT_USAGE)
+
+    value = read_json_arg(raw, f"--set-json {key}")
+    return key, value
+
+
+def _apply_finding_set_json(finding, pairs):
+    """Apply --set-json pairs to a finding in-place."""
+    pair_map = {k: v for k, v in pairs}
+    bad_keys = [k for k in pair_map if k not in JSON_SETTABLE_FINDING_FIELDS]
+    if bad_keys:
+        c.err_prompt(
+            f"--set-json cannot touch finding field(s): {bad_keys}",
+            valid_values=sorted(JSON_SETTABLE_FINDING_FIELDS),
+            did_you_mean=c.suggest(bad_keys[0], JSON_SETTABLE_FINDING_FIELDS),
+            action="scalar fields use --set; fix_attempts is append-only via --append-fix-attempt; immutable fields (id/file/claim/line_range) cannot be patched."
+        )
+        sys.exit(c.EXIT_VALIDATION)
+    for key, value in pair_map.items():
+        finding[key] = value
+    return set(pair_map.keys())
+
+
+def _apply_artifact_set_json(artifact, pairs):
+    """Apply --set-json pairs to the top-level artifact."""
+    pair_map = {k: v for k, v in pairs}
+    bad_keys = [k for k in pair_map if k not in JSON_SETTABLE_ARTIFACT_FIELDS]
+    if bad_keys:
+        c.err_prompt(
+            f"--set-json cannot touch top-level field(s): {bad_keys}",
+            valid_values=sorted(JSON_SETTABLE_ARTIFACT_FIELDS),
+            did_you_mean=c.suggest(bad_keys[0], JSON_SETTABLE_ARTIFACT_FIELDS),
+            action="finding-level fields require --finding-id; immutable fields cannot be patched."
+        )
+        sys.exit(c.EXIT_VALIDATION)
+    for key, value in pair_map.items():
+        artifact[key] = value
+    return set(pair_map.keys())
+
+
+def cmd_delete_finding(args):
+    """Remove a finding by id (used by Phase 2 dedup)."""
+    finding_id = args.delete_finding
+    artifact = _load_or_fail(args.path)
+    before = copy.deepcopy(artifact) if args.dry_run else None
+
+    findings = artifact.get("findings", [])
+    existing_ids = [f.get("id") for f in findings]
+    if finding_id not in existing_ids:
+        c.err_prompt(
+            f"no finding with id '{finding_id}' to delete in {artifact.get('review_id', '(unknown review)')}",
+            valid_values=f"existing ids: {existing_ids}" if existing_ids else "no findings in this artifact",
+            did_you_mean=c.suggest(finding_id, existing_ids),
+            action="check the id spelling; use --add-finding to add, --set to mutate."
+        )
+        return c.EXIT_VALIDATION
+
+    artifact["findings"] = [f for f in findings if f.get("id") != finding_id]
+    return _write_and_emit(args.path, artifact, dry_run=args.dry_run, before=before)
+
+
+def cmd_set_and_or_append(args):
+    """Combined --set / --set-json / --append-fix-attempt (DESIGN §26).
+
+    Any combination can be present. All operate on --finding-id when
+    given (or top-level, for --set and --set-json). Order within one
+    call: --set first (scalar transitions + coupling), then --set-json
+    (structured fields), then --append-fix-attempt. One atomic write.
     """
     artifact = _load_or_fail(args.path)
     before = copy.deepcopy(artifact) if args.dry_run else None
 
     set_pairs = [parse_set_pair(p) for p in args.set] if args.set else []
+    set_json_pairs = [parse_set_json_pair(p) for p in args.set_json] if args.set_json else []
 
     if args.append_fix_attempt is not None and not args.finding_id:
         c.err_prompt(
@@ -457,6 +563,8 @@ def cmd_set_and_or_append(args):
         finding = _find_finding(artifact, args.finding_id)
         if set_pairs:
             _apply_finding_set(finding, set_pairs)
+        if set_json_pairs:
+            _apply_finding_set_json(finding, set_json_pairs)
         if args.append_fix_attempt is not None:
             attempt = read_json_arg(args.append_fix_attempt, "--append-fix-attempt")
             if not isinstance(attempt, dict):
@@ -467,9 +575,11 @@ def cmd_set_and_or_append(args):
                 return c.EXIT_USAGE
             finding.setdefault("fix_attempts", []).append(attempt)
     else:
-        # --set only, top-level.
+        # Top-level: --set and/or --set-json only.
         if set_pairs:
             _apply_artifact_set(artifact, set_pairs)
+        if set_json_pairs:
+            _apply_artifact_set_json(artifact, set_json_pairs)
 
     return _write_and_emit(args.path, artifact, dry_run=args.dry_run, before=before)
 
@@ -500,6 +610,14 @@ def build_parser():
         help="repeatable: set a scalar field to a JSON-parseable value (null/true/85/foo)"
     )
     p.add_argument(
+        "--set-json",
+        dest="set_json",
+        action="append",
+        default=[],
+        metavar="FIELD=<json-or-@file>",
+        help="repeatable: set an array/object field (whitelisted). Value is inline JSON, @<file>, or - for stdin."
+    )
+    p.add_argument(
         "--append-fix-attempt",
         dest="append_fix_attempt",
         metavar="ATTEMPT_JSON",
@@ -522,6 +640,11 @@ def build_parser():
         metavar="FINDING_JSON",
         help="append a new finding to findings[] (inline JSON, @file, or -)"
     )
+    mode.add_argument(
+        "--delete-finding",
+        metavar="FXXX",
+        help="remove a finding by id (used by Phase 2 dedup)"
+    )
     return p
 
 
@@ -531,14 +654,18 @@ def main():
 
     try:
         if args.init is not None:
-            if args.set or args.append_fix_attempt:
-                parser.error("--init cannot combine with --set or --append-fix-attempt")
+            if args.set or args.set_json or args.append_fix_attempt:
+                parser.error("--init cannot combine with --set / --set-json / --append-fix-attempt")
             return cmd_init(args)
         if args.add_finding is not None:
-            if args.set or args.append_fix_attempt:
-                parser.error("--add-finding cannot combine with --set or --append-fix-attempt")
+            if args.set or args.set_json or args.append_fix_attempt:
+                parser.error("--add-finding cannot combine with --set / --set-json / --append-fix-attempt")
             return cmd_add_finding(args)
-        if args.set or args.append_fix_attempt is not None:
+        if args.delete_finding is not None:
+            if args.set or args.set_json or args.append_fix_attempt:
+                parser.error("--delete-finding cannot combine with --set / --set-json / --append-fix-attempt")
+            return cmd_delete_finding(args)
+        if args.set or args.set_json or args.append_fix_attempt is not None:
             return cmd_set_and_or_append(args)
     except SystemExit:
         raise
@@ -550,7 +677,7 @@ def main():
         traceback.print_exc(file=sys.stderr)
         return c.EXIT_UNEXPECTED
 
-    parser.error("no mode selected (use --init, --add-finding, --set, or --append-fix-attempt)")
+    parser.error("no mode selected (use --init, --add-finding, --delete-finding, --set, --set-json, or --append-fix-attempt)")
 
 
 if __name__ == "__main__":
