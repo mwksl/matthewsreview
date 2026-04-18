@@ -7,9 +7,9 @@
 **Review ID:** `rev_stage1smoke`
 **Sub-agent tokens:** 12,000 across 8 invocations
 
-Found 6 findings across all lanes:
+Found 7 findings across all lanes:
 - Deep lane (correctness/security): 1 resolved, 1 confirmed-manual, 1 uncertain
-- Light lane (ux/policy/architecture): 1 confirmed-auto
+- Light lane (ux/policy/architecture): 1 confirmed-auto, 1 uncertain
 - Pre-existing (high-confidence origin, report-only): 1
 
 ---
@@ -53,6 +53,7 @@ further investigation with fresh context.
 | # | Score | Impact | File | Finding | Disposition |
 |---|-------|--------|------|---------|-------------|
 | F004 | 60 | ux | `src/components/DeleteButton.tsx:12` | Missing loading state on destructive action | confirmed_auto |
+| F006 | 48 | architecture | `src/models/preferences.ts:15-22` | Deprecated pattern used in new code path | uncertain |
 
 ## Pre-existing — report-only (1) — `disposition: pre_existing_report`
 

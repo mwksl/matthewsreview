@@ -145,7 +145,11 @@ def render_summary(buckets):
             deep_bits.append(f"{n} {disp.replace('_', '-')}")
 
     light_bits = []
-    for disp in ("confirmed_auto", "confirmed_manual", "confirmed_report"):
+    # `uncertain` included: §13.1 Phase-4 rule "score 45-59 → uncertain" applies
+    # regardless of lane. Light-lane uncertain findings were silently dropped
+    # from both this summary and render_light_lane's table prior to Stage 2.5.D —
+    # the C13 ray-finance run quietly lost 3 findings from its PR comment.
+    for disp in ("confirmed_auto", "confirmed_manual", "confirmed_report", "uncertain"):
         n = len(light(disp))
         if n:
             light_bits.append(f"{n} {disp.replace('_', '-')}")
@@ -320,7 +324,12 @@ def render_deep_other(buckets, disposition):
 
 def render_light_lane(buckets):
     rows = []
-    for disp in ("confirmed_auto", "confirmed_manual", "confirmed_report"):
+    # `uncertain` included — see render_summary comment. The light-lane table
+    # already carries a Disposition column, so mixed dispositions fit the
+    # existing shape; no section split needed (deep lane uses render_deep_other
+    # for Uncertain, but the light lane's single-table design accommodates all
+    # confirmed/uncertain dispositions in one rendering pass).
+    for disp in ("confirmed_auto", "confirmed_manual", "confirmed_report", "uncertain"):
         for f in buckets.get(disp, []):
             if f.get("validation_lane") == "light":
                 rows.append(f)

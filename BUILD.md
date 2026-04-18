@@ -8,13 +8,15 @@ If you are a Claude Code session starting fresh (after compaction or on a new da
 
 ## Current state
 
-**As of 2026-04-18 — Stage 2 COMPLETE.** All 12 fragment/code commits (C1–C12) landed, three independent audit rounds closed (rounds 2, 3, 4 with Opus + CodeRabbit + Codex deduped), and C13 real-repo smoke passed end-to-end on `ray-finance` `feat/import-apple` (43 files / 4270 lines, 25-min wall clock, 978k tokens, 4 confirmed_auto findings → PR comment `4274059620` posted). `test/smoke.sh` passes 39 assertions. Next: plan Stage 2.5 (hardening — sensitive-file gate + Phase-4 context collapse) before Stage 3.
+**As of 2026-04-18 — Stage 2.5 COMPLETE.** Four hardening commits landed: sensitive-file gate resolved via reviews-root relocation (Claude Code's `.claude/` gate is hardcoded; docs-probe confirmed `additionalDirectories` can't bypass it, so the default root moved to `~/.adams-reviews/`); Phase-4 decision-table collapsed into `artifact-patch.py --apply-decisions` (one helper call per wave replaces the per-finding loop, matching the Stage-3 authoring-discipline for context budget); light-lane `uncertain` renderer bug fixed (re-rendering C13's ray-finance artifact now surfaces F021/F022/F032 which had been silently dropped from PR comment `4274059620`). `test/smoke.sh` passes 43 assertions. Next: plan Stage 3 (`/adams-review-fix`).
 
-- Design doc: `DESIGN.md` (rev 8 + §21.2 exit-code footnote + §5.2.1 `pending_validation` clarification + §12.1 example fix)
+- Design doc: `DESIGN.md` (rev 8 + §21.2 exit-code footnote + §21.2 `--apply-decisions` clarification + §5.2.1 `pending_validation` clarification + §9.2 reviews-root relocation + §8.7 sensitive-gate prose correction + §12.1 example fix)
 - Stage 1 plan: `plans/stage-1-foundation.md` (user-approved; closed out)
 - Stage 2 plan: `plans/stage-2-review.md` (user-approved; closed out)
+- Stage 2.5 plan: `plans/stage-2.5-hardening.md` (user-approved; closed out)
 - Symlink `~/.claude/commands/_shared → commands/_shared` is live
 - `uv` (`/opt/homebrew/bin/uv 0.7.15`) supplies `jsonschema` to Python scripts via PEP 723 inline-script shebangs
+- Default reviews root: `~/.adams-reviews/<slug>/<branch>/<review_id>/` (override via `$ADAMS_REVIEW_REVIEWS_ROOT`)
 
 **Stage 1 commits (on `main`, newest first):**
 
@@ -53,7 +55,7 @@ bd6b610      Bootstrap repo with design doc (rev 8) and build journal
 |---|------|--------|------|-----------------|
 | 1 | Foundation (data layer + shared helpers) | **done** | `plans/stage-1-foundation.md` | [Stage 1 section](#stage-1--foundation) |
 | 2 | `/adams-review` end-to-end (Phases 0–6) | **done** | `plans/stage-2-review.md` | [Stage 2 section](#stage-2--adams-review) |
-| 2.5 | Hardening — sensitive-file gate + Phase-4 context collapse | not started | `plans/stage-2.5-hardening.md` | [Stage 2.5 section](#stage-25--hardening) |
+| 2.5 | Hardening — reviews-root relocation + Phase-4 batch + renderer fix | **done** | `plans/stage-2.5-hardening.md` | [Stage 2.5 section](#stage-25--hardening) |
 | 3 | `/adams-review-fix` (Phases 7–9 + terminal cleanup) | not started | `plans/stage-3-fix.md` | — |
 
 ### Stage 1 — Foundation
@@ -173,7 +175,7 @@ First end-to-end execution of `/adams-review` on `ray-finance` `feat/import-appl
 
 - **Note 1 Lever #1** (Phase-5 `xc_input_json` sub-agent preprocessor) — deferred. Revisit only if a Stage 3 real-repo run shows the orchestrator approaching context limits.
 - **Note 1 Lever #4** (fragment prose shrink) — deferred. Not blocking.
-- **Renderer bug: Light-lane `uncertain` dispositions silently dropped from PR comment** (`artifact-render.py:148` and `:323` iteration tuples). Surfaced during Stage 2.5 planning review. Not in this stage's scope but will need a decision: (a) fold into 2.5.B as a third work item, (b) fix separately as a standalone patch, or (c) defer to Stage 3. Current user preference pending.
+- ~~**Renderer bug: Light-lane `uncertain` dispositions silently dropped from PR comment**~~ — decision made during planning review: folded into Stage 2.5 as its own sub-item (**2.5.D**), not into 2.5.B. C13 evidence (F021/F022/F032 present in artifact.json but missing from PR comment `4274059620`) made deferring to Stage 3 too costly to justify. See `plans/stage-2.5-hardening.md` §4 for the decision rationale and §5.4 for execution.
 
 **Done when:**
 
@@ -261,11 +263,64 @@ These are authoring disciplines, not enforced by tooling. Stage 3 planning shoul
 
 ~5 commits total. Smaller than Stages 1/2.
 
-**Plan file:** to be drafted at `plans/stage-2.5-hardening.md` after user approves scope.
+**Plan file:** `plans/stage-2.5-hardening.md` (user-approved 2026-04-18). Added 2.5.D (renderer bug) as its own sub-item during planning review per the BUILD.md "Explicitly out of scope" open decision.
 
-**Files landed:** *(TBD — fill at close-out)*
-**Verification evidence:** *(TBD)*
-**Open issues / deviations:** *(TBD)*
+**Status:** done (2026-04-18).
+
+**Stage 2.5 commits (on `main`, newest first):**
+
+```
+(this commit) Close Stage 2.5: fix light-lane uncertain renderer + hardening close-out
+e74d8d7       Collapse Phase-4 decision loop to single apply-decisions call (05-validation)
+3c9429a       Add artifact-patch.py --apply-decisions for Phase-4 batch application (§13.1, §21.2)
+d576214       Relocate reviews root to ~/.adams-reviews to bypass sensitive-file gate (§9.2)
+169651b       Record Stage 2.5.A probe: additionalDirectories does not bypass .claude/ gate
+b262738       Add Stage 2.5 hardening plan
+```
+
+**Files landed:**
+
+- `plans/stage-2.5-hardening.md` — durable plan with the renderer-bug decision folded in as 2.5.D (commit `b262738`).
+- `BUILD.md` — probe-outcome cross-stage note (commit `169651b`).
+- **2.5.A — reviews-root relocation** (commit `d576214`):
+  - `commands/_shared/00-preflight.md` — env-var fallback default flipped to `$HOME/.adams-reviews`.
+  - `commands/_shared/tools/artifact-publish.sh` — tier-3 `latest.txt` resolver default flipped.
+  - `commands/_shared/tools/external-scrape.sh` — global `review-config.json` default path flipped.
+  - `commands/_shared/tools/artifact-read.sh` — header comment updated.
+  - `DESIGN.md` — §9.2 canonical layout flipped + new override/rationale bullet; §8.7 prose corrected (earlier draft claimed review writes didn't hit the protected-directory layer; C13 proved false); 13 other section references bulk-updated (§3.3 / §4 Phase 0 / §12.1 / §13.5 / §13.8 / §14 / §18 / §21.1 / §21.8 / §24 / §25).
+  - `README.md` — new "Review state location" section with migration instructions.
+  - `test/smoke.sh` — +1 assertion (B6) verifying default resolves under `~/.adams-reviews`.
+- **2.5.B — `artifact-patch.py --apply-decisions`** (commit `3c9429a`):
+  - `commands/_shared/tools/artifact-patch.py` — new mode: `ALLOWED_DECISION_TUPLE_KEYS`, `CONFIRMED_BAND`, `_ACTIONABILITY_TO_DISPOSITION`, `_derive_phase4_disposition`, `cmd_apply_decisions`. `_write_and_emit` gains `silent=True` so the batch loop emits one summary line instead of N per-tuple lines.
+  - `DESIGN.md` §21.2 — new clarification paragraph documenting the mode, including the score-wins-over-decision derivation, the confirmed-band-only `validation_result` write, per-tuple atomic writes with first-failure halt, and the `--dry-run` non-support rationale.
+  - `test/smoke.sh` — +2 assertions (W: mixed 3-tuple batch; X: confirmed-band tuple without actionability halts + leaves artifact unchanged).
+- **2.5.B — `05-validation.md` fragment rewrite** (commit `e74d8d7`):
+  - Step 4.4 replaced per-finding loop with one `--apply-decisions` call per wave (jq composes the tuple array; single helper invocation emits the summary line).
+  - Step 4.5 step 4 (Wave 2 application) routed to the same batched approach.
+- **2.5.D — renderer fix + close-out** (this commit):
+  - `commands/_shared/tools/artifact-render.py` — lines 148 and 323 tuples gain `"uncertain"` with a comment explaining the regression and the C13 data-loss context.
+  - `test/fixtures/artifact-seed.json` — F006 added (light-lane uncertain architecture finding; `src/models/preferences.ts:15-22`) + `reviewed_files_all` updated.
+  - `test/fixtures/expected.md` — regenerated; summary count 6 → 7, Light lane table gains F006 row.
+  - `test/smoke.sh` — A assertion's expected counts updated (findings_total 6 → 7, uncertain 1 → 2); +1 assertion (Y) explicitly grepping for F006 in the rendered output so a future tuple-literal drop surfaces with a clear signal.
+  - `BUILD.md` — this close-out block and the new cross-stage notes below.
+
+**Verification evidence:**
+
+- `test/smoke.sh` passes **43 assertions**, up from 39 at Stage 2 close. Added: B6 (2.5.A default root), W + X (2.5.B batch + failure), Y (2.5.D renderer regression guard); A assertion updated for the new seed counts.
+- **C13 re-render.** Re-rendering `~/.claude/reviews/github.com-cdinnison-ray-finance/feat/import-apple/rev_01KPGJVT5DBEJXR5WHB5Z62PS3/artifact.json` with the Stage 2.5.D renderer surfaces all three previously-dropped findings. The Light-lane summary now reads `3 uncertain` (was absent entirely); the Light lane table includes:
+  - `F021` — `src/cli/ink/mount.ts:11-13` — "Non-TTY case returns silently with no exit code…"
+  - `F022` — `src/cli/ink/ChatApp.tsx:108-116` — "While isBusy the PromptFrame is entirely unmounted…"
+  - `F032` — `src/cli/commands.ts:808-812` — "When `--replace-range` is passed but there are zero existing rows…"
+  Output captured locally at `/tmp/c13-rerender.md` during close-out. The live PR comment `4274059620` still shows the pre-fix rendering (not re-published — this is a stage close-out, not a fresh review).
+- **Probe outcome recorded** in *Cross-stage notes* 2026-04-18 entry (commit `169651b`).
+- **Helper behavior** exercised via smoke W/X and by re-running the full suite after each of the four behavioral commits; no regression observed at any step.
+
+**Open issues / deviations:**
+
+- **PR comment 4274059620 still shows pre-fix rendering.** The user opted not to republish during Stage 2.5 close-out (the comment is reference evidence from C13, not a live review). Any future `/adams-review` run on ray-finance `feat/import-apple` will publish fresh content via the `latest.txt` comment_id path and the old rendering will be overwritten.
+- **`--apply-decisions` does not support `--dry-run`.** Intentional (DESIGN §21.2 clarification). Stage 3 callers who want pre-flight validation of a tuple array should run it on a throwaway artifact copy. Surface if Stage 3 develops a real need.
+- **Pre-Stage-2.5 `~/.claude/reviews/` state.** Not migrated automatically. Users follow README's `mv ~/.claude/reviews ~/.adams-reviews` or `export ADAMS_REVIEW_REVIEWS_ROOT=~/.claude/reviews` to preserve. The C13 `rev_01KPGJVT5DBEJXR5WHB5Z62PS3` evidence dir stays where it is under `~/.claude/reviews/` and is referenced by absolute path in the re-render command above.
+- **Per-tuple writes in `--apply-decisions` means partial state on tuple-failure.** If tuple #N fails, tuples 0..N-1 are committed to disk. The error-as-prompt names the failing finding id so the caller can re-invoke with the remainder, but it does increase the orchestrator's cognitive load if a batch fails mid-way. Alternative (atomic-whole-batch) was considered in planning and rejected per the plan's intent. Revisit if Stage 3 shows the per-tuple-commit model causing audit-trail confusion.
 
 ### Stage 3 — `/adams-review-fix`
 
@@ -363,6 +418,17 @@ Bias is toward **making DESIGN track reality**, not defending the rev-8 wording.
 - **2026-04-17 — §8.7 grant probe: PASSED.** Confirmed on macOS (`darwin 25.3.0`, Claude Code `default` mode): a frontmatter grant declared as `Bash(/Users/adammiller/.claude/commands/_shared/tools/probe.sh:*)` resolves cleanly when `~/.claude/commands/_shared` is a symlink to the dev repo — no permission prompt, script executed, stdout captured as expected. Verified in a separate Claude Code session invoking `/_shared-probe` (throwaway command + probe.sh). **Implication for Stage 2:** the full `/adams-review` `allowed-tools` block can use absolute paths under `~/.claude/commands/_shared/tools/...` per DESIGN §8.7's "canonical invocation path" rule; no need for the relative-name + `PATH` fallback. Probe files (`commands/_shared/tools/probe.sh` + `~/.claude/commands/_shared-probe.md`) torn down after verification; neither was committed.
 
 - **2026-04-18 — Stage 2.5.A probe: `additionalDirectories` does NOT bypass the sensitive-file gate for `.claude/` paths. Resolution: branch (b) — relocate reviews root.** Probed via Claude Code permissions documentation (https://code.claude.com/docs/en/permissions.md) rather than a hands-on scratch session; the docs give a definitive and stronger answer. Key findings: (1) `additionalDirectories` extends *read/edit scope* but is explicitly "file access, not configuration" — it does not override path-specific sensitivity rules. (2) Writes to `.git`, `.claude`, `.vscode`, `.idea`, and `.husky` **still prompt for confirmation even in `bypassPermissions` mode**, the least-restrictive mode Claude Code offers; the `.claude/` gate is hardcoded in the permission layer, not config-driven. The documented exempt subdirs are `.claude/commands`, `.claude/agents`, `.claude/skills` — `~/.claude/reviews/` is not on that list. (3) Tilde expansion works in `additionalDirectories` paths; glob patterns do not. (4) No other settings key / env var / CLI flag grants persistent write permission to `~/.claude/reviews/**` that survives beyond the current session; `/permissions` "Yes, don't ask again" saves Allow rules but Edit-tool approvals reset on session end per the docs. **Decision:** flip default `$ADAMS_REVIEW_REVIEWS_ROOT` from `~/.claude/reviews` to `~/.adams-reviews` in Stage 2.5.A Commit 2. Leading-dot hidden state dir, outside `.claude/`, gate doesn't fire. DESIGN §9.1's "canonical layout under `~/.claude/reviews/`" becomes historical; the new canonical is `~/.adams-reviews/<slug>/<branch>/<review_id>/`. Users with pre-2.5 reviews migrate via `mv ~/.claude/reviews ~/.adams-reviews` OR override with `export ADAMS_REVIEW_REVIEWS_ROOT=~/.claude/reviews` (will continue to prompt, but their choice). No hands-on probe was run — the docs are authoritative and the hardcoded-gate answer is unambiguous; running an empirical probe would duplicate what the docs already state. Recorded here so Stage 3 doesn't re-ask the question.
+
+- **2026-04-18 — Stage 2.5.B clarification: `--apply-decisions` and derivation authority.** The §13.1 Phase-4 table now lives in `artifact-patch.py`'s `_derive_phase4_disposition` (plus the `_ACTIONABILITY_TO_DISPOSITION` map and `CONFIRMED_BAND` set). The fragment at `05-validation.md` step 4.4 describes the tuple shape and calls the helper; it no longer encodes the table itself in prose. Authority stays in code, not in fragments — if the rule changes, it changes in one place. The helper's `decision` field is accepted but audit-only: derivation runs off `score_phase4 + actionability`, which implements the existing "score wins over decision when they disagree" rule automatically. `validation_result` is written only when the derived disposition lands in the confirmed band; disproven/uncertain tuples with a `validation_result` attached have it silently ignored (schema requires nested non-null, and those bands don't produce `fix_proposal` / `verification_context`). Per-tuple atomic writes with first-failure halt: caller re-invokes with the remainder after fixing the bad tuple, not the whole batch (score_history would re-append and pollute the audit trail).
+
+- **2026-04-18 — Stage 2.5.C authoring disciplines for Stage 3.** Three principles captured from C13's orchestrator-context-budget observation (Note 1 Levers #1, #2, #4). Apply when drafting Phases 7–9:
+  1. **Read for decisions, not for holding.** Prefer narrow `jq` filters that return a verdict (`.findings | length`, `.findings | map(.disposition) | unique`) over reading full records into orchestrator context when the orchestrator only needs a branch decision.
+  2. **Delegate large-context synthesis to sub-agents** that return structured summaries (ids, group memberships, verdicts) rather than handing the full prompt+data to the orchestrator and emitting back prose.
+  3. **Avoid per-finding loops in fragments when a single helper call can carry the same semantics.** Each loop iteration accumulates prose in orchestrator context; a batched helper invocation does not. Stage 2.5.B's `--apply-decisions` is the first instance; `group-fixes.py` in Stage 3 Phase 8 and the per-group Phase 9 result aggregation are candidates for the same pattern.
+
+  Not enforced by tooling — authoring disciplines only. Stage 3 planning should apply them from the start rather than retrofitting mid-stage.
+
+- **2026-04-18 — Stage 2.5.D renderer fix: light-lane `uncertain` was silently dropped from PR comments.** `artifact-render.py` lines 148 (summary) and 323 (table) iterated only `(confirmed_auto, confirmed_manual, confirmed_report)` for the light lane; DESIGN §13.1 Phase-4 "score 45-59 → uncertain" applies regardless of lane, so light-lane findings with `disposition: uncertain` were present in `artifact.json` but invisible in the rendered `artifact.md`. `findings_count` still counted them in the "Found N findings" total (the buckets iteration at render_summary line 133 sums all dispositions), producing a subtle count mismatch: "Found 6 findings" but only 5 enumerated per-section. **Real-world impact.** C13's ray-finance `feat/import-apple` run had three light-lane uncertain findings (F021 `src/cli/ink/mount.ts:11-13`, F022 `src/cli/ink/ChatApp.tsx:108-116`, F032 `src/cli/commands.ts:808-812`) that were present in the artifact but silently missing from PR comment `4274059620` — exactly the findings the user most needs to decide on manually. **Fix.** Two-tuple-literal edit adding `"uncertain"` to both iteration tuples; `render_light_lane()`'s existing single-table-with-Disposition-column shape accommodates mixed dispositions with no structural change. Re-rendering the C13 artifact locally now surfaces all three findings in the Light lane table. **Defence in depth.** Fixture seed extended with F006 (architecture/uncertain/light) so the existing `diff expected.md` assertion (step 9) would surface any regression; added a belt-and-suspenders smoke assertion Y grepping for F006 in the rendered output with a clear "light uncertain dropped" signal. **Adjacent rendering quirk.** `render_summary()` still counts `below_gate` in the "Found N findings" total but doesn't list it per-lane (no section displays sub-threshold findings, so they exist in the artifact for debuggability but don't surface). That's intentional per the Stage 1 close-out note; this Stage 2.5.D fix is orthogonal and does not touch `below_gate` handling.
 
 ---
 

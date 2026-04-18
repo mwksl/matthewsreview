@@ -17,7 +17,8 @@
     "src/billing/invoice.ts",
     "src/api/search.ts",
     "src/components/DeleteButton.tsx",
-    "src/models/user.ts"
+    "src/models/user.ts",
+    "src/models/preferences.ts"
   ],
   "claude_md_paths": [],
   "findings": [
@@ -161,6 +162,35 @@
       "fix_attempts": [],
       "introduced_in_sha": null,
       "suggested_follow_up": "File as separate issue",
+      "related_parent_finding_id": null
+    },
+    {
+      "id": "F006",
+      "sources": ["detection"],
+      "source_families": ["code-review"],
+      "impact_type": "architecture",
+      "origin": "introduced_by_pr",
+      "origin_confidence": "medium",
+      "actionability": "manual",
+      "validation_lane": "light",
+      "current_state": "open",
+      "disposition": "uncertain",
+      "is_actionable": false,
+      "reason": "uncertain (Phase 4 inconclusive)",
+      "confirmed_strength": null,
+      "file": "src/models/preferences.ts",
+      "line_range": [15, 22],
+      "claim": "Deprecated pattern used in new code path",
+      "score_phase3": 50,
+      "score_phase4": 48,
+      "score_history": [
+        {"phase": "phase_3", "score": 50},
+        {"phase": "phase_4", "score": 48}
+      ],
+      "validation_result": null,
+      "fix_attempts": [],
+      "introduced_in_sha": null,
+      "suggested_follow_up": null,
       "related_parent_finding_id": null
     }
   ],

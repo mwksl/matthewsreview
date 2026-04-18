@@ -166,7 +166,7 @@ fi
 # ---------------------------------------------------------------- sidecars
 
 # A. artifact-read.sh --summary returns expected counts
-expected_counts='{"findings_total":6,"by_disposition":{"below_gate":1,"confirmed_auto":1,"confirmed_manual":1,"pre_existing_report":1,"resolved":1,"uncertain":1}}'
+expected_counts='{"findings_total":7,"by_disposition":{"below_gate":1,"confirmed_auto":1,"confirmed_manual":1,"pre_existing_report":1,"resolved":1,"uncertain":2}}'
 actual=$("$TOOLS/artifact-read.sh" --path "$ART" --summary \
     | jq -c '{findings_total, by_disposition: .counts_by_disposition}')
 if [[ "$actual" == "$expected_counts" ]]; then
@@ -650,6 +650,22 @@ if [[ "$code" == "0" ]] \
     pass "W: --apply-decisions batch routes per §13.1; validation_result only for confirmed band (Stage 2.5.B)"
 else
     fail "W: apply-decisions state mismatch" "code=$code F101=($F101_DISP,$F101_IA,$F101_CS,$F101_VR) F102=($F102_DISP,$F102_VR) F103=($F103_DISP,$F103_VR,$F103_REASON) out=$out"
+fi
+
+# Y. Light-lane uncertain findings render in both summary and table (Stage 2.5.D).
+# Regression guard for a real data-loss bug: artifact-render.py's light-lane
+# iteration tuples omitted "uncertain" — C13 on ray-finance had 3 light-lane
+# uncertain findings (F021/F022/F032) present in artifact.json but silently
+# missing from the rendered PR comment. Fixture seed now includes F006 as a
+# light-lane uncertain finding; this assertion is belt-and-suspenders next to
+# the existing expected.md byte-diff (step 9) so a future tuple-literal drop
+# surfaces with a clear "light uncertain dropped" signal rather than a generic
+# rendering diff.
+if grep -q "^| F006 | 48 | architecture |" "$MD" \
+    && grep -q "1 confirmed-auto, 1 uncertain" "$MD"; then
+    pass "Y: Light-lane uncertain finding renders in table + summary (Stage 2.5.D)"
+else
+    fail "Y: expected F006 row + 'confirmed-auto, 1 uncertain' in $MD" "$(cat "$MD")"
 fi
 
 # X. --apply-decisions rejects a confirmed-band tuple that omits actionability.
