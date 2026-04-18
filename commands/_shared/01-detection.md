@@ -333,7 +333,7 @@ After every lens result is aggregated:
 phase_1_elapsed=$(( $(date +%s) - phase_1_start_epoch ))
 
 # Per-lens candidate count via artifact-read
-counts_by_lens=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+counts_by_family=$(~/.claude/commands/_shared/tools/artifact-read.sh \
   --path "$artifact_path" \
   --filter '[.findings[] | .source_families[]?] | group_by(.) | map({key:.[0], value:length}) | from_entries')
 
@@ -343,7 +343,7 @@ total_candidates=$(~/.claude/commands/_shared/tools/artifact-read.sh \
 ~/.claude/commands/_shared/tools/log-phase.sh \
   --review-dir "$review_dir" --phase 1 --name detection \
   --elapsed "$phase_1_elapsed" \
-  --summary "total=$total_candidates; counts_by_family=$counts_by_lens; skipped_lenses=<list-if-any>"
+  --summary "total=$total_candidates; counts_by_family=$counts_by_family; skipped_lenses=<list-if-any>"
 
 ~/.claude/commands/_shared/tools/log-phase.sh \
   --review-dir "$review_dir" --phase 1 --record "$(jq -nc \

@@ -107,7 +107,7 @@ Phase 0 captures — and every later phase reads by name — this set:
 - **Mode**: `mode` (pr|local), `pr_number`, `pr_state`, `ensemble_mode`,
   `force_full`, `trivial_mode`, `user_facing`, `stash_taken`
 - **Diff surface**: `reviewed_files_all`, `claude_md_paths`,
-  `pr_size` (files_changed, lines_changed)
+  `num_files`, `lines_changed` (feed `pr_size_buckets` at Phase 6)
 - **Timestamps**: `review_started_at` (captured BEFORE any push — anchors
   Phase 1.5 scrape window)
 - **Log paths**: `phases_log_path`, `tokens_log_path`, `trace_log_path`

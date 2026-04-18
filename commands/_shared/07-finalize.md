@@ -60,6 +60,8 @@ providers that produced at least one candidate. Compute it from
 reviewer_sources=$(jq -c '
   [.findings[] | .sources[]]
   | map(
+      # Internal lens tags: L1..L6. If we add an L7 lens in the future,
+      # update this regex or the entry falls through to `empty`.
       if test("^L[1-6]-") then "internal"
       elif . == "codex" or . == "coderabbit" then .
       elif startswith("external-pr:") then .

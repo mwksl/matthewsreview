@@ -44,7 +44,9 @@ For each deep-lane candidate, launch one `Agent` tool-use with
 orchestrator turn for concurrency.
 
 Each sub-agent receives:
-- The full candidate JSON (including evidence_snippet).
+- The full stored finding JSON. `evidence_snippet` is not among the
+  stored fields — the validator works from `file + line_range + claim`
+  plus the Read/grep tools it uses to look at the diff directly.
 - `$claude_md_paths` (absolute paths).
 - If this is a retry-mode run (Stage 3 context): the finding's prior
   `fix_attempts` for context. In Stage 2 `/adams-review`, `fix_attempts`
@@ -167,7 +169,14 @@ For each Wave 1 result, first log tokens:
 ```
 
 Then apply the decision table. Derive inputs from the sub-agent's
-return:
+return: `score_phase4` takes precedence over `decision` when the two
+disagree. A validator that returns `decision: "confirmed"` with
+`score_phase4: 40` is treated as disproven (the row the score lands on
+wins); a validator returning `decision: "disproven"` with
+`score_phase4: 70` is treated as confirmed. Orchestrator should log
+the conflict to `trace.md` but trust the score. Validators shouldn't
+return such mismatches, but err toward the structured field over the
+natural-language label.
 
 | Score | Rule | Disposition | is_actionable | Other |
 |---|---|---|---|---|
@@ -194,7 +203,11 @@ Apply via one `artifact-patch.py` call per finding. Example for
 ```
 
 For deep-lane candidates whose `decision == "confirmed"`, ALSO persist
-`validation_result`:
+`validation_result`. The schema at `finding.validation_result`
+(`schema-v1.json` §defs.validation_result) is the NESTED object — the
+sub-agent's outer response includes `{validation_result, score_phase4,
+decision, actionability, related_candidates_to_investigate}`, so you
+must extract `.validation_result` before writing:
 
 ```bash
 # Only confirmed findings get validation_result — disproven/uncertain
@@ -202,6 +215,10 @@ For deep-lane candidates whose `decision == "confirmed"`, ALSO persist
 # nested field of validation_result to be non-null, so writing a
 # partial object for uncertain findings would fail validation.
 if [[ "$decision" == "confirmed" ]]; then
+    # Extract just the nested validation_result object; if the outer
+    # response shape is already just the inner object, this is a no-op.
+    jq -c '.validation_result // .' <<<"$subagent_response_json" \
+        > "/tmp/val-$id.json"
     ~/.claude/commands/_shared/tools/artifact-patch.py \
       --path "$artifact_path" --finding-id "$id" \
       --set-json "validation_result=@/tmp/val-$id.json"
@@ -226,12 +243,49 @@ finding (since that was already investigated).
 
 If the resulting list is non-empty AND we haven't already done Wave 2:
 
-1. Add each new candidate to the artifact via `--add-finding` (continuing
-   the F0xx sequence) with `source_family: "structural-family"` (the Wave
-   1 finding's source family, really; `related_parent_finding_id` set to
-   the Wave 1 parent).
+1. For each related candidate, **build a full schema-valid finding
+   object** (same transformation the Phase-1 jq builder does — schema's
+   `additionalProperties: false` rejects singular `source_family` and
+   requires every finding field to be present). Example:
+
+   ```bash
+   wave2_finding=$(jq -n \
+     --arg id "F$(printf '%03d' $finding_counter)" \
+     --arg parent "$parent_finding_id" \
+     --argjson cand "$related_candidate" \
+     '{
+        id: $id,
+        sources: ["L2-structural"],            # Wave 2 is structural-derived
+        source_families: ["structural-family"],
+        impact_type: ($cand.impact_type // "correctness"),
+        origin: ($cand.origin // "introduced_by_pr"),
+        origin_confidence: ($cand.origin_confidence // "medium"),
+        actionability: "auto_fixable",
+        validation_lane: "deep",
+        current_state: "open",
+        disposition: "pending_validation",
+        is_actionable: false,
+        reason: null,
+        confirmed_strength: null,
+        file: $cand.file,
+        line_range: ($cand.line_range // [1,1]),
+        claim: $cand.claim,
+        score_phase3: null,
+        score_phase4: null,
+        score_history: [],
+        validation_result: null,
+        fix_attempts: [],
+        introduced_in_sha: null,
+        suggested_follow_up: null,
+        related_parent_finding_id: $parent
+      }')
+
+   ~/.claude/commands/_shared/tools/artifact-patch.py \
+     --path "$artifact_path" --add-finding "$wave2_finding"
+   ```
+
 2. Run Phase 3 scoring on these new candidates (one Sonnet call each —
-   can fan out).
+   can fan out). Same step 3.3 pattern as the first pass.
 3. Dispatch Wave 2 deep-lane validators on any that pass the Phase-3
    gate, same prompt as Wave 1 BUT add: "This is Wave 2 — do NOT emit
    further `related_candidates_to_investigate` entries." (Hard-cap

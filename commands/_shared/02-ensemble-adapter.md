@@ -157,16 +157,27 @@ Apply a reasonable timeout (e.g., 10 minutes — ensemble reviewers can be
 slow on large diffs). On timeout, capture whatever output exists, mark the
 reviewer as `timed_out`, and continue.
 
-After each reviewer returns, capture its status explicitly — the Phase-
-1.5 summary record at step 1.5.7 references these variables by name:
+Capture these variables per reviewer as the background shell resolves —
+the status computation below reads each one by name, so every branch
+must set every variable:
+
+- `coderabbit_exit_code` — integer exit code from the background shell
+  (`BashOutput` exposes it when the shell exits); default `0` for the
+  skipped branch.
+- `coderabbit_timed_out` — `"true"` if the 10-minute deadline elapsed
+  before the shell exited, else `"false"`.
+- (Same two variables for Codex: `codex_exit_code`, `codex_timed_out`.)
+
+After each reviewer resolves, set the status variable that the Phase-1.5
+summary record at step 1.5.7 will reference:
 
 ```bash
 # After CodeRabbit resolves (success / failure / timeout):
 if [[ "$coderabbit_available" == "false" ]]; then
     coderabbit_status=skipped
-elif [[ "$coderabbit_timed_out" == "true" ]]; then
+elif [[ "${coderabbit_timed_out:-false}" == "true" ]]; then
     coderabbit_status=timed_out
-elif [[ "$coderabbit_exit_code" -ne 0 ]] || [[ ! -s "$scratch_dir/coderabbit.out" ]]; then
+elif [[ "${coderabbit_exit_code:-0}" -ne 0 ]] || [[ ! -s "$scratch_dir/coderabbit.out" ]]; then
     coderabbit_status=failed
 else
     coderabbit_status=success
@@ -259,10 +270,30 @@ Log the normalizer's tokens under `phase_1_5`:
   --model sonnet --tokens <N or null>
 ```
 
-For each normalized candidate, call `artifact-patch.py --add-finding` with
-the same field defaults as Phase 1.4 step 3 — monotonically continuing the
-finding-id sequence (if Phase 1 produced F001-F030, external starts at F031).
-`origin_confidence` stays `"low"` per the normalizer's output.
+For each normalized candidate, build a full schema-valid finding and
+append via `artifact-patch.py --add-finding`. Continue the F0xx id
+sequence from Phase 1 (if Phase 1 produced F001–F030, external starts
+at F031). The same transformation Phase 1.4 step 3 performs is
+required here:
+
+- **Preserve** `sources[]` as the normalizer emitted it (e.g.
+  `["external-pr:greptile-apps[bot]"]`, `["codex"]`, `["coderabbit"]`).
+- **Rename** the normalizer's singular `source_family` into the
+  schema's plural `source_families: [<family>]`.
+- **Strip** `evidence_snippet` — candidate-only field, rejected by the
+  schema's `additionalProperties: false` on findings.
+- **Default** schema-required-but-optional fields the normalizer
+  doesn't set: `disposition: "pending_validation"`, `is_actionable: false`,
+  `current_state: "open"`, `reason: null`, `confirmed_strength: null`,
+  `score_phase3: null`, `score_phase4: null`, `score_history: []`,
+  `validation_result: null`, `fix_attempts: []`, `introduced_in_sha: null`,
+  `suggested_follow_up: null`, `related_parent_finding_id: null`,
+  `actionability` per `impact_type`, `validation_lane` per
+  `impact_type` (or `"light"` under trivial_mode).
+- `origin_confidence` stays `"low"` per the normalizer's output.
+
+Use the same `jq -n` + `del(.source_family, .evidence_snippet)` idiom
+as 01-detection.md step 1.4 to avoid hand-escaping.
 
 **Schema guard for missing location info.** The normalizer prompt
 allows `file: null` / `line_range: null` for candidates whose body text

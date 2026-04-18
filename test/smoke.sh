@@ -445,6 +445,105 @@ else
     fail "Q: expected coupling error; got code=$code stderr=$stderr"
 fi
 
+# R. pending_validation → confirmed_auto Phase-4 transition works (R2 flow)
+# F099 starts at below_gate; move through pending_validation → confirmed_auto
+# (with is_actionable=true, confirmed_strength) simulating Phase 3→4.
+cp "$ART" "$WORK/art-p34.json"
+"$TOOLS/artifact-patch.py" --path "$WORK/art-p34.json" --finding-id F099 \
+    --set disposition=pending_validation --set is_actionable=false >/dev/null
+if "$TOOLS/artifact-patch.py" --path "$WORK/art-p34.json" --finding-id F099 \
+        --set disposition=confirmed_auto \
+        --set is_actionable=true \
+        --set confirmed_strength=strong \
+        --set "score_phase4=85" >/dev/null; then
+    disp=$(jq -r '.findings[] | select(.id=="F099") | .disposition' "$WORK/art-p34.json")
+    if [[ "$disp" == "confirmed_auto" ]]; then
+        pass "R: pending_validation → confirmed_auto Phase-4 transition succeeds"
+    else
+        fail "R: final disposition = $disp"
+    fi
+else
+    fail "R: Phase-4 transition exit non-zero"
+fi
+
+# S. Schema-valid validation_result via --set-json @file (R3 write path)
+VR=$(cat <<'JSON'
+{
+  "evidence": ["src/foo.ts:42 — null deref"],
+  "blast_radius": {
+    "writers": ["src/foo.ts:40"],
+    "consumers": ["src/bar.ts:88"],
+    "parallel_paths": [],
+    "invariants_at_stake": ["user_id is non-null"]
+  },
+  "fix_proposal": {
+    "approach": "Add null-check + fallback path",
+    "files_to_modify": [
+      {"file":"src/foo.ts","what":"guard null","why":"prevents NPE"}
+    ]
+  },
+  "verification_context": {
+    "how_to_verify_fix": ["grep 'user_id' src/"],
+    "edge_cases_to_preserve": ["empty string"],
+    "what_would_break_if_incomplete": ["API returns 500 on unauth"]
+  }
+}
+JSON
+)
+echo "$VR" > "$WORK/vr.json"
+if "$TOOLS/artifact-patch.py" --path "$WORK/art-p34.json" --finding-id F099 \
+        --set-json "validation_result=@$WORK/vr.json" >/dev/null; then
+    actual=$(jq -r '.findings[] | select(.id=="F099") | .validation_result.fix_proposal.approach' "$WORK/art-p34.json")
+    if [[ "$actual" == "Add null-check + fallback path" ]]; then
+        pass "S: --set-json validation_result=@file writes schema-valid object (R3)"
+    else
+        fail "S: fix_proposal.approach readback = $actual"
+    fi
+else
+    fail "S: --set-json validation_result @file exit non-zero"
+fi
+
+# T. --set-json reviewer_sources=@file at top level (Phase 6.3a recompute path)
+echo '["internal","codex"]' > "$WORK/rs.json"
+if "$TOOLS/artifact-patch.py" --path "$WORK/art-p34.json" \
+        --set-json "reviewer_sources=@$WORK/rs.json" >/dev/null; then
+    actual=$(jq -c '.reviewer_sources' "$WORK/art-p34.json")
+    if [[ "$actual" == '["internal","codex"]' ]]; then
+        pass "T: --set-json reviewer_sources at top-level (Phase 6.3a path)"
+    else
+        fail "T: reviewer_sources readback = $actual"
+    fi
+else
+    fail "T: --set-json reviewer_sources exit non-zero"
+fi
+
+# U. reviewer_sources Phase-6.3a regex correctly classifies lens tags.
+# Simulates the jq expression in 07-finalize.md step 6.3a against a
+# synthetic sources[] union.
+U_OUT=$(echo '["L1-diff-local","L3-claude-md","codex","external-pr:greptile-apps[bot]","random-tag"]' \
+    | jq -c 'map(
+        if test("^L[1-6]-") then "internal"
+        elif . == "codex" or . == "coderabbit" then .
+        elif startswith("external-pr:") then .
+        else empty end
+      ) | unique')
+if [[ "$U_OUT" == '["codex","external-pr:greptile-apps[bot]","internal"]' ]]; then
+    pass "U: reviewer_sources regex classifies L-tags, codex, external-pr: correctly"
+else
+    fail "U: reviewer_sources output = $U_OUT"
+fi
+
+# V. pr_state=OPEN (uppercase from gh) would fail schema — the 00-preflight
+# transform at step 0.4 must lowercase it. This asserts the schema rejects
+# uppercase directly, so the transform has something to protect.
+BAD_SEED=$(cat "$FIX/artifact-seed.json" | jq '.pr_state = "OPEN"')
+stderr=$("$TOOLS/artifact-patch.py" --init "$BAD_SEED" --path "$WORK/art-badstate.json" 2>&1 >/dev/null); code=$?
+if [[ "$code" != "0" ]] && echo "$stderr" | grep -q "pr_state"; then
+    pass "V: schema rejects pr_state='OPEN' (uppercase — protects 00-preflight transform)"
+else
+    fail "V: schema should reject uppercase pr_state; code=$code stderr=$stderr"
+fi
+
 echo
 echo "smoke: PASS ($N assertions)"
 exit 0

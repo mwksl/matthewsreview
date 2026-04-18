@@ -89,7 +89,7 @@ def _load_validator():
             action="verify ~/.claude/commands/_shared is symlinked to the repo's commands/_shared directory."
         )
         sys.exit(EXIT_VALIDATION)
-    with open(SCHEMA_PATH) as f:
+    with open(SCHEMA_PATH, encoding="utf-8") as f:
         schema = json.load(f)
     Draft202012Validator.check_schema(schema)
     return schema, Draft202012Validator
@@ -127,7 +127,7 @@ def _pretty_path(absolute_path):
 # ----- I/O ---------------------------------------------------------------
 
 def read_json(path):
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -142,7 +142,7 @@ def atomic_write(target, data):
     parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(prefix=f".{target.name}.tmp.", dir=parent)
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
             f.write("\n")
         os.replace(tmp_path, target)

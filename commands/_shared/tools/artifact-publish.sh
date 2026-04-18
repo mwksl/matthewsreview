@@ -248,10 +248,14 @@ find_by_marker() {
     # Returns the most-recent matching comment id, or empty if none.
     # Filters: author == current gh user AND body contains the stable
     # marker line (§13.4).
+    #
+    # `gh api --paginate` may emit one JSON array per page as separate
+    # top-level values (not a single merged array). Slurp (-s) and
+    # flatten with `.[][]` so we consider every page, not just the first.
     gh api --paginate "repos/$OWNER_REPO/issues/$PR_NUM/comments" \
-        | jq -r --arg user "$CURRENT_USER" \
-               --arg marker "<!-- adams-review-v1 -->" \
-            '[.[] | select(.user.login == $user) | select(.body | contains($marker))]
+        | jq -rs --arg user "$CURRENT_USER" \
+                --arg marker "<!-- adams-review-v1 -->" \
+            '[.[][] | select(.user.login == $user) | select(.body | contains($marker))]
              | sort_by(.created_at) | last | .id // empty'
 }
 

@@ -89,7 +89,9 @@ Run `gh pr view --json number,state,isDraft,url,author,headRefName,baseRefName`
     elif [[ "$pr_raw_state" == "OPEN" ]]; then
         pr_state="open"
     else
-        pr_state=""   # unexpected enum value; treated as null downstream
+        # Unexpected enum value — shouldn't reach here after the
+        # CLOSED/MERGED exit above, but defend anyway.
+        pr_state=""   # empty string sentinel; the jq seed at step 0.15 turns "" into null
     fi
     ```
   - Set `mode=pr`.
@@ -328,7 +330,6 @@ jq -n \
   --argjson pr_number "${pr_number:-null}" \
   --argjson comment_id "${existing_comment_id:-null}" \
   --argjson trivial_mode "$trivial_mode" \
-  --argjson ensemble "$ensemble_mode" \
   --argjson reviewed_files_all "$(printf '%s' "$reviewed_files_all" | jq -Rn '[inputs | select(length>0)]')" \
   --argjson claude_md_paths "$(printf '%s' "$claude_md_paths" | jq -Rn '[inputs | select(length>0)]')" \
   --argjson files_changed "$num_files" \
@@ -346,7 +347,7 @@ jq -n \
     pr_number: $pr_number,
     comment_id: $comment_id,
     trivial_mode: $trivial_mode,
-    reviewer_sources: ["internal"],
+    reviewer_sources: ["internal"],    # seed — Phase 6.3a recomputes the authoritative list from findings[].sources[] union per DESIGN §6
     reviewed_files_all: $reviewed_files_all,
     claude_md_paths: $claude_md_paths,
     findings: [],
@@ -399,7 +400,7 @@ elapsed=$(( $(date +%s) - phase_0_start_epoch ))
     --arg name preflight \
     --argjson elapsed_sec "$elapsed" \
     --argjson trivial "$trivial_mode" \
-    --argjson user_facing "$user_facing" \
+    --argjson user_facing "${user_facing:-false}" \
     --argjson files_changed "$num_files" \
     --argjson lines_changed "$lines_changed" \
     '{name:$name, elapsed_sec:$elapsed_sec, trivial_mode:$trivial, user_facing:$user_facing, counts_by_state:{}, counts_by_disposition:{}, pr_size:{files_changed:$files_changed, lines_changed:$lines_changed}}')"
@@ -419,7 +420,7 @@ At the end of Phase 0, you should have captured:
 | `repo_slug` | Step 0.3 |
 | `mode`, `pr_number`, `pr_state`, `pr_author` | Step 0.4 |
 | `review_started_at` | Step 0.5 |
-| `reviewed_files_all`, `pr_size` | Step 0.6 |
+| `reviewed_files_all`, `num_files`, `lines_changed` | Step 0.6 |
 | `claude_md_paths` | Step 0.7 |
 | `stash_taken` | Step 0.8 |
 | `reviewed_sha` | Step 0.10 |

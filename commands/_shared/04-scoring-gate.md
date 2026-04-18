@@ -186,7 +186,9 @@ gate_fail=$(~/.claude/commands/_shared/tools/artifact-read.sh \
   --summary "advanced_to_phase_4=$gate_pass; below_gate=$gate_fail"
 
 # phases.jsonl record: shows counts_by_disposition for the first time
-# (Phase 1 + Phase 2 left disposition unassigned).
+# with the Phase-3 table. (Phase 1 + Phase 2 parked every finding at
+# pending_validation; this phase is where below_gate / pre_existing_report
+# first appear on gate-fail / override findings respectively.)
 by_disp=$(~/.claude/commands/_shared/tools/artifact-read.sh \
   --path "$artifact_path" --summary \
   | jq -c '.counts_by_disposition')
