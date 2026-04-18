@@ -1166,6 +1166,123 @@ else
     fail "AI-7: expected '$expected', got '$line'"
 fi
 
+# ------------------------------------------------------------------ Stage 3
+#
+# Stage 3 introduces `/adams-review-fix`. These assertions cover the helper
+# contracts it depends on — `group-fixes.py` (§21.5) fix-group union-find
+# and `artifact-patch.py` batched fix-outcome modes. Fragment-level prose
+# (Phase 7/8/9 orchestration) is not machine-tested here; real-repo runs
+# are the first integration signal, same posture as Stage 2.5.B / 2.7.
+
+GF_TOOL="$TOOLS/group-fixes.py"
+GF_ART="$WORK/gf-art.json"
+
+# Rebuild artifact from the fix-group fixture. Independent of the Stage 1/2
+# state above; validator in --init guards schema shape.
+if "$TOOLS/artifact-patch.py" --init "@$FIX/fix-group-seed.json" --path "$GF_ART" >/dev/null; then
+    pass "FX-init: fix-group fixture loads into valid artifact"
+else
+    fail "FX-init: fix-group-seed.json --init failed"
+fi
+
+# Assertion FX-GF-1: single-finding eligible list → single FG with one id.
+# F007 is standalone on src/e.ts — the happy path.
+out=$("$GF_TOOL" --artifact "$GF_ART" --eligible-finding-ids "F007")
+line=$(echo "$out" | jq -c '.')
+expected='[{"id":"FG-1","finding_ids":["F007"],"files_planned":["src/e.ts"]}]'
+if [[ "$line" == "$expected" ]]; then
+    pass "FX-GF-1 (§21.5): single eligible finding produces single FG group"
+else
+    fail "FX-GF-1: expected '$expected', got '$line'"
+fi
+
+# Assertion FX-GF-2: two findings in the same cross_cutting_group merge.
+# F004+F005 are on disjoint files (c.ts / d.ts) but linked by G1. The
+# cross-cutting seed in §21.5 step 2 must fire before file-union step 3
+# decides they're disjoint.
+out=$("$GF_TOOL" --artifact "$GF_ART" --eligible-finding-ids "F004,F005")
+line=$(echo "$out" | jq -c '.')
+expected='[{"id":"FG-1","finding_ids":["F004","F005"],"files_planned":["src/c.ts","src/d.ts"]}]'
+if [[ "$line" == "$expected" ]]; then
+    pass "FX-GF-2 (§21.5): cross_cutting_groups merge eligible members (disjoint files)"
+else
+    fail "FX-GF-2: expected '$expected', got '$line'"
+fi
+
+# Assertion FX-GF-3: two findings sharing a planned file merge. F001 and
+# F002 both plan src/a.ts — no cross-cutting link, the file-overlap step
+# alone must catch this.
+out=$("$GF_TOOL" --artifact "$GF_ART" --eligible-finding-ids "F001,F002")
+line=$(echo "$out" | jq -c '.')
+expected='[{"id":"FG-1","finding_ids":["F001","F002"],"files_planned":["src/a.ts"]}]'
+if [[ "$line" == "$expected" ]]; then
+    pass "FX-GF-3 (§21.5): findings sharing a planned file merge into one group"
+else
+    fail "FX-GF-3: expected '$expected', got '$line'"
+fi
+
+# Assertion FX-GF-4: transitive closure. F004+F005 linked by CCG; F004+F006
+# share src/c.ts. All three must collapse to one group — tests that the
+# union-find picks up the transitive relation (F005 → F004 → F006).
+out=$("$GF_TOOL" --artifact "$GF_ART" --eligible-finding-ids "F004,F005,F006")
+line=$(echo "$out" | jq -c '.')
+expected='[{"id":"FG-1","finding_ids":["F004","F005","F006"],"files_planned":["src/c.ts","src/d.ts"]}]'
+if [[ "$line" == "$expected" ]]; then
+    pass "FX-GF-4 (§21.5): transitive closure (CCG + file-share) merges all three"
+else
+    fail "FX-GF-4: expected '$expected', got '$line'"
+fi
+
+# Assertion FX-GF-5: disjoint singletons stay singletons. F003 on b.ts,
+# F007 on e.ts, no CCG — two separate FGs, numbered by minimum-id rule.
+out=$("$GF_TOOL" --artifact "$GF_ART" --eligible-finding-ids "F003,F007")
+line=$(echo "$out" | jq -c '.')
+expected='[{"id":"FG-1","finding_ids":["F003"],"files_planned":["src/b.ts"]},{"id":"FG-2","finding_ids":["F007"],"files_planned":["src/e.ts"]}]'
+if [[ "$line" == "$expected" ]]; then
+    pass "FX-GF-5 (§21.5): disjoint singletons produce two FGs, numbered by minimum id"
+else
+    fail "FX-GF-5: expected '$expected', got '$line'"
+fi
+
+# Assertion FX-GF-6: empty eligible list → empty JSON array, exit 0.
+# Orchestrator path: threshold filter excluded every finding; no fix
+# groups to form, but the helper must not error.
+out=$("$GF_TOOL" --artifact "$GF_ART" --eligible-finding-ids ""); code=$?
+if [[ "$code" == "0" && "$out" == "[]" ]]; then
+    pass "FX-GF-6 (§21.5): empty eligible list returns '[]' with exit 0"
+else
+    fail "FX-GF-6: expected '[]' + exit 0, got code=$code out='$out'"
+fi
+
+# Assertion FX-GF-7: unknown finding id → EXIT_VALIDATION (1) + error-as-prompt
+# naming the bad id AND listing valid ids.
+stderr=$("$GF_TOOL" --artifact "$GF_ART" --eligible-finding-ids "F999" 2>&1 >/dev/null); code=$?
+if [[ "$code" == "1" ]] \
+    && echo "$stderr" | grep -q "unknown id" \
+    && echo "$stderr" | grep -q "F999" \
+    && echo "$stderr" | grep -q "existing ids" \
+    && echo "$stderr" | grep -q "Action:"; then
+    pass "FX-GF-7 (§21.5): unknown eligible id rejected with exit 1 + error-as-prompt"
+else
+    fail "FX-GF-7: expected exit 1 + error-as-prompt; got code=$code stderr='$stderr'"
+fi
+
+# Assertion FX-GF-8: eligible finding with null validation_result is
+# rejected. The orchestrator must not hand trivial-mode or below-gate
+# findings to the grouper — the helper confirms it via error-as-prompt
+# rather than silently dropping them. Rebuild a fresh artifact from the
+# Stage-1 seed (whose F001 has validation_result=null per its fixture
+# design) so this test is independent of whatever $ART is after the
+# earlier Stage 1/2 assertions mutated it.
+NULL_VR_ART="$WORK/gf-null-vr.json"
+"$TOOLS/artifact-patch.py" --init "@$FIX/artifact-seed.json" --path "$NULL_VR_ART" >/dev/null
+stderr=$("$GF_TOOL" --artifact "$NULL_VR_ART" --eligible-finding-ids "F001" 2>&1 >/dev/null); code=$?
+if [[ "$code" == "1" ]] && echo "$stderr" | grep -q "validation_result is required"; then
+    pass "FX-GF-8 (§21.5): eligible finding missing validation_result rejected"
+else
+    fail "FX-GF-8: expected exit 1 + validation_result message; got code=$code stderr='$stderr'"
+fi
+
 echo
 echo "smoke: PASS ($N assertions)"
 exit 0
