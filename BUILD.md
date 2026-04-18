@@ -104,7 +104,7 @@ bd6b610      Bootstrap repo with design doc (rev 8) and build journal
 
 **Done when:** `/adams-review` run on a real repo produces a valid artifact; PR mode posts/edits the comment; local mode is a no-op on publish.
 
-**Status:** in progress. C1–C12 landed; audit rounds 1–3 closed; C13 pending.
+**Status:** done (2026-04-18). C1–C12 landed; audit rounds 1–4 closed; C13 real-repo smoke on `ray-finance` `feat/import-apple` PASSED with PR comment `4274059620` posted.
 
 **Files landed (C1–C12 + audit fixes):**
 - `commands/adams-review.md` — top-level slash command with full `allowed-tools` block and preprocessor-include wiring for fragments.
