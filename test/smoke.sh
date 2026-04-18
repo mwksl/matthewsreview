@@ -292,6 +292,29 @@ else
     fail "F: validator should reject bad-disposition fixture" "exit=$code stderr=$stderr"
 fi
 
+# G. external-scrape.sh fixture-replay: bot filter + deny list + time window
+EXT="$WORK/ext"
+mkdir -p "$EXT"
+cat > "$EXT/issue_comments.json" <<'JSON'
+[
+  {"id":1,"user":{"login":"humanuser","type":"User"},"created_at":"2026-02-01T00:00:00Z","body":"human comment"},
+  {"id":2,"user":{"login":"coderabbit-ai[bot]","type":"Bot"},"created_at":"2026-02-01T00:00:00Z","body":"bot finding"},
+  {"id":3,"user":{"login":"dependabot[bot]","type":"Bot"},"created_at":"2026-02-01T00:00:00Z","body":"dep bump"},
+  {"id":5,"user":{"login":"coderabbit-ai[bot]","type":"Bot"},"created_at":"2025-01-01T00:00:00Z","body":"too old"}
+]
+JSON
+echo '[]' > "$EXT/reviews.json"
+echo '[]' > "$EXT/review_comments.json"
+# Default config (no --config) — DEFAULT_DENY applies, allow=null.
+out=$(ADAMS_REVIEW_FIXTURES_USER=smokeuser "$TOOLS/external-scrape.sh" \
+        --since 2026-01-01T00:00:00Z --fixtures-dir "$EXT")
+ids=$(echo "$out" | jq -c '[.[].id] | sort')
+if [[ "$ids" == "[2]" ]]; then
+    pass "G: external-scrape fixture replay keeps coderabbit, drops human/dep-bump/old"
+else
+    fail "G: expected ids [2], got $ids" "out=$out"
+fi
+
 echo
 echo "smoke: PASS ($N assertions)"
 exit 0
