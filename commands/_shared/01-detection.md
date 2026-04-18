@@ -316,7 +316,8 @@ The ensemble launch specs live in `02-ensemble-adapter.md`:
   background launches — it just means the turn returns a hair later.
 
 Under `ensemble_mode=false`, none of these launches happen; the
-02-ensemble-adapter fragment's top-level skip note fires at step 1.5.
+02-ensemble-adapter fragment's top-level skip note fires when
+execution reaches it and execution proceeds straight to Phase 2.
 
 ### 1.4. Collect lens candidates into pool
 
@@ -465,7 +466,7 @@ below and call `--add-finding`. The jq builder matches the pre-§13.12
 logic (DESIGN §6 shape) with `.id` already populated from the helper:
 
 ```bash
-for candidate in $(echo "$ided" | jq -c '.[]'); do
+while IFS= read -r candidate; do
     full_finding=$(jq -n \
       --argjson trivial "$trivial_mode" \
       --argjson cand "$candidate" \
@@ -494,7 +495,7 @@ for candidate in $(echo "$ided" | jq -c '.[]'); do
 
     ~/.claude/commands/_shared/tools/artifact-patch.py \
       --path "$artifact_path" --add-finding "$full_finding"
-done
+done < <(printf '%s' "$ided" | jq -c '.[]')
 ```
 
 For trivial-mode runs (`trivial_mode=true`), the jq builder above

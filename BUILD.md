@@ -58,7 +58,7 @@ bd6b610      Bootstrap repo with design doc (rev 8) and build journal
 | 2 | `/adams-review` end-to-end (Phases 0–6) | **done** | `plans/stage-2-review.md` | [Stage 2 section](#stage-2--adams-review) |
 | 2.5 | Hardening — reviews-root relocation + Phase-4 batch + renderer fix | **done** | `plans/stage-2.5-hardening.md` | [Stage 2.5 section](#stage-25--hardening) |
 | 2.6 | Base-branch freshness gate (§13.10) + origin cross-check (§13.11) + renderer surfacing | **done** | `plans/stage-2.6-freshness-origin.md` | [Stage 2.6 section](#stage-26--base-branch-freshness--origin-cross-check) |
-| 2.7 | Parallelize Phase 1 (internal lenses) + Phase 1.5 (ensemble) — wall-clock hardening | not started | `plans/stage-2.7-detection-parallel.md` | — |
+| 2.7 | Parallelize Phase 1 (internal lenses) + Phase 1.5 (ensemble) — wall-clock hardening | **done** | `plans/stage-2.7-detection-parallel.md` | [Stage 2.7 section](#stage-27--detection-parallelization-phase-1--phase-15) |
 | 3 | `/adams-review-fix` (Phases 7–9 + terminal cleanup) | not started | `plans/stage-3-fix.md` | — |
 | 4 | Fragment shrink + helper externalization (context-budget hardening) | not started | `plans/stage-4-fragment-shrink.md` | — |
 
@@ -459,7 +459,44 @@ No hidden data dependency beyond these three. Phase 1.5's normalizer doesn't ref
 
 ~3-5 commits total. Plan-approval round-trip recommended (behavior change touching orchestration pattern; affects every ensemble run).
 
-**Status:** not started. Will plan next — highest-impact outstanding work per minute-saved.
+**Status:** done (2026-04-18).
+
+**Stage 2.7 commits (on `main`, newest first):**
+
+```
+(this commit) Close Stage 2.7: BUILD.md + stage index
+d2cc11a       Stage 2.7.B: refactor 01-detection + 02-ensemble for joint dispatch
+d3f3829       Stage 2.7.B+C: assign-finding-ids.sh helper + AI-1..AI-7 smoke
+419bab6       Stage 2.7.A: DESIGN §13.12 + §4 narrative (detection parallelization)
+```
+
+**Files landed:**
+
+- **2.7.A — DESIGN §13.12 + §4 narrative** (commit `419bab6`):
+  - `DESIGN.md` — new §13.12 "Detection parallelization (Phase 1 + Phase 1.5)" normative sub-section: 5 invariants (single dispatch turn, no ids during collection, single join point, pre-dispatch readiness gate, non-ensemble short-circuit); token accounting + phases.jsonl semantics (overlapping ts, each phase's own longest-path elapsed); UX note on readiness-gate placement; implementation pointers to 01/02 fragments. §4 Phase 1 narrative gains a §13.12 pointer; Phase 1.5 narrative notes the readiness-gate move + no-op-during-collection pattern. Pipeline diagram uses a fan-out brace between Phase 1 and Phase 1.5 with a `(under --ensemble, Phases 1 + 1.5 dispatch in one turn — §13.12)` note.
+
+- **2.7.B + 2.7.C — helper + smoke** (commit `d3f3829`):
+  - `commands/_shared/tools/assign-finding-ids.sh` — new Bash + jq helper. Reads pooled candidate JSON on stdin (`internal + external`); sorts by `sources[0]` priority (1=L1-diff-local, …, 6=L6-security, 7=external-pr:*, 8=codex, 9=coderabbit, 99=unknown/forward-compat); stable within bucket via secondary sort on input index; emits same-length array with `.id` set to `F001..F0NN`. Error-as-prompt on non-array stdin (ERROR → Valid input → Did you mean → Action). `-h`/`--help` surfaces usage.
+  - `test/smoke.sh` — 7 new assertions AI-1..AI-7 under Stage 2.7 block: internal-only pool (L1→L2→L3 ordering), ensemble-mixed pool (L1→L6→external-pr→codex→coderabbit), stable-within-source, empty pool passthrough, malformed stdin → exit 1 + full error-as-prompt, non-array JSON → same error path, unknown-source forward-compat (priority 99, id still assigned).
+
+- **2.7.B — fragment refactor** (commit `d2cc11a`):
+  - `commands/_shared/01-detection.md` — new step 1.2a "Ensemble readiness gate (§13.12)" between 1.2 and 1.3: when `ensemble_mode=true`, captures `phase_1_5_start_epoch`, creates `scratch_dir`, probes CodeRabbit + Codex, dispatches `AskUserQuestion` once if either unavailable (proceed-with-available vs. stop-to-fix-first), writes Codex prompt file if Codex available. Under `ensemble_mode=false` it's a one-line trace.md note and two `*_available=false` assignments. Step 1.3 gains an "Ensemble fan-out (same turn)" block with a tool-use-block count table and pointers into `02-ensemble-adapter.md` §1.5.2/§1.5.3 for the actual launch commands. Step 1.4 renamed "Collect lens candidates into pool" — per-lens `log-tokens` + light JSON repair + origin-crosscheck unchanged; step 3 now tags each corrected candidate with `sources: [<lens-tag>]` via `jq` and concatenates into the `internal_candidates` pool (no `--add-finding`, no id counter). New step 1.5 "Join + assign IDs + add-finding (§13.12)" — combines `internal_candidates + external_candidates`, pipes through `assign-finding-ids.sh`, iterates ided candidates through the (existing) full-finding `jq -n` builder + one `artifact-patch.py --add-finding` per candidate. Old step 1.5 summary renumbered 1.6. Working-set delta notes the two pools live in orchestrator context.
+  - `commands/_shared/02-ensemble-adapter.md` — §1.5.1 replaced with a pointer explaining readiness/scratch/prompt-file all happen in 01 §1.2a; §1.5.2 and §1.5.3 gain preamble pointers noting launches dispatch from 01 §1.3; §1.5.5 grows a post-normalizer schema-guard repair (`file // "(unknown)"`, `line_range // [1,1]`) and emits to `external_candidates` instead of directly building findings; old §1.5.6 `--add-finding` loop removed (now lives at 01 §1.5); §1.5.6 retained only for token logging. Working-set delta updated to reference `external_candidates` pool + phases.jsonl ts-overlap.
+  - `commands/adams-review.md` — "Parallel fan-outs are expensive" bullet in "Execution overview" gains a sentence about joint fan-out under `--ensemble` and TaskList handling (two tasks `in_progress` through the dispatch turn, both `completed` after 01 §1.5).
+
+**Verification evidence:**
+
+- `test/smoke.sh` passes **71 assertions**, up from 64 at Stage 2.6 close. Breakdown of additions: AI-1..AI-7 (assign-finding-ids deterministic sort + id assignment + error handling + forward-compat). Existing 64 assertions unchanged.
+- **`assign-finding-ids.sh` manual smoke** (during development, before smoke.sh coded): empty pool, 3 L1 + 2 L2 + 1 L3 internal-only, mixed ensemble (5 sources), malformed stdin, non-array stdin, unknown source — all matched §13.12 expectations first run. Deterministic sort output is identical byte-for-byte across runs (no wall-clock or random sort surprise).
+- **Real-repo ensemble re-run deferred.** Done-when #3 and #7 both call for wall-clock evidence from a real `/adams-review --ensemble` run on a PR with Phase 1 + Phase 1.5 CLIs enabled, demonstrating overlapping `ts` in `phases.jsonl` and visibly shorter total wall-clock vs. pre-§13.12 baseline. No such run was executed at close-out — the token cost of a full ensemble run against a meaningful PR is high, and fragment-level correctness is covered by unit smoke. Budget for the evidence capture during the first Stage 3 real-repo validation (same pattern as Stage 2.6's "ray-finance re-run deferred"). If the evidence lands separately, append it here.
+
+**Open issues / deviations:**
+
+- **Turn-count realism unverified in-situ.** Under `--ensemble` + PR mode with both CLIs available, the dispatch turn carries 6 lens `Agent` + 2 background `Bash` + 1 foreground `Bash` = 9 tool-use blocks. Claude Code supports many tool uses per turn in principle; no empirical ceiling was observed at Stage 2.6's real-repo work. If a future ensemble run hits a tool-use-count or prompt-size limit mid-dispatch, the preferable fallback is to flip the order — fire the 2 background CLI launches + foreground scrape FIRST in turn N, then the 6 Agents in turn N+1. Because turn N waits only for the foreground scrape (seconds) before the background CLIs are running off the leash, the CLIs and the subsequent lens fan-out overlap wall-clock-wise. Splitting the OTHER way (6 Agents turn N, CLIs turn N+1) would serialize the CLIs behind the lens fan-out and defeat the purpose of §13.12. Update 01 §1.3 with whichever order works if encountered.
+- **Fragment-level testing, not integration.** The smoke assertions cover `assign-finding-ids.sh` alone. Fragment prose (which phase does what, when) is not machine-verified; it's prose the orchestrator follows. Real-repo ensemble runs are the first integration signal. This is the same posture as Stage 2.5.B's `--apply-decisions` (fragment-level review passes verified helpers; orchestrator walk-through verified the fragment narrative).
+- **phases.jsonl consumers.** Nothing in the current codebase reads phases.jsonl and *assumes* non-overlapping time windows — greps in `commands/_shared/tools/` found no elapsed_sec math across phases. Safe for v1. If §12 observability gains aggregate-phase consumers later, verify they tolerate overlap.
+- **Normalizer schema-guard lives in 02 §1.5.5, not 01 §1.5.** The location repair for `file: null` / `line_range: null` on external candidates happens BEFORE the external pool joins the internal pool at the join step. This keeps the guard next to the normalizer that produces the nulls (readability), and means the join step treats external candidates as already-repaired. Internal candidates get a parallel `line_range //= [1,1]` repair at 01 §1.4 step 3 (lens occasionally returns null line_range). Two repair sites with the same default; noted here so if the schema tightens, both need updating.
+- **`sources` tagging moved from jq-n builder to pool-append.** Pre-§13.12, each lens's `sources: [<lens-tag>]` was assigned inside the per-candidate full-finding `jq -n` builder at step 1.4 step 3. Post-§13.12, tagging happens earlier (at pool-append in 1.4 step 3) so `assign-finding-ids.sh` can sort by it. The final full-finding builder at 1.5 step 3 no longer sets `sources` — it preserves whatever the candidate carries (lens tag for internal, `["codex"]`/`["coderabbit"]`/`["external-pr:<bot>"]` for external per normalizer prompt).
 
 ---
 
