@@ -34,10 +34,13 @@ summary.
 
 ### 1.2. Build the shared input
 
-Compute the diff once:
+Compute the diff once against `$comparison_ref` (not `$base_branch`; see
+Phase 0 step 0.2a / §13.10 — when the user chose "compare against
+`origin/$base_branch`", `comparison_ref` points at the remote ref while
+`base_branch` stays the human name):
 
 ```bash
-git diff "$base_branch..HEAD"
+git diff "$comparison_ref..HEAD"
 ```
 
 All lenses see this full diff. L1, L3, L4, L5, L6 operate primarily on the
@@ -54,7 +57,7 @@ reads only what it needs.
 Launch one `Agent` tool-use with `model: haiku`, `subagent_type: general-purpose`.
 Prompt essence:
 
-> Read ONLY the diff between `$base_branch` and HEAD. Do not open other
+> Read ONLY the diff between `$comparison_ref` and HEAD. Do not open other
 > files or grep the repo. Flag off-by-one errors, inverted conditions, typos
 > in identifiers, dead branches, obvious null-deref patterns, and
 > mismatched quotes or parens. **Over-flag — Phase 3 will filter.** Ignore
@@ -85,7 +88,7 @@ inherits the parent command's grants — this already covers it).
 
 Prompt essence:
 
-> For every function, type, field, or API the diff between `$base_branch`
+> For every function, type, field, or API the diff between `$comparison_ref`
 > and HEAD changes, **trace into the rest of the repo**:
 > - Who calls this? Are callers updated consistently?
 > - Who writes to this field? Do all writers share the same contract?
@@ -111,7 +114,7 @@ Prompt essence:
 > Read each CLAUDE.md file in this list (absolute paths, root-first):
 > `$claude_md_paths`
 >
-> For every rule in those files, check whether the diff between `$base_branch`
+> For every rule in those files, check whether the diff between `$comparison_ref`
 > and HEAD violates it. For each violation, cite the exact CLAUDE.md file
 > and line number in `evidence_snippet`.
 >
@@ -130,7 +133,7 @@ Launch one `Agent` tool-use with `model: sonnet`.
 
 Prompt essence:
 
-> Read the diff between `$base_branch` and HEAD, plus the current content
+> Read the diff between `$comparison_ref` and HEAD, plus the current content
 > of every modified file. Focus on comments and doc strings (JSDoc, TSDoc,
 > Python docstrings, Rust doc comments, etc.) adjacent to changed code.
 >
@@ -157,7 +160,7 @@ Prompt essence:
 >
 > !`cat ~/.claude/commands/_shared/lens-ux-reference.md`
 >
-> Read the diff between `$base_branch` and HEAD and the CLAUDE.md files in
+> Read the diff between `$comparison_ref` and HEAD and the CLAUDE.md files in
 > `$claude_md_paths` (project-specific UX conventions take precedence over
 > the generic reference above).
 >
@@ -180,7 +183,7 @@ Prompt essence:
 >
 > !`cat ~/.claude/commands/_shared/lens-security-reference.md`
 >
-> Read the diff between `$base_branch` and HEAD. If structural reasoning
+> Read the diff between `$comparison_ref` and HEAD. If structural reasoning
 > (similar to L2 — walking callers and writers) suggests a security
 > implication, flag it even when the immediate code isn't obviously a
 > security surface. **Over-flag.**

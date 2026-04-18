@@ -104,14 +104,15 @@ In PR mode, the rendered Markdown report is posted as a PR comment so it's visib
 1. Resolve branch: `git rev-parse --abbrev-ref HEAD`.
 2. Resolve base: `origin/HEAD` → `main` → `master` → error.
 3. Detect PR: `gh pr view --json number,state,isDraft,url,author,headRefName,baseRefName`. Closed/merged stop the command. Draft proceeds.
-4. **Record `review_started_at`** (ISO-8601 UTC timestamp). Captured *before* any local state mutation (push, stash) so that Phase 1.5's external-comment scrape window doesn't miss bot comments posted in the gap between pushing the branch and marking the review as started.
-5. List CLAUDE.md paths via `claude-md-paths.sh` (deterministic Bash helper — walks up from each touched file to repo root, collects `CLAUDE.md` paths, dedupes, orders root-first). Result stored on the artifact as `claude_md_paths`.
-6. Dirty-tree handling via `AskUserQuestion` (stash+pop, include-in-commit, stop).
-7. Push any unpushed commits if PR exists.
-8. Sanity check: `git rev-list --count <base>..HEAD` must be > 0.
-9. **Trivial-diff detection.** Pure Bash — check file extensions and line counts per §13.9. If the diff qualifies, set `artifact.trivial_mode = true` (effect: L2/L5/L6 skipped, Phase 4a deep validation skipped). User can force full pipeline with `--full`.
-10. **User-facing change detection (Haiku classifier).** Determines whether L5 (UX lens) runs at all. Skipped when `trivial_mode = true` (L5 already off in that mode). See §19.1.
-11. **Prior-artifact detection.** Read `~/.adams-reviews/<repo>/<branch>/latest.txt` if present. If an existing review exists for this branch, `AskUserQuestion`:
+4. **Reconcile base-branch freshness** (§13.10). Fetch `origin/<base>` with a 30s soft timeout; compute `behind_count` against local `<base>`; if behind, `AskUserQuestion` with four options (fast-forward local, use `origin/<base>` as comparison ref, proceed stale with warning, abort). Fetch failure degrades silently to `base_freshness="no_fetch"` with a trace warning. Output is `comparison_ref` (the ref every later diff/blame/lens-prompt uses) and `base_context = {freshness, comparison_ref, remote_sha, behind_count}` recorded on the artifact.
+5. **Record `review_started_at`** (ISO-8601 UTC timestamp). Captured *before* any local state mutation (push, stash) so that Phase 1.5's external-comment scrape window doesn't miss bot comments posted in the gap between pushing the branch and marking the review as started.
+6. List CLAUDE.md paths via `claude-md-paths.sh` (deterministic Bash helper — walks up from each touched file to repo root, collects `CLAUDE.md` paths, dedupes, orders root-first). Result stored on the artifact as `claude_md_paths`.
+7. Dirty-tree handling via `AskUserQuestion` (stash+pop, include-in-commit, stop).
+8. Push any unpushed commits if PR exists.
+9. Sanity check: `git rev-list --count <comparison_ref>..HEAD` must be > 0.
+10. **Trivial-diff detection.** Pure Bash — check file extensions and line counts per §13.9. If the diff qualifies, set `artifact.trivial_mode = true` (effect: L2/L5/L6 skipped, Phase 4a deep validation skipped). User can force full pipeline with `--full`.
+11. **User-facing change detection (Haiku classifier).** Determines whether L5 (UX lens) runs at all. Skipped when `trivial_mode = true` (L5 already off in that mode). See §19.1.
+12. **Prior-artifact detection.** Read `~/.adams-reviews/<repo>/<branch>/latest.txt` if present. If an existing review exists for this branch, `AskUserQuestion`:
 
 | Prior state | Prompt |
 |---|---|
@@ -120,7 +121,7 @@ In PR mode, the rendered Markdown report is posted as a PR comment so it's visib
 | HEAD moved beyond any known SHA | "Prior review at `<sha>`. Current HEAD is `<sha>`. Proceed with fresh review (replaces prior)?" |
 | Any finding has `current_state: open` with `is_actionable: true` | "Previous review has unresolved actionable findings. Options: (a) run `/adams-review-fix` to address, (b) proceed with fresh review, (c) abort." |
 
-12. **Prior-PR-comment detection (PR mode, even without local artifact).** If `gh api` shows a comment on this PR authored by the current `gh auth` user containing the stable marker `<!-- adams-review-v1 -->`, AND no local `latest.txt` exists (e.g. re-run from a different machine, or local reviews were cleaned), `AskUserQuestion`: "A prior review comment exists on this PR (`<comment_url>`) with no local artifact. (a) proceed fresh (the prior comment will be replaced on publish via its `comment_id`), (b) abort and recover the prior artifact first." This closes the cross-machine gap — local-only persistence is still the design, but PR state is a secondary signal that at least prevents silently orphaning prior review comments.
+13. **Prior-PR-comment detection (PR mode, even without local artifact).** If `gh api` shows a comment on this PR authored by the current `gh auth` user containing the stable marker `<!-- adams-review-v1 -->`, AND no local `latest.txt` exists (e.g. re-run from a different machine, or local reviews were cleaned), `AskUserQuestion`: "A prior review comment exists on this PR (`<comment_url>`) with no local artifact. (a) proceed fresh (the prior comment will be replaced on publish via its `comment_id`), (b) abort and recover the prior artifact first." This closes the cross-machine gap — local-only persistence is still the design, but PR state is a secondary signal that at least prevents silently orphaning prior review comments.
 
 A note on race conditions: two simultaneous `/adams-review` runs on the same branch would race on `latest.txt`. In practice this is a one-user tool on one machine; the risk is a stale pointer. Writes to `latest.txt` are atomic (temp file + rename), so the file itself stays readable; at worst the "latest" pointer loses a race with another run completing a few seconds later. Acceptable for v1.
 
@@ -591,6 +592,12 @@ Any other transition is an error: the helper script rejects it with a valid-tran
   "pr_number": 1234,
   "comment_id": 2093481234,                  // set by artifact-publish.sh on first PR comment post; null in local mode or before first publish; used for efficient PATCH on subsequent publishes
   "trivial_mode": false,                     // set in Phase 0 per §13.9; true downshifts the pipeline (skip L2/L5/L6, skip Phase 4a)
+  "base_context": {                          // §13.10 freshness record; optional (absent in pre-§13.10 artifacts). comparison_ref is the actual ref every lens/blame/diff used; base_branch (above) stays as the human name.
+    "freshness": "fresh",                    // fresh | fast_forwarded | used_remote_ref | proceeded_stale | no_fetch | no_remote
+    "comparison_ref": "main",
+    "remote_sha": "a3f8d7c9...",             // origin/<base_branch> at fetch time; null if no_fetch / no_remote
+    "behind_count": 0                        // local <base_branch> behind origin/<base_branch>; null if no_fetch / no_remote
+  },
   "reviewer_sources": ["internal", "codex", "coderabbit", "external-pr:greptile-apps[bot]"],
   "reviewed_files_all": ["src/auth/session.ts", "src/cache/sync.ts", "src/cache/helpers.ts", "docs/auth.md", "..."],  // every file in the diff at review time; staleness envelope (§13.3). reviewed_files_with_findings (union of finding.file) is derived at render time, not stored.
   "claude_md_paths": ["/abs/repo/CLAUDE.md", "/abs/repo/src/CLAUDE.md"],
@@ -727,6 +734,7 @@ Any other transition is an error: the helper script rejects it with a valid-tran
 - **`reviewed_files_all`** is the staleness envelope (every file in the diff at review time). The narrower `reviewed_files_with_findings` (union of `finding.file` across `findings[]`) is computed at render time for display and is *not* stored. Staleness logic (§13.3) uses `reviewed_files_all`.
 - **`comment_id`** is set the first time `artifact-publish.sh` successfully posts the review comment, and is used for O(1) PATCH on subsequent publishes. If missing, publish falls back to searching by the stable `<!-- adams-review-v1 -->` marker (§13.4).
 - **`trivial_mode`** downshifts the pipeline (§13.9). Stored so post-mortem and `phases.jsonl` diffs can explain why certain lenses didn't run.
+- **`base_context`** records the §13.10 freshness reconciliation for this run. Optional — artifacts written before §13.10 landed (or from builds that skip the fetch, e.g., offline) still validate without it. When present, `comparison_ref` is the authoritative ref that Phase 0/1 diff-producing code actually used; `base_branch` (required, top-level) stays as the user-visible name. Renderers surface non-`fresh` states via a header line (§7).
 - **Schema validation** runs at every write boundary. Invalid writes fail loud; the orchestrator sees the error and can retry.
 
 ---
@@ -742,6 +750,7 @@ The rendered report is a set of filtered views over `findings[]`. **Section sele
 **Branch:** `feature/auth-hardening` → `main`
 **PR:** #1234 (draft)
 **Review ID:** `rev_01JX9A3P4B8M...`
+**Base freshness:** ⚠ local `main` was 12 commits behind `origin/main`; compared against `origin/main` instead
 **Fix threshold:** not yet set (run `/adams-review-fix [threshold]` to apply fixes)
 **Sub-agent tokens:** 482,301 across 34 invocations
 
@@ -1319,6 +1328,27 @@ Phase 0 runs a cheap Bash check to identify PRs where the full pipeline's cost i
 
 **Visible to post-mortem.** `trivial_mode` is stored on the artifact and reflected in `phases.jsonl` (phase 1 skipped-lenses annotation) so a user reviewing results can always see which lenses did and didn't run.
 
+### 13.10 Base-branch freshness (Phase 0 gate)
+
+The review's entire input — diff surface, lens context, origin cross-check — depends on `$base_branch` pointing at the same commit the PR would be compared against upstream. A silently stale local base (local `main` behind `origin/main`) produces correct-looking output at every later phase: lenses see pre-existing commits inside their diff, classify them as introduced, and the §13.1 pre-existing override never fires. The damage is invisible because the renderer's Pre-existing section collapses to nothing when the bucket is empty. This is a Phase-0 invariant, not a post-hoc fix.
+
+**Behavior.** Between base-branch resolution and the first consumer of `base..HEAD`, Phase 0 reconciles local against remote:
+
+1. Run `git fetch origin "$base_branch" --quiet` with a 30s soft timeout.
+2. On fetch success, compute `behind_count = git rev-list --count "$base_branch..origin/$base_branch"`.
+3. `behind_count == 0` → `base_freshness = "fresh"`, `comparison_ref = $base_branch`, proceed.
+4. `behind_count > 0` → `AskUserQuestion` with four options:
+   - **(a) Fast-forward local `<base_branch>` and compare against it** (recommended). Runs `git fetch origin <base_branch>:<base_branch>` — refuses non-FF, so local diverged histories surface as an error and (a) is retried with (a) disabled. Sets `comparison_ref = $base_branch`, `base_freshness = "fast_forwarded"`.
+   - **(b) Compare against `origin/<base_branch>` without touching local.** `comparison_ref = "origin/$base_branch"`, `base_freshness = "used_remote_ref"`. Nothing in the worktree mutates.
+   - **(c) Proceed with stale local `<base_branch>`** (strongly discouraged). `comparison_ref = $base_branch`, `base_freshness = "proceeded_stale"`. Warning appended to `trace.md` and surfaced in the rendered report header (§7).
+   - **(d) Abort.**
+5. On fetch failure (network, no upstream, timeout): `base_freshness = "no_fetch"`, `comparison_ref = $base_branch`, one-line warning to `trace.md` tagged `fetch_failed`. **Never hard-fails** — offline/airgapped runs must proceed.
+6. Repo has no `origin` remote at all: `base_freshness = "no_remote"`, `comparison_ref = $base_branch`. Purely local repos have no remote to be behind.
+
+**Plumbing.** `comparison_ref` is a working-set variable (§25.1). Every downstream `$base_branch..HEAD` reference in Phase 0/1 prompts and helpers resolves through `$comparison_ref..HEAD`. The artifact's top-level `base_branch` field keeps the human name (`"main"`) for display; a new optional `base_context` object records `{freshness, comparison_ref, remote_sha, behind_count}` for reproducibility and report surfacing. `base_context` is optional in the schema — artifacts written by pre-§13.10 builds still validate.
+
+**Why no `--no-fetch` flag.** The fetch cost is small on every repo we care about, the offline path already degrades gracefully to `no_fetch` without prompting, and exposing an opt-out for a data-quality invariant would let users silently reintroduce the original bug class. If the soft timeout becomes a recurring problem on pathological repos, revisit.
+
 ---
 
 ## 14. Rollout metrics
@@ -1894,7 +1924,7 @@ that don't apply.
 
 ## 23. CLAUDE.md path mechanism
 
-Where: Phase 0, step 4 of the pre-flight (§4).
+Where: Phase 0, step 6 of the pre-flight (§4).
 Implementation: `claude-md-paths.sh` (deterministic Bash helper — §21.7). No LLM.
 Input: repository root + list of files the PR touches.
 Algorithm: locate `<repo_root>/CLAUDE.md` if it exists; for each touched file, walk upward from its directory to the repo root and record any `CLAUDE.md` encountered. Deduplicate, order root-first.
@@ -1986,7 +2016,9 @@ Set up in Phase 0; consumed by every later phase.
 | `artifact_path` | Phase 0 (`~/.adams-reviews/<repo-slug>/<branch>/<review_id>/artifact.json`) | All writer scripts, render, publish | Absolute path; avoid recomputing it in each fragment. |
 | `repo_root` | Phase 0 (`git rev-parse --show-toplevel`) | L2, Phase 4a, Phase 8, `claude-md-paths.sh` | Used for path resolution. |
 | `repo_slug` | Phase 0 (per §9.2 derivation) | Directory creation, `latest.txt` path | Stable across checkouts. |
-| `base_branch` | Phase 0 (PR base, or inferred from merge-base) | L1/L2 diff computation, Phase 0 trivial check | `git diff <base_branch>..HEAD` is the canonical diff. |
+| `base_branch` | Phase 0 (PR base, or inferred from merge-base) | Artifact display, report header | Human name (e.g. `"main"`); the *comparison* ref is `comparison_ref` below. |
+| `comparison_ref` | Phase 0 step 0.2a (§13.10 freshness reconciliation) | L1/L2 diff computation, Phase 0 trivial check, all lens prompts, Phase 1 origin cross-check, Phase 1.5 ensemble externals | `git diff <comparison_ref>..HEAD` is the canonical diff. Equals `base_branch` except under option (b) where it's `origin/<base_branch>`. |
+| `base_freshness`, `remote_sha`, `behind_count`, `preflight_warnings` | Phase 0 step 0.2a | Artifact `base_context`, renderer header, trace.md | `preflight_warnings` is flushed to `trace.md` at step 0.15 after `--init`. |
 | `head_branch` | Phase 0 (`git rev-parse --abbrev-ref HEAD`) | Artifact, publish | Used for slug + artifact directory. |
 | `reviewed_sha` | Phase 0 (`git rev-parse HEAD`, captured after any Phase 0 push) | Staleness envelope, artifact | Always the post-push SHA in PR mode. |
 | `review_started_at` | Phase 0 (captured **before** any push/stash — per §6 schema note) | Phase 1.5 scrape window | ISO-8601 UTC. |
@@ -1996,7 +2028,7 @@ Set up in Phase 0; consumed by every later phase.
 | `comment_id` | Phase 6+ (publish returns it on first POST; subsequently read from artifact) | Phase 9e publish | Persisted into artifact to survive across runs. |
 | `trivial_mode` | Phase 0 (§13.9 Bash check) | All phase fragments (skip/include logic) | Bool; `--full` forces false. |
 | `reviewer_sources` | Phase 0 initial + updated post-Phase 1.5 | Artifact | Run-level list of providers. |
-| `reviewed_files_all` | Phase 0 (`git diff --name-only <base>..HEAD`) | Phase 9 staleness, artifact | Staleness envelope. |
+| `reviewed_files_all` | Phase 0 (`git diff --name-only <comparison_ref>..HEAD`) | Phase 9 staleness, artifact | Staleness envelope. `comparison_ref` (§13.10), not `base_branch`. |
 | `claude_md_paths` | Phase 0 (`claude-md-paths.sh`) | L3, Phase 4a/4b, Phase 8 | Absolute paths, root-first. |
 | `phases_log_path` | Phase 0 (`<artifact dir>/phases.jsonl`) | Every phase fragment | Passed to `log-phase.sh --record`. |
 | `tokens_log_path` | Phase 0 (`<artifact dir>/tokens.jsonl`) | Every sub-agent dispatch | Appended after parse. |

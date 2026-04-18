@@ -84,14 +84,21 @@ use `AskUserQuestion` **once** with two options:
 ### 1.5.2. Launch CLI reviewers (background Bash)
 
 For each available CLI reviewer, launch in background and capture the shell
-id. The diff used is `$base_branch..HEAD`.
+id. The diff used is `$comparison_ref..HEAD` (§13.10 — the freshness-
+reconciled ref, not the literal `$base_branch` name, so ensemble reviewers
+see the same diff surface as the internal lenses under option (b)
+`used_remote_ref`).
 
 **CodeRabbit:**
 
 ```bash
-coderabbit review --agent -t all --base "$base_branch" \
+coderabbit review --agent -t all --base "$comparison_ref" \
   > "$scratch_dir/coderabbit.out" 2> "$scratch_dir/coderabbit.err"
 ```
+
+(If CodeRabbit rejects a remote-ref `--base` like `origin/main`, fall back
+to `base_branch` and record the degradation in `trace.md`. In practice
+CodeRabbit accepts any revspec git understands.)
 
 Launch with the Bash tool using `run_in_background: true`. Capture the
 returned shell id as `coderabbit_shell_id`. If `coderabbit_available == false`,
@@ -103,12 +110,12 @@ Write a brief prompt file first:
 
 ```bash
 cat > "/tmp/adams-review-codex-$review_id.md" <<'PROMPT'
-Review the code changes in this repository between <base-branch> and HEAD.
+Review the code changes in this repository between <comparison-ref> and HEAD.
 Focus on potential bugs, correctness issues, security concerns, and violations
 of project conventions. Return a structured list of findings with file, line
 range, and concrete description for each.
 PROMPT
-# (substitute $base_branch into the actual prompt text)
+# (substitute $comparison_ref into the actual prompt text)
 ```
 
 Then launch:

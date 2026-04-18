@@ -89,10 +89,35 @@
       "items": { "$ref": "#/$defs/cross_cutting_group" }
     },
     "subagent_tokens": { "$ref": "#/$defs/subagent_tokens" },
-    "metrics": { "$ref": "#/$defs/metrics" }
+    "metrics": { "$ref": "#/$defs/metrics" },
+    "base_context": { "$ref": "#/$defs/base_context" }
   },
 
   "$defs": {
+    "base_context": {
+      "description": "§13.10 base-branch freshness record. Optional — absent from pre-§13.10 artifacts.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["freshness", "comparison_ref"],
+      "properties": {
+        "freshness": {
+          "enum": ["fresh", "fast_forwarded", "used_remote_ref", "proceeded_stale", "no_fetch", "no_remote"]
+        },
+        "comparison_ref": { "type": "string", "minLength": 1 },
+        "remote_sha": {
+          "anyOf": [
+            { "type": "string", "pattern": "^[a-f0-9]{7,40}$" },
+            { "type": "null" }
+          ]
+        },
+        "behind_count": {
+          "anyOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
     "disposition_enum": {
       "enum": [
         "below_gate",

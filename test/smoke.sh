@@ -686,6 +686,174 @@ else
     fail "X: expected EXIT_VALIDATION + stderr naming F101+actionability + unchanged file; code=$code sha_eq=$([[ "$BEFORE_SHA" == "$AFTER_SHA" ]] && echo Y || echo N) stderr=$stderr"
 fi
 
+# ------------------------------------------------------------------ Stage 2.6.A
+# Base-branch freshness gate (§13.10). Exercises the non-interactive pieces of
+# 00-preflight.md step 0.2a against scratch git repos — the AskUserQuestion
+# branching is orchestrator-level and untestable in Bash, but the fetch +
+# behind-count math + per-option ref resolution + offline fallback are pure
+# git plumbing and are covered here.
+
+FRESH_DIR="$WORK/freshness"
+mkdir -p "$FRESH_DIR"
+
+# Build a bare "remote" repo + a local clone that's one commit behind.
+ORIGIN_BARE="$FRESH_DIR/origin.git"
+LOCAL="$FRESH_DIR/local"
+
+git init --bare --initial-branch=main "$ORIGIN_BARE" >/dev/null 2>&1 || \
+    git init --bare "$ORIGIN_BARE" >/dev/null 2>&1
+
+# Seed the remote via a throwaway clone.
+SEED="$FRESH_DIR/seed"
+git clone "$ORIGIN_BARE" "$SEED" >/dev/null 2>&1
+(
+    cd "$SEED"
+    git checkout -b main >/dev/null 2>&1 || git checkout main >/dev/null 2>&1
+    git config user.email "smoke@example.com"
+    git config user.name "smoke"
+    echo "v1" > README.md
+    git add README.md
+    git commit -q -m "initial"
+    git push -q -u origin main
+)
+
+# Clone locally — local main == origin main at this point.
+git clone "$ORIGIN_BARE" "$LOCAL" >/dev/null 2>&1
+(
+    cd "$LOCAL"
+    git config user.email "smoke@example.com"
+    git config user.name "smoke"
+)
+
+# Advance origin main by one commit (local is now 1 behind).
+(
+    cd "$SEED"
+    echo "v2" >> README.md
+    git commit -q -am "upstream advance"
+    git push -q origin main
+)
+
+# Fetch so origin/main is visible locally (step 0.2a step 2 equivalent).
+(
+    cd "$LOCAL"
+    git fetch origin main --quiet
+)
+
+# Create feat/smoke based on origin/main — this is the realistic post-
+# rebase/merge state: the feature has the upstream commit already integrated,
+# but *local* main is still at v1 (stale). Reviewing against stale local main
+# would inflate the diff by including the upstream commit; reviewing against
+# origin/main correctly sees only the feature commit.
+(
+    cd "$LOCAL"
+    git checkout -q -b feat/smoke origin/main
+    echo "feature" > feature.txt
+    git add feature.txt
+    git commit -q -m "feature change"
+)
+
+# Assertion FR-1: behind_count computed correctly.
+behind_count=$(cd "$LOCAL" && git rev-list --count main..origin/main)
+if [[ "$behind_count" == "1" ]]; then
+    pass "FR-1 (§13.10): behind_count correctly reports local main 1 commit behind origin/main"
+else
+    fail "FR-1: expected behind_count=1, got $behind_count"
+fi
+
+# Assertion FR-2: option (b) used_remote_ref — comparison against origin/main
+# sees ONLY the feature commit (the correct, post-§13.10 behavior).
+count_via_remote=$(cd "$LOCAL" && git rev-list --count "origin/main..HEAD")
+if [[ "$count_via_remote" == "1" ]]; then
+    pass "FR-2 (§13.10): option (b) comparison_ref=origin/main sees 1 commit (feature only) — correct diff surface"
+else
+    fail "FR-2: expected 1 commit via origin/main..HEAD, got $count_via_remote"
+fi
+
+# Assertion FR-3: option (c) proceeded_stale — comparison against stale local
+# main sees BOTH the feature commit AND the upstream commit. This is the
+# inflated diff the freshness gate exists to defend against. Documenting the
+# pre-§13.10 bug class as a positive assertion.
+count_via_local=$(cd "$LOCAL" && git rev-list --count "main..HEAD")
+if [[ "$count_via_local" == "2" ]]; then
+    pass "FR-3 (§13.10): option (c) comparison_ref=main sees 2 commits (feature + inflated upstream) — reproduces pre-gate data loss"
+else
+    fail "FR-3: expected 2 commits via main..HEAD (inflated), got $count_via_local"
+fi
+
+# Assertion FR-4: option (a) fast-forward via `git fetch origin main:main` —
+# refuses non-FF. On this scratch repo local main is strictly behind origin,
+# so FF succeeds and behind_count drops to 0.
+(
+    cd "$LOCAL"
+    # Must run from a checkout that is NOT main (currently feat/smoke). Git
+    # refuses to update a checked-out branch via this form.
+    git fetch origin main:main --quiet
+)
+ff_behind=$(cd "$LOCAL" && git rev-list --count main..origin/main)
+if [[ "$ff_behind" == "0" ]]; then
+    pass "FR-4 (§13.10): option (a) 'git fetch origin main:main' fast-forwards local main (behind_count now 0)"
+else
+    fail "FR-4: expected behind_count=0 post-FF, got $ff_behind"
+fi
+
+# Assertion FR-5: schema accepts base_context with each freshness enum value.
+# One synthetic artifact per freshness variant, validate each via artifact-validate.
+FR5_PASS=1
+for freshness in fresh fast_forwarded used_remote_ref proceeded_stale no_fetch no_remote; do
+    case "$freshness" in
+        no_fetch|no_remote) remote_sha=null; behind=null ;;
+        *) remote_sha='"abc1234"'; behind=0 ;;
+    esac
+    # proceeded_stale / used_remote_ref / fast_forwarded can also have null
+    # behind, but the non-null form is the common one so we test that.
+    if [[ "$freshness" == "fresh" ]]; then
+        behind=0
+    fi
+    SEED_JSON=$(jq --arg f "$freshness" \
+                  --argjson rs "$remote_sha" \
+                  --argjson bc "$behind" \
+                  '.base_context = {freshness: $f, comparison_ref: "main", remote_sha: $rs, behind_count: $bc}' \
+                  "$FIX/artifact-seed.json" | jq --arg f "$freshness" '.review_id = ("rev_" + ($f | gsub("_"; "")))')
+    if ! "$TOOLS/artifact-patch.py" --init "$SEED_JSON" --path "$FRESH_DIR/art-$freshness.json" >/dev/null 2>&1; then
+        FR5_PASS=0
+        echo "  freshness=$freshness FAILED init" >&2
+        break
+    fi
+done
+if [[ "$FR5_PASS" == "1" ]]; then
+    pass "FR-5 (§13.10): schema accepts base_context for every freshness enum value (fresh, fast_forwarded, used_remote_ref, proceeded_stale, no_fetch, no_remote)"
+else
+    fail "FR-5: schema rejected at least one freshness variant"
+fi
+
+# Assertion FR-6: schema rejects an invalid freshness enum value (guards the
+# enum against typos).
+BAD=$(jq '.base_context = {freshness: "stale", comparison_ref: "main", remote_sha: null, behind_count: null}' "$FIX/artifact-seed.json")
+stderr=$("$TOOLS/artifact-patch.py" --init "$BAD" --path "$FRESH_DIR/art-bad.json" 2>&1 >/dev/null); code=$?
+if [[ "$code" != "0" ]] && echo "$stderr" | grep -q "freshness"; then
+    pass "FR-6 (§13.10): schema rejects invalid freshness enum value with error-as-prompt"
+else
+    fail "FR-6: expected rejection of freshness='stale'; code=$code stderr=$stderr"
+fi
+
+# Assertion FR-7: offline fallback — fetch against a bogus remote URL fails
+# (non-zero rc) in under 30s. This is the guarded path that must degrade to
+# base_freshness="no_fetch" rather than hard-abort.
+OFFLINE="$FRESH_DIR/offline"
+mkdir -p "$OFFLINE"
+(
+    cd "$OFFLINE"
+    git init --quiet
+    git remote add origin /nonexistent/path/to/nowhere.git
+)
+fetch_rc=0
+(cd "$OFFLINE" && git fetch origin main --quiet 2>/dev/null) || fetch_rc=$?
+if [[ "$fetch_rc" != "0" ]]; then
+    pass "FR-7 (§13.10): fetch against unreachable remote fails (rc=$fetch_rc) — exercises no_fetch degradation path"
+else
+    fail "FR-7: expected non-zero fetch rc against bogus remote, got 0"
+fi
+
 echo
 echo "smoke: PASS ($N assertions)"
 exit 0

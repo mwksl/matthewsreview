@@ -39,9 +39,142 @@ For `base_branch`, try in order:
 
 Capture `base_branch`.
 
-Sanity: run `git rev-list --count "$base_branch..HEAD"`. If the result is `0`,
-stop with "No commits to review on `$head_branch` relative to `$base_branch`.
-Nothing to do."
+(The sanity check that `base..HEAD > 0` moves to step 0.2a below, after
+`comparison_ref` is resolved — a stale local `base_branch` can show zero
+commits ahead while `origin/$base_branch..HEAD` is genuinely non-empty.)
+
+### 0.2a. Reconcile base-branch freshness (§13.10)
+
+This is the Phase-0 invariant that prevents stale-local-`base_branch` runs
+from silently poisoning every downstream lens and blame check. Output: a
+`comparison_ref` variable (which every later `git diff` / `git blame` /
+lens prompt uses instead of `$base_branch`) and a `base_context` record
+written into the artifact seed at step 0.15.
+
+Warnings written in this step need to land in `trace.md`, but
+`trace_log_path` isn't captured until step 0.15. Initialize a
+`preflight_warnings` Bash array at the top of this step (one string per
+entry) and flush it to `trace.md` at the end of step 0.15 once the
+review directory exists.
+
+```bash
+preflight_warnings=()
+base_freshness=""
+comparison_ref=""
+remote_sha=null
+behind_count=null
+```
+
+**Step 1. Detect whether a remote exists, and fetch if it does.**
+
+```bash
+if ! git remote get-url origin >/dev/null 2>&1; then
+    # Purely local repo — nothing to reconcile. Use local base_branch
+    # directly and skip straight to step 4 (sanity check).
+    base_freshness="no_remote"
+    comparison_ref="$base_branch"
+else
+    # 30s soft timeout via GNU coreutils `timeout` if available; fall
+    # back to a background+wait pattern on macOS where `timeout` isn't
+    # default.
+    fetch_rc=0
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 30 git fetch origin "$base_branch" --quiet 2>/tmp/adams_fetch_err.$$ || fetch_rc=$?
+    else
+        ( git fetch origin "$base_branch" --quiet 2>/tmp/adams_fetch_err.$$ ) &
+        fetch_pid=$!
+        ( sleep 30 && kill -TERM "$fetch_pid" 2>/dev/null ) &
+        watchdog_pid=$!
+        wait "$fetch_pid" 2>/dev/null || fetch_rc=$?
+        kill -TERM "$watchdog_pid" 2>/dev/null || true
+        wait "$watchdog_pid" 2>/dev/null || true
+    fi
+
+    if [[ $fetch_rc -ne 0 ]]; then
+        # Fetch failed (network, no upstream for this branch, timeout).
+        # Do NOT prompt; do NOT abort — offline/airgapped runs must proceed.
+        base_freshness="no_fetch"
+        comparison_ref="$base_branch"
+        preflight_warnings+=("fetch_failed origin $base_branch rc=$fetch_rc err=$(tr '\n' ' ' < /tmp/adams_fetch_err.$$ 2>/dev/null || true)")
+    fi
+    rm -f /tmp/adams_fetch_err.$$
+fi
+```
+
+**Step 2. Compute `behind_count` and route (only if fetch succeeded).**
+
+If `base_freshness` is still empty after step 1 (i.e., fetch succeeded),
+compute the behind count and branch:
+
+```bash
+if [[ -z "$base_freshness" ]]; then
+    remote_sha=$(git rev-parse "origin/$base_branch")
+    behind_count=$(git rev-list --count "$base_branch..origin/$base_branch" 2>/dev/null || echo 0)
+
+    if [[ "$behind_count" -eq 0 ]]; then
+        base_freshness="fresh"
+        comparison_ref="$base_branch"
+    fi
+    # else behind_count > 0 → Step 3 dispatches AskUserQuestion.
+fi
+```
+
+**Step 3. User gate for the behind case (orchestrator-level).**
+
+When `behind_count > 0` (i.e., `base_freshness` is still empty after
+step 2), dispatch `AskUserQuestion` with four choices.
+List `behind_count` explicitly in the prompt so the user knows how many
+commits have accumulated upstream. Suggested prompt:
+
+> Local `$base_branch` is $behind_count commits behind `origin/$base_branch`.
+> Reviewing against stale local main may flag upstream commits as
+> PR-introduced and miss pre-existing findings. Choose:
+>
+> - (a) Fast-forward local `$base_branch` and compare against it (recommended)
+> - (b) Compare against `origin/$base_branch` without touching local
+> - (c) Proceed with stale local `$base_branch` (strongly discouraged)
+> - (d) Abort
+
+Branch on the user's answer:
+
+- **(a) Fast-forward local `$base_branch`**. Run
+  `git fetch origin "$base_branch:$base_branch"` — this refuses non-FF
+  updates, so a locally-diverged `$base_branch` surfaces a clear error
+  rather than silently rewriting history. On success:
+  `comparison_ref="$base_branch"`, `base_freshness="fast_forwarded"`.
+  On failure (non-FF divergence): buffer the stderr into
+  `preflight_warnings`, explain the divergence, and re-issue
+  `AskUserQuestion` with only (b), (c), (d) offered (drop (a)).
+- **(b) Compare against `origin/$base_branch`** (no local mutation).
+  `comparison_ref="origin/$base_branch"`,
+  `base_freshness="used_remote_ref"`. Local `$base_branch` stays stale
+  — fine; the review's comparison ref points at the remote.
+- **(c) Proceed with stale local `$base_branch`** (strongly discouraged).
+  `comparison_ref="$base_branch"`, `base_freshness="proceeded_stale"`.
+  Buffer the warning into `preflight_warnings` for trace.md.
+- **(d) Abort.** Exit 0 with a one-line message; do not create a
+  `review_dir` (nothing has been written yet — the artifact seed
+  hasn't landed at 0.15).
+
+**Step 4. Sanity check (against `comparison_ref`).**
+
+```bash
+if [[ "$(git rev-list --count "$comparison_ref..HEAD")" -eq 0 ]]; then
+    echo "No commits to review on $head_branch relative to $comparison_ref. Nothing to do." >&2
+    exit 0
+fi
+```
+
+Running this against `$comparison_ref` (not `$base_branch`) means a
+feature branch that looks empty vs stale local `main` but has real
+commits vs `origin/main` still reviews correctly under option (b).
+
+**Capture** `comparison_ref`, `base_freshness`, `remote_sha`, `behind_count`,
+`preflight_warnings` into the working context. The first four feed the
+`base_context` object in the artifact seed (step 0.15); `preflight_warnings`
+is flushed to `trace.md` at the end of step 0.15. `comparison_ref` is used
+by every later phase in place of `$base_branch` for diff / blame /
+lens-prompt references.
 
 ### 0.3. Derive repo slug
 
@@ -108,12 +241,14 @@ comments that landed during the gap. Capture as `review_started_at`.
 
 ### 0.6. Compute `reviewed_files_all`, `num_files`, and `lines_changed`
 
-Run:
+Run (using `$comparison_ref` — §13.10 — not `$base_branch`; the two
+differ when the freshness gate resolved to option (b) `used_remote_ref`,
+in which case `comparison_ref = "origin/$base_branch"`):
 
 ```bash
-reviewed_files_all=$(git diff --name-only "$base_branch..HEAD")
+reviewed_files_all=$(git diff --name-only "$comparison_ref..HEAD")
 num_files=$(printf '%s\n' "$reviewed_files_all" | grep -c . || true)
-lines_changed=$(git diff --shortstat "$base_branch..HEAD" | \
+lines_changed=$(git diff --shortstat "$comparison_ref..HEAD" | \
   awk '{insertions=0; deletions=0; for(i=1;i<=NF;i++){if($i ~ /insertion/){insertions=$(i-1)}else if($i ~ /deletion/){deletions=$(i-1)}}; print insertions+deletions}')
 # Fallback if awk path fails: lines_changed=0.
 [[ -n "$lines_changed" ]] || lines_changed=0
@@ -320,6 +455,27 @@ log paths:
 
 Build the initial seed doc. Use `jq -n` so you don't have to hand-escape JSON:
 
+`base_context` encodes the §13.10 freshness reconciliation. `remote_sha`
+and `behind_count` may be null (offline / no-remote paths); the schema
+allows that. Build the subobject separately so the null cases stay
+clean:
+
+```bash
+base_context_json=$(jq -n \
+  --arg freshness "$base_freshness" \
+  --arg comparison_ref "$comparison_ref" \
+  --arg remote_sha "${remote_sha:-}" \
+  --arg behind_count "${behind_count:-}" \
+  '{
+    freshness: $freshness,
+    comparison_ref: $comparison_ref,
+    remote_sha: (if $remote_sha == "" then null else $remote_sha end),
+    behind_count: (if $behind_count == "" then null else ($behind_count | tonumber) end)
+  }')
+```
+
+Then the main seed:
+
 ```bash
 jq -n \
   --arg review_id "$review_id" \
@@ -333,6 +489,7 @@ jq -n \
   --argjson pr_number "${pr_number:-null}" \
   --argjson comment_id "${existing_comment_id:-null}" \
   --argjson trivial_mode "$trivial_mode" \
+  --argjson base_context "$base_context_json" \
   --argjson reviewed_files_all "$(printf '%s' "$reviewed_files_all" | jq -Rn '[inputs | select(length>0)]')" \
   --argjson claude_md_paths "$(printf '%s' "$claude_md_paths" | jq -Rn '[inputs | select(length>0)]')" \
   --argjson files_changed "$num_files" \
@@ -350,6 +507,7 @@ jq -n \
     pr_number: $pr_number,
     comment_id: $comment_id,
     trivial_mode: $trivial_mode,
+    base_context: $base_context,
     reviewer_sources: ["internal"],    # seed — Phase 6.3a recomputes the authoritative list from findings[].sources[] union per DESIGN §6
     reviewed_files_all: $reviewed_files_all,
     claude_md_paths: $claude_md_paths,
@@ -367,6 +525,18 @@ jq -n \
     }
   }' \
   | ~/.claude/commands/_shared/tools/artifact-patch.py --init - --path "$artifact_path"
+```
+
+**Flush `preflight_warnings` to `trace.md`** (only after `--init`
+succeeds — else `trace_log_path` points at a directory that may be
+about to be `rm -rf`-ed):
+
+```bash
+if [[ ${#preflight_warnings[@]} -gt 0 ]]; then
+    for w in "${preflight_warnings[@]}"; do
+        printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$w" >> "$trace_log_path"
+    done
+fi
 ```
 
 On non-zero exit from `artifact-patch.py --init`: the stderr will be error-
@@ -420,6 +590,8 @@ At the end of Phase 0, you should have captured:
 |---|---|
 | `ensemble_mode`, `force_full` | Step 0.1 |
 | `head_branch`, `base_branch`, `repo_root` | Step 0.2 |
+| `comparison_ref`, `base_freshness`, `remote_sha`, `behind_count` | Step 0.2a |
+| `preflight_warnings` (flushed at 0.15) | Step 0.2a |
 | `repo_slug` | Step 0.3 |
 | `mode`, `pr_number`, `pr_state`, `pr_author` | Step 0.4 |
 | `review_started_at` | Step 0.5 |
@@ -434,3 +606,12 @@ At the end of Phase 0, you should have captured:
 | `phases_log_path`, `tokens_log_path`, `trace_log_path` | Step 0.15 |
 
 Every later phase references these by name. Don't recompute; don't rediscover.
+
+**Reminder on `comparison_ref` vs `base_branch`.** `base_branch` is the
+human name ("main") recorded in the artifact for display. `comparison_ref`
+is the ref every later `git diff` / `git blame` / lens-prompt uses. They
+match on the happy path (`fresh`, `fast_forwarded`) and diverge only
+under option (b) (`used_remote_ref`), when `comparison_ref = "origin/main"`
+while `base_branch` stays `"main"`. Phases 1–6 always read
+`comparison_ref`; the renderer's header is the one place that still
+shows `base_branch` (plus the freshness line when non-default).
