@@ -11,8 +11,12 @@ Read the current findings list:
 ```bash
 ~/.claude/commands/_shared/tools/artifact-read.sh \
   --path "$artifact_path" \
-  --filter '[.findings[] | {id, file, line_range, claim, evidence_snippet, source_family, source_families, sources}]'
+  --filter '[.findings[] | {id, file, line_range, claim, evidence_snippet, source_families, sources}]'
 ```
+
+(No singular `source_family` field exists on stored findings — Phase 1
+already transformed lens output into the plural `source_families` array
+before writing.)
 
 Capture as `candidate_list_json`.
 

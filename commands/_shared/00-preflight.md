@@ -78,22 +78,26 @@ mutation. Per §4 Phase 0 step 4, this timestamp anchors the Phase 1.5 scrape
 window, and missing it by even a second of push-gap can silently hide bot
 comments that landed during the gap. Capture as `review_started_at`.
 
-### 0.6. Compute `reviewed_files_all` and PR-size buckets
+### 0.6. Compute `reviewed_files_all`, `num_files`, and `lines_changed`
 
 Run:
 
 ```bash
-git diff --name-only "$base_branch..HEAD"
+reviewed_files_all=$(git diff --name-only "$base_branch..HEAD")
+num_files=$(printf '%s\n' "$reviewed_files_all" | grep -c . || true)
+lines_changed=$(git diff --shortstat "$base_branch..HEAD" | \
+  awk '{insertions=0; deletions=0; for(i=1;i<=NF;i++){if($i ~ /insertion/){insertions=$(i-1)}else if($i ~ /deletion/){deletions=$(i-1)}}; print insertions+deletions}')
+# Fallback if awk path fails: lines_changed=0.
+[[ -n "$lines_changed" ]] || lines_changed=0
 ```
 
-Capture the result as `reviewed_files_all` (a list; join with commas when
-passing to scripts that take CSV, pipe via stdin with `@-` when the list is
-long or contains unusual filenames).
-
-Also run `git diff --shortstat "$base_branch..HEAD"` and parse out files
-changed and lines changed (additions + deletions). Capture as
-`pr_size.files_changed` and `pr_size.lines_changed` for the `metrics` block
-in Phase 6.
+Capture `reviewed_files_all` (newline-separated list — pass through stdin
+with `@-` to scripts that accept it; join with commas when a CSV arg is
+expected). Capture `num_files` and `lines_changed` as integers; they're
+used by step 0.11 (trivial check) AND by step 0.15 (seed's
+`pr_size_buckets`) AND by Phase 6's `metrics` block. Compute them here
+unconditionally — if step 0.11 is skipped by `--full`, these still need
+to exist.
 
 ### 0.7. Enumerate `claude_md_paths`
 
@@ -142,19 +146,19 @@ This is the staleness-envelope anchor.
 
 ### 0.11. Trivial-diff check (§13.9)
 
-If `force_full=true`, skip this step (sets `trivial_mode=false`).
+If `force_full=true`, set `trivial_mode=false` and skip the rest of this
+step. Counts from 0.6 are used unchanged.
 
-Otherwise run this Bash check inline:
+Otherwise, run this Bash check against the file list from 0.6:
 
 ```bash
-num_files=$(printf '%s\n' $reviewed_files_all | grep -c . )
-lines_changed=$(git diff --shortstat "$base_branch..HEAD" | awk '{print $4+$6}')
-# Every changed file must match the allow-list below.
+# Every changed file must match the doc/config allow-list for trivial.
 # Allow-list: *.md *.mdx *.txt *.rst *.yaml *.yml *.json *.jsonc
 #             *.toml *.ini *.cfg *.conf LICENSE LICENSE.* CHANGELOG*
 #             NOTICE* .gitignore .editorconfig .npmrc .nvmrc
 all_trivial=true
-for f in $reviewed_files_all; do
+while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
     case "$f" in
         *.md|*.mdx|*.txt|*.rst|*.yaml|*.yml|*.json|*.jsonc|\
         *.toml|*.ini|*.cfg|*.conf|\
@@ -162,7 +166,7 @@ for f in $reviewed_files_all; do
         .gitignore|.editorconfig|.npmrc|.nvmrc) ;;
         *) all_trivial=false; break ;;
     esac
-done
+done <<<"$reviewed_files_all"
 ```
 
 If `num_files <= 3 AND lines_changed <= 30 AND all_trivial == true`:
@@ -190,13 +194,27 @@ i18n files. Return false for pure backend logic, build tooling,
 internal utilities, config.
 ```
 
-Dispatch with the `Agent` tool, `model: haiku`. After the sub-agent returns:
-parse `user_facing` + `surfaces`. Call
-`~/.claude/commands/_shared/tools/log-tokens.sh` once with the sub-agent's
-token usage (phase `phase_0`, agent-role `user_facing_classifier`).
+Dispatch with the `Agent` tool, `model: haiku`. After the sub-agent returns,
+parse `user_facing` + `surfaces`. Then log tokens (every required arg is
+explicit here to match the helper's argparse — don't infer):
 
-If JSON parsing fails, default to `user_facing=true` (fail-safe — better to
-run L5 unnecessarily than skip a real UX finding).
+```bash
+~/.claude/commands/_shared/tools/log-tokens.sh \
+  --review-dir "$review_dir" \
+  --phase phase_0 \
+  --agent-role user_facing_classifier \
+  --agent-id "$haiku_agent_id" \
+  --model haiku \
+  --tokens "$haiku_tokens_or_null"
+```
+
+Where `$haiku_agent_id` is the id in the Agent tool result and
+`$haiku_tokens_or_null` is either the parsed token count or the literal
+word `null` on parse failure (per §11 fallback).
+
+If JSON parsing of the classifier result fails after one retry, default
+`user_facing=true` (fail-safe — better to run L5 unnecessarily than skip
+a real UX finding).
 
 ### 0.13. Prior-artifact detection
 
@@ -239,9 +257,18 @@ to pass to `artifact-publish.sh` in Phase 6.
 
 ### 0.15. Create the review directory and initialize the artifact
 
-Generate a `review_id`. Use a ULID if available
-(`uv run --with ulid-py python3 -c 'import ulid; print(ulid.new())'`), else a
-timestamped fallback like `rev_$(date -u +%Y%m%dT%H%M%SZ)_$(openssl rand -hex 3)`.
+Generate a `review_id`. Schema requires `^rev_[A-Za-z0-9]+$` (see
+`schema-v1.json`) so the prefix is mandatory. Prefer ULID; fall back to
+a timestamp+random tail. Both paths MUST produce a `rev_`-prefixed id:
+
+```bash
+if ulid=$(uv run --with ulid-py python3 -c 'import ulid; print(ulid.new())' 2>/dev/null); then
+    review_id="rev_${ulid}"
+else
+    review_id="rev_$(date -u +%Y%m%dT%H%M%SZ)_$(openssl rand -hex 3)"
+fi
+```
+
 Capture as `review_id`.
 
 Build the artifact directory:
@@ -314,12 +341,17 @@ jq -n \
 
 On non-zero exit from `artifact-patch.py --init`: the stderr will be error-
 as-prompt. Parse the message, adjust the seed, retry once. If still failing
-after retry, escalate to the user with the stderr content.
+after retry, escalate to the user with the stderr content AND delete the
+empty `review_dir` you created (`rm -rf -- "$review_dir"`). Leaving it
+behind makes step 0.13 on the next run think a prior review exists when
+none does. Do NOT write `latest.txt` (step 0.16) on this failure path.
 
-### 0.16. Update `latest.txt` (atomic)
+### 0.16. Update `latest.txt` (atomic) — only after --init succeeds
 
-Write `review_id` to `$reviews_root/$repo_slug/$head_branch/latest.txt` via a
-temp-file + rename:
+Step 0.15's `--init` must have succeeded for this step to run. If the
+`--init` call failed in step 0.15, skip this step — `latest.txt` stays
+pointing at whatever prior review_id was there (or doesn't exist at
+all on first run).
 
 ```bash
 tmp="$reviews_root/$repo_slug/$head_branch/latest.txt.tmp.$$"

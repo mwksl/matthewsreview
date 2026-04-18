@@ -215,50 +215,105 @@ For each sub-agent result, in the order it returns:
    the JSON array described in the schema." If still unparseable, log to
    `trace.md` and drop that lens's output per §24.1.
 
-3. **Append each candidate to the artifact.** Auto-assign finding ids in
-   sequence: the first candidate across all lenses gets `F001`, the second
-   `F002`, etc. Fill fields the lens didn't provide with schema defaults:
+3. **Build a complete finding object and append it.** `artifact-patch.py
+   --add-finding` does NOT default fields — it validates the payload
+   against the full schema and rejects if anything required is missing.
+   The lens sub-agent returns a PARTIAL candidate (with keys like
+   `file`, `line_range`, `claim`, `evidence_snippet`, `impact_type`,
+   `origin`, `origin_confidence`, `source_family` — singular). You must
+   transform it into the full schema shape before passing to
+   `--add-finding`.
 
-   | Field | Default |
-   |---|---|
-   | `id` | `F001`, `F002`, ... (monotonic) |
-   | `sources` | `["detection"]` (runs under the "internal detection" provider) |
-   | `source_families` | `[<the lens's source_family>]` (array form — Phase 2 may union more) |
-   | `actionability` | `"auto_fixable"` for correctness/security; `"manual"` for ux/policy; `"report_only"` if L3/L4 flagged the issue as pre-existing (set by the lens if applicable) |
-   | `validation_lane` | `"deep"` for `correctness` + `security` outside trivial_mode; `"light"` otherwise |
-   | `current_state` | `"open"` |
-   | `disposition` | leave unset for now — Phase 3/4 will set |
-   | `is_actionable` | `false` initially (pre-validation) |
-   | `reason` | `null` |
-   | `confirmed_strength` | `null` |
-   | `score_phase3` | `null` (set in Phase 3) |
-   | `score_phase4` | `null` |
-   | `score_history` | `[]` |
-   | `validation_result` | `null` |
-   | `fix_attempts` | `[]` |
-   | `introduced_in_sha` | `null` |
-   | `suggested_follow_up` | `null` |
-   | `related_parent_finding_id` | `null` |
+   Build the complete finding object per candidate. Monotonically assign
+   finding ids (`F001`, `F002`, ... across all lenses — keep a counter in
+   your working context):
 
-   But wait — Phase 3 needs a value in `disposition` because §6 requires
-   it (enum). Before Phase 3 runs, `disposition` is unset. Handle this by
-   having `artifact-patch.py --add-finding` default `disposition` to
-   `"below_gate"` + `is_actionable: false` when the lens doesn't provide
-   one. Phase 3's gate then re-scores and may promote above the gate. This
-   matches §13.1's "below gate" default for unscored candidates.
+   ```
+   {
+     "id":                        "F###",
+     "sources":                   ["detection"],                 # internal lens family
+     "source_families":           ["<lens's source_family>"],    # singular → array; Phase 2 may union
+     "impact_type":               "<from lens output>",
+     "origin":                    "<from lens, default introduced_by_pr>",
+     "origin_confidence":         "<from lens, default high>",
+     "actionability":             "auto_fixable"                 # if impact_type ∈ {correctness, security}
+                                  | "manual"                     # ux/policy
+                                  | "report_only",               # architecture
+     "validation_lane":           "deep" if impact_type ∈ {correctness, security} AND trivial_mode != true
+                                  else "light",
+     "current_state":             "open",
+     "disposition":               "below_gate",                  # parking state; Phase 3/4 overwrite
+     "is_actionable":             false,                         # must agree with disposition per §5.2.1
+     "reason":                    null,
+     "confirmed_strength":        null,
+     "file":                      "<from lens>",
+     "line_range":                [<start>, <end>],              # [int, int]
+     "claim":                     "<from lens>",
+     "score_phase3":              null,                          # Phase 3 sets
+     "score_phase4":              null,
+     "score_history":             [],
+     "validation_result":         null,
+     "fix_attempts":              [],
+     "introduced_in_sha":         null,
+     "suggested_follow_up":       null,
+     "related_parent_finding_id": null
+   }
+   ```
 
-   (Stage 1's `_common.py` schema validator will catch any field missing —
-   if `--add-finding` rejects the candidate, the stderr will name the
-   missing field. Use it to debug.)
+   Use `jq -n` to build this from the lens's partial candidate without
+   escaping-hell:
 
-   Call per candidate:
+   ```bash
+   full_finding=$(jq -n \
+     --arg id "F$(printf '%03d' $finding_counter)" \
+     --arg sf "$lens_source_family_singular" \
+     --argjson lens "$candidate_from_lens" \
+     '$lens + {
+       id: $id,
+       sources: ["detection"],
+       source_families: [$sf],
+       actionability: (if ($lens.impact_type == "correctness" or $lens.impact_type == "security") then "auto_fixable"
+                      elif ($lens.impact_type == "architecture") then "report_only"
+                      else "manual" end),
+       validation_lane: (if ($lens.impact_type == "correctness" or $lens.impact_type == "security") then "deep" else "light" end),
+       current_state: "open",
+       disposition: "below_gate",
+       is_actionable: false,
+       reason: null,
+       confirmed_strength: null,
+       score_phase3: null,
+       score_phase4: null,
+       score_history: [],
+       validation_result: null,
+       fix_attempts: [],
+       introduced_in_sha: null,
+       suggested_follow_up: null,
+       related_parent_finding_id: null
+     } | del(.source_family)')   # strip the singular — only plural is in schema
+   ```
+
+   For trivial-mode runs (`trivial_mode=true`), force `validation_lane`
+   to `light` even for correctness/security — Phase 4b handles every
+   candidate under trivial mode per §19.6.
+
+   Then append:
 
    ```bash
    ~/.claude/commands/_shared/tools/artifact-patch.py \
-     --path "$artifact_path" --add-finding "$candidate_json"
+     --path "$artifact_path" --add-finding "$full_finding"
    ```
 
-   On non-zero exit, read the error-as-prompt, adjust, retry once.
+   On non-zero exit, read the error-as-prompt (it names the offending
+   field), adjust your `jq` build, retry once. A common failure is a
+   lens returning `line_range` as `null` instead of `[N, N]` — default
+   to `[1, 1]` with a `trace.md` note when that happens.
+
+   **`below_gate` is a parking disposition** for pre-Phase-3 state.
+   Schema requires `disposition` non-null, so we can't leave it unset.
+   `is_actionable: false` + `disposition: "below_gate"` keeps the §5.2.1
+   coupling happy. Phase 3's gate either moves this candidate out of
+   `below_gate` (via Phase 4's verdict eventually) or locks it in with
+   the real "below validation gate (score X)" reason.
 
 ### 1.5. Log Phase 1 summary
 
