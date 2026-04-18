@@ -1707,6 +1707,20 @@ Each entry gives the script's interface, key algorithm, invariants, and error ca
 
 **Disposition / is_actionable consistency (§5.2.1).** When `--set disposition=<value>` is present, `artifact-patch.py` automatically derives `is_actionable` (`true` iff disposition ∈ {`confirmed_auto`, `partial`, `regression`}) and writes both atomically. A user-passed `--set is_actionable=<value>` that contradicts the derived value is rejected with an error-as-prompt message listing the valid combinations. This keeps the two fields in lockstep without the caller having to remember the rule. Likewise, `--set current_state=resolved` requires `disposition=resolved` (either already present or set in the same call); other combinations of `current_state=resolved` with a non-`resolved` disposition are rejected.
 
+**Exit codes (clarification — codified Stage 1).** §21.2 originally said only "exit non-zero" on failure. Stage 1 standardized the following split so orchestrator prompts can route on specific codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | success (or `--dry-run` valid) |
+| 1 | schema / field validation error |
+| 2 | invalid state transition |
+| 3 | `--dry-run` would produce an invalid artifact |
+| 4 | unexpected error (uncaught exception) |
+| 5 | missing Python dep (`jsonschema`) |
+| 64 | usage / argparse error (conventional) |
+
+Also applies to `artifact-validate.sh` (0/1/64) and `artifact-render.py` (0/1/4/64) where relevant.
+
 ### 21.3 `artifact-validate.sh`
 
 **Interface:** `artifact-validate.sh --path <file>`

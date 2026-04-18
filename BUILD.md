@@ -8,43 +8,41 @@ If you are a Claude Code session starting fresh (after compaction or on a new da
 
 ## Current state
 
-**As of 2026-04-17 (mid-stage compaction checkpoint)** — Stage 1 in progress, 13 of 17 commits landed. Compacting now to keep context quality high; the next session finishes Stage 1.
+**As of 2026-04-17 — Stage 1 COMPLETE.** All 17 commits landed on `main`; `test/smoke.sh` passes (19 assertions). Next: plan Stage 2 (`/adams-review` end-to-end, Phases 0–6).
 
-- Design doc: `DESIGN.md` (rev 8 — implementation-language split applied)
-- Stage 1 plan: `plans/stage-1-foundation.md` (user-approved; sync'd with confirmed decisions)
+- Design doc: `DESIGN.md` (rev 8 + §21.2 exit-code footnote)
+- Stage 1 plan: `plans/stage-1-foundation.md` (user-approved; closed out)
 - Symlink `~/.claude/commands/_shared → commands/_shared` is live
-- `uv` (already installed at `/opt/homebrew/bin/uv 0.7.15`) supplies `jsonschema` to Python scripts via PEP 723 inline-script shebangs — deviation from original "plain pip" plan documented in cross-stage notes below
+- `uv` (`/opt/homebrew/bin/uv 0.7.15`) supplies `jsonschema` to Python scripts via PEP 723 inline-script shebangs
 
-**Stage 1 commits so far (on `main`):**
+**Stage 1 commits (on `main`, newest first):**
 
 ```
-17a18a4 Add claude-md-paths.sh (DESIGN §21.7, §23)
-53cc516 Add log-phase.sh and log-tokens.sh (DESIGN §11, §12, §21.6)
-fe032d0 Add artifact-read.sh (DESIGN §8.1, §21.1)
-8fca196 Add artifact-validate.sh (DESIGN §8.3, §21.3)
-a3bede7 Add artifact-render.py (DESIGN §7, §21.6)
-83ee47a Add artifact-patch.py --dry-run
-d669d5f Add artifact-patch.py --append-fix-attempt (combinable with --set)
-2504b09 Add artifact-patch.py --set mode (transitions + coupling)
-926d9fe Add artifact-patch.py --add-finding mode
-cd1991c Add artifact-patch.py --init mode (DESIGN §8.2, §21.2)
-f374a36 Add _common.py: shared Python helpers for writer scripts
-98c0fb5 Add schema-v1.json codifying artifact shape (DESIGN §5, §6)
-3c82a1e Scaffold Stage 1 layout: symlink, READMEs, durable plan
-bd6b610 Bootstrap repo with design doc (rev 8) and build journal
+(this commit) Close Stage 1: BUILD.md + DESIGN §21.2 exit-code footnote
+1324dfc       Add Stage 1 smoke harness (plan §7 done-when walk-through)
+2c765f4      Add artifact-publish.sh (DESIGN §21.6, §13.4)
+84f9d71      Add staleness.sh (DESIGN §21.4, §13.3)
+e624f00      Stage 1 mid-stage compaction checkpoint
+17a18a4      Add claude-md-paths.sh (DESIGN §21.7, §23)
+53cc516      Add log-phase.sh and log-tokens.sh (DESIGN §11, §12, §21.6)
+fe032d0      Add artifact-read.sh (DESIGN §8.1, §21.1)
+8fca196      Add artifact-validate.sh (DESIGN §8.3, §21.3)
+a3bede7      Add artifact-render.py (DESIGN §7, §21.6)
+83ee47a      Add artifact-patch.py --dry-run
+d669d5f      Add artifact-patch.py --append-fix-attempt (combinable with --set)
+2504b09      Add artifact-patch.py --set mode (transitions + coupling)
+926d9fe      Add artifact-patch.py --add-finding mode
+cd1991c      Add artifact-patch.py --init mode (DESIGN §8.2, §21.2)
+f374a36      Add _common.py: shared Python helpers for writer scripts
+98c0fb5      Add schema-v1.json codifying artifact shape (DESIGN §5, §6)
+3c82a1e      Scaffold Stage 1 layout: symlink, READMEs, durable plan
+bd6b610      Bootstrap repo with design doc (rev 8) and build journal
 ```
 
-**Remaining for Stage 1 (4 commits):**
+**Deferred from Stage 1:**
+- **§8.7 grant probe** (Task #29, pending). Not in the mainline close-out; can be done ad-hoc before Stage 2 builds the top-level command file with a real grant block. When done, record outcome in *Cross-stage notes*.
 
-1. **Commit 14 — `staleness.sh`** (DESIGN §21.4). `git diff --name-only <reviewed_sha>..HEAD` intersected with `--reviewed-files` list. Emits `safe` / `warn` / `unsafe` on stdout; exit 0 safe/warn, non-zero unsafe.
-2. **Commit 15 — `artifact-publish.sh`** (DESIGN §21.6). PR-mode `gh api` comment discovery (comment_id arg → PR issue-comments list filtered by current `gh` user + `<!-- adams-review-v1 -->` marker → most recent), PATCH/POST, `{"comment_id": N}` stdout emit for the orchestrator to persist via `artifact-patch.py --set comment_id=<n>`. Local-mode no-op. Per user decision, real-PR exercise is **deferred to Stage 2**; Stage 1 verifies only the shell path + local no-op.
-3. **Commit 16 — Smoke harness** (`test/smoke.sh` + `test/fixtures/`). Walks the 12-assertion Stage 1 done-when flow from `plans/stage-1-foundation.md` §7. Hand-authored `artifact-seed.json` + `expected.md`; `diff` check against the rendered Markdown must be empty.
-4. **Commit 17 — BUILD.md close-out + DESIGN §21.2 exit-code footnote.** Flip Stage 1 status in the index table; fill Files landed / Verification evidence / Open issues; add the exit-code clarification (1/2/3/4/5/64) to DESIGN.md §21.2 as a footnote per the BUILD.md "Adjusting the design" protocol.
-
-Plus one deferred Stage-1 item not yet done:
-- **§8.7 grant probe** (Task #29, still pending). Set up `~/.claude/commands/_shared-probe.md` with a single `Bash(/abs/path/probe.sh:*)` grant; user runs in a separate Claude Code `default`-mode session and reports whether the absolute-path grant resolves through the symlink. Results recorded in cross-stage notes. Can run in parallel with any remaining commit.
-
-**Next action after compact:** resume with commit 14 (`staleness.sh`). Scripts and their DESIGN references are listed above; `plans/stage-1-foundation.md` §4–§5 describe each in full.
+**Next action:** plan Stage 2 (`plans/stage-2-review.md`). Read this BUILD.md + DESIGN.md + the durable Stage 1 plan before entering plan mode.
 
 ---
 
@@ -52,7 +50,7 @@ Plus one deferred Stage-1 item not yet done:
 
 | # | Name | Status | Plan | Close-out notes |
 |---|------|--------|------|-----------------|
-| 1 | Foundation (data layer + shared helpers) | not started | `plans/stage-1-foundation.md` *(not yet drafted)* | — |
+| 1 | Foundation (data layer + shared helpers) | **done** | `plans/stage-1-foundation.md` | [Stage 1 section](#stage-1--foundation) |
 | 2 | `/adams-review` end-to-end (Phases 0–6) | not started | `plans/stage-2-review.md` | — |
 | 3 | `/adams-review-fix` (Phases 7–9 + terminal cleanup) | not started | `plans/stage-3-fix.md` | — |
 
@@ -68,13 +66,33 @@ Plus one deferred Stage-1 item not yet done:
 
 **Done when:** I can hand-author a synthetic `artifact.json`, run `artifact-patch.py` + `artifact-render.py` against it, and produce a correct `artifact.md`. Schema validation rejects malformed inputs with error-as-prompt messages. No slash command runs yet.
 
-**Status:** not started.
+**Status:** done (2026-04-17).
 
-**Files landed:** —
+**Files landed:**
+- `commands/_shared/schema-v1.json` — JSON Schema Draft 2020-12 codifying DESIGN §5–§6 (strict enums, `additionalProperties: false` everywhere, regex-constrained ids and SHAs, nullable-where-§6-allows).
+- `commands/_shared/tools/_common.py` — shared Python helpers: exit-code constants, `err_prompt()` + `suggest()`, schema validator loader (with `ImportError → EXIT_MISSING_DEP`), `validate()`, `atomic_write()`, `is_append_only()`, `derive_is_actionable()`, `transitions_from()`.
+- `commands/_shared/tools/artifact-patch.py` — canonical writer: `--init`, `--add-finding`, `--set` (repeatable; allowlisted), `--append-fix-attempt` (combinable with `--set` per §26), `--dry-run`. Enforces state-transition whitelist, disposition/is_actionable coupling, and the `current_state=resolved ⇔ disposition=resolved` coupling. Auto-appends `score_history` when `score_phase3/4` is set.
+- `commands/_shared/tools/artifact-render.py` — renders `artifact.json` → Markdown per §7: stable marker, header, disposition-filtered deep/light/pre-existing sections, fix-runs section when any finding has attempts, auto-fixable rows sorted by finding id, Status column auto-appears post-fix.
+- `commands/_shared/tools/artifact-validate.sh` — Bash-fronted validator using the uv-heredoc pattern; no companion `.py` required.
+- `commands/_shared/tools/artifact-read.sh` — jq wrapper: `--filter`, `--finding-id`, `--summary` (counts by current_state / disposition / impact_type / validation_lane).
+- `commands/_shared/tools/artifact-publish.sh` — PR-mode comment discovery (`--comment-id` → marker search → create), local-mode no-op, `{"comment_id": N}` stdout emit, `trace.md` appender.
+- `commands/_shared/tools/claude-md-paths.sh` — walk-up CLAUDE.md finder, `@-` stdin mode, root-first dedup in Bash-3.2-portable style.
+- `commands/_shared/tools/staleness.sh` — git-diff intersection classifier (safe / warn / unsafe), `@-` stdin mode, reachability check (shallow-clone / force-push guard).
+- `commands/_shared/tools/log-phase.sh` — narrative (`trace.md`) and structured (`phases.jsonl`) modes via `--record`.
+- `commands/_shared/tools/log-tokens.sh` — one-line-per-invocation JSONL appender (`tokens.jsonl`); supports `--tokens null` literal for the §11 parse-failure fallback.
+- `commands/_shared/README.md` + repo-root `README.md` — setup + dependency docs.
+- `test/fixtures/artifact-seed.json`, `test/fixtures/expected.md`, `test/fixtures/invalid/bad-disposition.json`, `test/smoke.sh` — 19-assertion done-when harness.
 
-**Verification evidence:** —
+**Verification evidence:**
+- `test/smoke.sh` → `smoke: PASS (19 assertions)`. Covers the 12 plan §7 assertions (init / add-finding / validate / four state-machine transitions / append-fix-attempt / render-diff / schema-violation / coupling-violation / dry-run-unchanged) plus sidecar A–F (summary counts, publish-local, claude-md-paths, staleness three-verdict, JSONL loggers, validator rejects bad fixture).
+- `test/fixtures/expected.md` and the smoke run's rendered output diff empty byte-for-byte.
+- All helper scripts are executable and symlinked into the live path `~/.claude/commands/_shared/tools/...`.
 
-**Open issues / deviations:** —
+**Open issues / deviations:**
+- **`artifact-publish.sh --md-path`** — Stage-1 extension (not in DESIGN §21.6's listed signature). Needed so smoke tests can operate without stubbing `latest.txt`. Stage 2 should make `--md-path` optional with the §13.4 latest.txt fallback. Orchestrator-facing contract unchanged.
+- **`staleness.sh` unreachable-SHA guard** — clarification-level addition. §21.4 doesn't specify behavior when the reviewed SHA isn't reachable from HEAD (shallow clone, force-push); Stage 1 exits 1 with an explanatory message rather than silently comparing to unknown history. No DESIGN update required.
+- **§8.7 grant probe** (Task #29) — still pending. Not on the critical path for Stage 2 planning, but should be exercised before Stage 2 ships the real top-level command with a full `allowed-tools` block.
+- **Summary line vs. bucket list** — `render_summary()` counts `below_gate` in the total but doesn't list it per-lane (since no report section displays sub-threshold findings). Visible in smoke output as "Found 6 findings" but only 5 enumerated. Not a bug; just a rendering choice worth knowing about when reading real output.
 
 ### Stage 2 — `/adams-review`
 
@@ -156,6 +174,12 @@ Bias is toward **making DESIGN track reality**, not defending the rev-8 wording.
 - **2026-04-17 — `--set` allowlists are explicit** (`SETTABLE_FINDING_FIELDS`, `SETTABLE_ARTIFACT_FIELDS` in `artifact-patch.py`). DESIGN §21.2 doesn't enumerate patchable fields; I chose an allowlist over a blocklist for safer error-as-prompt UX. Finding-level allowed: scalar enums, reason, confirmed_strength, score_phase3/4, introduced_in_sha, suggested_follow_up, related_parent_finding_id, plus the coupling triple (current_state, disposition, is_actionable). Top-level allowed: comment_id, trivial_mode, pr_state, pr_number. Arrays/objects and immutable fields (id, file, claim, sources, score_history, fix_attempts, validation_result, line_range) are rejected with a listing of allowed names. Stage 2 may need to add top-level `metrics` / `subagent_tokens` setters — will add a `--set-json` flag when that comes up, rather than overloading `--set`.
 
 - **2026-04-17 — `--append-fix-attempt` combines with `--set` per DESIGN §26.** In one patch: `--set current_state=resolved --set disposition=resolved --append-fix-attempt '...'`. Order within the call is `--set` first (transitions + coupling checks run), then the attempt is appended. Cleaner than forcing two sequential `artifact-patch.py` invocations for every Phase 9 step.
+
+- **2026-04-17 (close-out) — `artifact-publish.sh --md-path` is a Stage-1 extension.** DESIGN §21.6's signature is `--mode pr|local --review-id <id> [--pr <num>] [--comment-id <id>]` and assumes `latest.txt` resolution resolves the per-review dir. Stage 1 smoke tests need to avoid stubbing that resolver, so `--md-path <path>` was added. Stage 2's Phase 6 / orchestrator work should add the `latest.txt` fallback so `--md-path` becomes optional; the orchestrator-facing contract then matches §21.6 unchanged. Similarly `--review-dir <path>` is a testability extension for the trace.md appender.
+
+- **2026-04-17 (close-out) — `staleness.sh` unreachable-SHA handling.** §21.4 specifies HEAD / changed-files intersection but doesn't say what to do when the reviewed SHA isn't in local history (shallow clone, force-push that discarded the SHA). Stage 1 chose: `git rev-parse --verify <sha>^{commit}` + `git merge-base --is-ancestor <sha> HEAD`; on failure exit 1 with a message explaining likely causes and action ("re-run /adams-review"). Treated same as unsafe — the safest default.
+
+- **2026-04-17 (close-out) — DESIGN §21.2 exit codes codified.** Footnoted into DESIGN.md §21.2 in this commit: 0 success / 1 validation / 2 invalid-transition / 3 dry-run-invalid / 4 unexpected / 5 missing-dep / 64 usage. Also applies to `artifact-validate.sh` (0/1/64) and `artifact-render.py` (0/1/4/64). Observed during smoke: step 12 (`--set current_state=bogus --dry-run` on a finding in `resolved` terminal state) exits 2 (transition-check catches "bogus" as not in the empty allowed-next set for terminal states) rather than 1 or 3. The smoke assertion checks non-zero + unchanged sha, not a specific code — robust to this layering.
 
 ---
 
