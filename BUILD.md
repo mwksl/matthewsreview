@@ -8,7 +8,7 @@ If you are a Claude Code session starting fresh (after compaction or on a new da
 
 ## Current state
 
-**As of 2026-04-18 — Stage 2 COMPLETE.** All 12 fragment/code commits (C1–C12) landed, three independent audit rounds closed (rounds 2, 3, 4 with Opus + CodeRabbit + Codex deduped), and C13 real-repo smoke passed end-to-end on `ray-finance` `feat/import-apple` (43 files / 4270 lines, 25-min wall clock, 978k tokens, 4 confirmed_auto findings → PR comment `4274059620` posted). `test/smoke.sh` passes 39 assertions. Next: plan Stage 3 (`/adams-review-fix`).
+**As of 2026-04-18 — Stage 2 COMPLETE.** All 12 fragment/code commits (C1–C12) landed, three independent audit rounds closed (rounds 2, 3, 4 with Opus + CodeRabbit + Codex deduped), and C13 real-repo smoke passed end-to-end on `ray-finance` `feat/import-apple` (43 files / 4270 lines, 25-min wall clock, 978k tokens, 4 confirmed_auto findings → PR comment `4274059620` posted). `test/smoke.sh` passes 39 assertions. Next: plan Stage 2.5 (hardening — sensitive-file gate + Phase-4 context collapse) before Stage 3.
 
 - Design doc: `DESIGN.md` (rev 8 + §21.2 exit-code footnote + §5.2.1 `pending_validation` clarification + §12.1 example fix)
 - Stage 1 plan: `plans/stage-1-foundation.md` (user-approved; closed out)
@@ -53,6 +53,7 @@ bd6b610      Bootstrap repo with design doc (rev 8) and build journal
 |---|------|--------|------|-----------------|
 | 1 | Foundation (data layer + shared helpers) | **done** | `plans/stage-1-foundation.md` | [Stage 1 section](#stage-1--foundation) |
 | 2 | `/adams-review` end-to-end (Phases 0–6) | **done** | `plans/stage-2-review.md` | [Stage 2 section](#stage-2--adams-review) |
+| 2.5 | Hardening — sensitive-file gate + Phase-4 context collapse | not started | `plans/stage-2.5-hardening.md` | [Stage 2.5 section](#stage-25--hardening) |
 | 3 | `/adams-review-fix` (Phases 7–9 + terminal cleanup) | not started | `plans/stage-3-fix.md` | — |
 
 ### Stage 1 — Foundation
@@ -154,6 +155,117 @@ First end-to-end execution of `/adams-review` on `ray-finance` `feat/import-appl
 **Round-2/3/4 audit fixes exercised and held:** `pending_validation` state machine transitions cleanly; `pr_state` transform produced `"draft"` on first try; `counts_by_state` correctly populated in phases.jsonl; `validation_result` extraction path would have fired on any deep-lane confirmed finding (did on F011/F013/F014/F017 — all schema-valid). No Phase 5 extraction code path fired because the sub-agent returned `[]` groups for this diff.
 
 **Hot-fix landed mid-smoke:** first attempt hit Phase 0 step 0.15 `review_id` fallback format bug — `rev_<ts>_<rand>` contained an underscore after `rev_` which the schema regex rejected. Fix at commit `e0df35d` + smoke assertion Vbis; a fresh `uv run --with ulid-py` path works too (26-char Crockford base32 is pure alphanumeric).
+
+### Stage 2.5 — Hardening
+
+**Rationale.** Two observations from the C13 real-repo smoke surfaced UX / scalability concerns that are cheaper to resolve before Stage 3 ships `/adams-review-fix` than after:
+
+1. **Sensitive-file gate** (cross-stage note 2026-04-18) — every write under `~/.claude/reviews/...` triggers a Claude Code permission prompt regardless of `allowed-tools` grants. User sees dozens of prompts per run. Every new user hits this on first run.
+2. **Orchestrator context budget** (cross-stage note 2026-04-18) — 243k of session context at 33 findings / 43 files. Headroom at 1M, but Stage 3 adds Phases 7–9 and per-finding loop scaffolding accumulates. Collapsing the Phase-4 decision-table loop is the highest-payoff / lowest-cost lever; other levers become Stage-3 authoring discipline rather than code changes.
+
+**Scope (target):**
+
+- **2.5.A** — Resolve the sensitive-file gate permanently, via one of two paths depending on probe outcome.
+- **2.5.B** — Add `artifact-patch.py --apply-decisions <json>` and rewrite `05-validation.md` step 4.4 to call it once instead of looping per-finding.
+- **2.5.C** — Append Stage-3 authoring-discipline guidance to *Cross-stage notes* (no code).
+
+**Explicitly out of scope:**
+
+- **Note 1 Lever #1** (Phase-5 `xc_input_json` sub-agent preprocessor) — deferred. Revisit only if a Stage 3 real-repo run shows the orchestrator approaching context limits.
+- **Note 1 Lever #4** (fragment prose shrink) — deferred. Not blocking.
+- **Renderer bug: Light-lane `uncertain` dispositions silently dropped from PR comment** (`artifact-render.py:148` and `:323` iteration tuples). Surfaced during Stage 2.5 planning review. Not in this stage's scope but will need a decision: (a) fold into 2.5.B as a third work item, (b) fix separately as a standalone patch, or (c) defer to Stage 3. Current user preference pending.
+
+**Done when:**
+
+- A fresh `/adams-review` run on a real repo (sample: ray-finance `feat/import-apple` re-run) completes with **zero** sensitive-file permission prompts, OR one-time prompts only if the probe chose the `additionalDirectories` path.
+- `artifact-patch.py --apply-decisions` applies a full Phase-4 decision batch in one call; `05-validation.md` step 4.4 contains one invocation, not a per-finding loop.
+- `test/smoke.sh` gains two assertions: one for the `--apply-decisions` batch path; one for the relocated reviews root (if 2.5.A lands the flip).
+- DESIGN §9.1 and §21.2 updated if-and-only-if reality moved (clarification-level; no approval round-trip).
+
+---
+
+**2.5.A — Sensitive-file gate resolution**
+
+1. **Probe** `additionalDirectories` in `.claude/settings.json` as a bypass. Single scratch session: create a test project with `.claude/settings.json` containing `{"permissions": {"additionalDirectories": ["~/.claude/reviews"]}}` (exact key TBD per Claude Code docs), trigger a write to `~/.claude/reviews/probe_test/trace.md`, observe whether the sensitive-file prompt fires. ~15 min of work. Record outcome in Cross-stage notes.
+
+2. **Branch on probe outcome:**
+
+   **(B) bypasses the gate** → Ship documentation only. No code change.
+   - Add a `setup` section to repo-root `README.md` instructing users to add the `additionalDirectories` line to their project's `.claude/settings.json`.
+   - DESIGN §9.1 gains a one-line note documenting the requirement.
+   - Release-notes text for users upgrading.
+
+   **(B) does NOT bypass the gate** → Flip the default reviews root.
+   - `$ADAMS_REVIEW_REVIEWS_ROOT` default changes from `~/.claude/reviews` to `~/.adams-reviews` (leading dot = hidden-state-dir convention; outside `.claude/` → gate doesn't fire).
+   - Grep for every hardcoded `~/.claude/reviews` reference; touch points at minimum:
+     - `commands/_shared/00-preflight.md` (review_dir construction)
+     - `commands/_shared/tools/artifact-publish.sh` (latest.txt resolution)
+     - `commands/_shared/tools/external-scrape.sh` (scratch dir — if present)
+     - README.md, DESIGN.md §9.1
+   - Migration text in README: *"If you have pre-2.5 reviews under `~/.claude/reviews/`, either `mv ~/.claude/reviews ~/.adams-reviews` OR `export ADAMS_REVIEW_REVIEWS_ROOT=~/.claude/reviews` to keep them where they are."*
+   - DESIGN §9.1 rewording: canonical default is now `~/.adams-reviews/`; env-var override documented.
+
+3. **Verification:** re-run `/adams-review` on ray-finance `feat/import-apple` (or a smaller test repo); confirm zero permission prompts end-to-end.
+
+---
+
+**2.5.B — Phase-4 decision-table collapse**
+
+1. **`commands/_shared/tools/artifact-patch.py`** — add `--apply-decisions <path-or-@->` mode.
+   - Consumes a JSON array of tuples shaped:
+     ```json
+     {
+       "id": "F011",
+       "score_phase4": 78,
+       "decision": "confirmed",
+       "actionability": "auto_fixable",
+       "validation_result": { ... },
+       "reason": "...",
+       "confirmed_strength": "strong",
+       "related_parent_finding_id": null
+     }
+     ```
+     (`validation_result` present only when `decision == confirmed`; other fields optional per §13.1.)
+   - Internally applies §13.1 decision table to each tuple — same transition/coupling checks as `--set`; `--set-json validation_result=…` applied atomically per-tuple.
+   - Exit-code semantics: 0 success; 1 if any tuple fails validation (batch halts at first failure, preceding tuples already committed atomically); clear stderr identifying which tuple failed.
+   - No partial-batch rollback. First-failure-halts keeps the helper simple; callers re-invoke with the remainder.
+
+2. **`commands/_shared/05-validation.md`** — rewrite step 4.4.
+   - **Before:** per-finding loop, each iteration building a decision tuple and invoking `artifact-patch.py --set …` with prose summary.
+   - **After:** accumulate all Phase-4 validator outputs into one JSON array (in a temp file under `/tmp/adams-review-$review_id/`), single `artifact-patch.py --apply-decisions @file` call. Summary prose collapses to one line: `applied N decisions (confirmed_auto=X, confirmed_manual=Y, uncertain=Z, disproven=W)`.
+
+3. **`test/smoke.sh`** — add one assertion: seed an artifact with 3 findings in `pending_validation`, feed a mixed-decision batch (one confirmed-auto, one uncertain, one disproven), assert post-state matches per-tuple expectations.
+
+4. **DESIGN.md §21.2** — add `--apply-decisions` row to the `artifact-patch.py` sub-section. Clarification-level (no behavior change beyond the helper gaining a new mode).
+
+---
+
+**2.5.C — Stage-3 authoring guidance (no code)**
+
+Append to *Cross-stage notes* the following principles captured from Note 1 Levers #1, #2, #4 — to be consulted when drafting Stage 3 phases:
+
+- **Read for decisions, not for holding.** Prefer narrow `jq` filters that return a verdict (`.findings | length`, `.findings | map(.disposition) | unique`) over reading full records into orchestrator context when the orchestrator only needs a branch decision.
+- **Delegate large-context synthesis to sub-agents** that return structured summaries (ids, group memberships, verdicts) rather than handing the full prompt+data to the orchestrator and emitting back prose.
+- **Avoid per-finding loops in fragments when a single helper call can carry the same semantics.** Each loop iteration accumulates prose in orchestrator context; a batched helper invocation does not.
+
+These are authoring disciplines, not enforced by tooling. Stage 3 planning should apply them from the start.
+
+---
+
+**Commit cadence (estimated):**
+
+1. 2.5.A probe + outcome recording — 1 commit.
+2. 2.5.A fix path (either docs-only or the relocation patch) — 1–2 commits.
+3. 2.5.B helper-mode + fragment rewrite + smoke + DESIGN footnote — 1–2 commits.
+4. Stage 2.5 close-out — BUILD.md fill-in + *Cross-stage notes* append — 1 commit.
+
+~5 commits total. Smaller than Stages 1/2.
+
+**Plan file:** to be drafted at `plans/stage-2.5-hardening.md` after user approves scope.
+
+**Files landed:** *(TBD — fill at close-out)*
+**Verification evidence:** *(TBD)*
+**Open issues / deviations:** *(TBD)*
 
 ### Stage 3 — `/adams-review-fix`
 
