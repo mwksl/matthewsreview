@@ -8,14 +8,43 @@ If you are a Claude Code session starting fresh (after compaction or on a new da
 
 ## Current state
 
-**As of 2026-04-17** — Planning complete (DESIGN.md at rev 8). Stage 1 not yet started.
+**As of 2026-04-17 (mid-stage compaction checkpoint)** — Stage 1 in progress, 13 of 17 commits landed. Compacting now to keep context quality high; the next session finishes Stage 1.
 
-- Design doc: `DESIGN.md` in this repo (rev 8 — implementation-language split applied)
-- Per-stage plans: `plans/` directory (empty — drafted before each stage starts)
-- No source code yet. Only `DESIGN.md`, `BUILD.md`, and `plans/`.
-- Git state: initial commit(s) bootstrapping the journal. `main` branch.
+- Design doc: `DESIGN.md` (rev 8 — implementation-language split applied)
+- Stage 1 plan: `plans/stage-1-foundation.md` (user-approved; sync'd with confirmed decisions)
+- Symlink `~/.claude/commands/_shared → commands/_shared` is live
+- `uv` (already installed at `/opt/homebrew/bin/uv 0.7.15`) supplies `jsonschema` to Python scripts via PEP 723 inline-script shebangs — deviation from original "plain pip" plan documented in cross-stage notes below
 
-**Next action:** draft Stage 1 plan in `plans/stage-1-foundation.md`, user reviews, then execute.
+**Stage 1 commits so far (on `main`):**
+
+```
+17a18a4 Add claude-md-paths.sh (DESIGN §21.7, §23)
+53cc516 Add log-phase.sh and log-tokens.sh (DESIGN §11, §12, §21.6)
+fe032d0 Add artifact-read.sh (DESIGN §8.1, §21.1)
+8fca196 Add artifact-validate.sh (DESIGN §8.3, §21.3)
+a3bede7 Add artifact-render.py (DESIGN §7, §21.6)
+83ee47a Add artifact-patch.py --dry-run
+d669d5f Add artifact-patch.py --append-fix-attempt (combinable with --set)
+2504b09 Add artifact-patch.py --set mode (transitions + coupling)
+926d9fe Add artifact-patch.py --add-finding mode
+cd1991c Add artifact-patch.py --init mode (DESIGN §8.2, §21.2)
+f374a36 Add _common.py: shared Python helpers for writer scripts
+98c0fb5 Add schema-v1.json codifying artifact shape (DESIGN §5, §6)
+3c82a1e Scaffold Stage 1 layout: symlink, READMEs, durable plan
+bd6b610 Bootstrap repo with design doc (rev 8) and build journal
+```
+
+**Remaining for Stage 1 (4 commits):**
+
+1. **Commit 14 — `staleness.sh`** (DESIGN §21.4). `git diff --name-only <reviewed_sha>..HEAD` intersected with `--reviewed-files` list. Emits `safe` / `warn` / `unsafe` on stdout; exit 0 safe/warn, non-zero unsafe.
+2. **Commit 15 — `artifact-publish.sh`** (DESIGN §21.6). PR-mode `gh api` comment discovery (comment_id arg → PR issue-comments list filtered by current `gh` user + `<!-- adams-review-v1 -->` marker → most recent), PATCH/POST, `{"comment_id": N}` stdout emit for the orchestrator to persist via `artifact-patch.py --set comment_id=<n>`. Local-mode no-op. Per user decision, real-PR exercise is **deferred to Stage 2**; Stage 1 verifies only the shell path + local no-op.
+3. **Commit 16 — Smoke harness** (`test/smoke.sh` + `test/fixtures/`). Walks the 12-assertion Stage 1 done-when flow from `plans/stage-1-foundation.md` §7. Hand-authored `artifact-seed.json` + `expected.md`; `diff` check against the rendered Markdown must be empty.
+4. **Commit 17 — BUILD.md close-out + DESIGN §21.2 exit-code footnote.** Flip Stage 1 status in the index table; fill Files landed / Verification evidence / Open issues; add the exit-code clarification (1/2/3/4/5/64) to DESIGN.md §21.2 as a footnote per the BUILD.md "Adjusting the design" protocol.
+
+Plus one deferred Stage-1 item not yet done:
+- **§8.7 grant probe** (Task #29, still pending). Set up `~/.claude/commands/_shared-probe.md` with a single `Bash(/abs/path/probe.sh:*)` grant; user runs in a separate Claude Code `default`-mode session and reports whether the absolute-path grant resolves through the symlink. Results recorded in cross-stage notes. Can run in parallel with any remaining commit.
+
+**Next action after compact:** resume with commit 14 (`staleness.sh`). Scripts and their DESIGN references are listed above; `plans/stage-1-foundation.md` §4–§5 describe each in full.
 
 ---
 
@@ -113,6 +142,20 @@ Bias is toward **making DESIGN track reality**, not defending the rev-8 wording.
 *Deviations from DESIGN, deferred items, things to revisit. Append as discovered.*
 
 - **2026-04-17 — Python dep strategy changed from plain `pip install` to `uv` inline-script shebang (PEP 723).** Stage 1 plan §3 assumed plain pip would work. PEP 668 (Homebrew Python 3.12+) refuses direct pip installs, even with `--user`. Switched to `#!/usr/bin/env -S uv run --script` with `# /// script` inline dep spec; `uv` (already installed at `/opt/homebrew/bin/uv`) fetches `jsonschema` on first invocation and caches it. No venv, no activation. Behavioral deviation (affects shebangs and the runtime dep on every machine that runs these commands) — surfaced and approved before any Python script was written. README.md deps table updated. DESIGN doesn't prescribe a Python install mechanism, so no DESIGN change needed; this is a build-time implementation choice, not a design drift.
+
+- **2026-04-17 — Exit-code clarifications for `artifact-patch.py` (DESIGN §21.2).** §21.2 only says "non-zero" on failure. Standardized in `_common.py`: `1=validation`, `2=invalid-transition`, `3=dry-run-invalid`, `4=unexpected`, `5=missing-dep`, `64=usage`. Clarification-level update per BUILD.md protocol. DESIGN §21.2 footnote is part of Stage 1 commit 17 (close-out) — not yet applied to DESIGN.md.
+
+- **2026-04-17 — `artifact-validate.sh` uses a uv heredoc pattern, not a companion `.py`.** DESIGN §9.1 lists `artifact-validate.sh` only; no companion `.py`. Implemented as a Bash script that invokes Python via `uv run --with jsonschema python3 -` with an inline heredoc, importing `_common.py` via `PYTHONPATH`. Single file, matches §9.1. Same pattern available for any future thin Bash-fronted validator.
+
+- **2026-04-17 — Bash scripts target portable Bash 3.2 features.** Shebang is `#!/usr/bin/env bash`, which resolves to macOS default `/bin/bash` (Bash 3.2, no associative arrays). `claude-md-paths.sh` used `declare -A` in its first draft and failed; rewrote to use `awk '!seen[$0]++' | sort` for dedup. Rule: avoid `declare -A`, `mapfile`, `readarray`, and `${var,,}` (lowercase) — they're all Bash 4+. `nameref` and process substitution ok; `set -euo pipefail` ok. Apply to all future Bash helpers across stages.
+
+- **2026-04-17 — Detail-block auto-fixable row ordering by finding id.** `artifact-render.py` first iterated `DEEP_AUTO_FIX_DISPOSITIONS = (confirmed_auto, partial, regression, resolved)` in order, which put partials before resolveds inside the same Auto-fixable table. Changed to sort by finding id for stable natural order. Matches DESIGN §7's implicit natural ordering of F001→F002→F003 in the worked example. Not a DESIGN change; just a rendering decision.
+
+- **2026-04-17 — Status-column behavior in Auto-fixable table.** DESIGN §7 says "the Auto-fixable table gains a Status column with `✓ verified` / `⚠ partial` / `✗ regression (reverted)`". Implemented: the column appears automatically when any row has a `fix_attempts` entry; it's absent pre-fix. Each cell shows outcome + short `output_sha` link or "(no commit)" for regression-reverted attempts. Matches §7 wording.
+
+- **2026-04-17 — `--set` allowlists are explicit** (`SETTABLE_FINDING_FIELDS`, `SETTABLE_ARTIFACT_FIELDS` in `artifact-patch.py`). DESIGN §21.2 doesn't enumerate patchable fields; I chose an allowlist over a blocklist for safer error-as-prompt UX. Finding-level allowed: scalar enums, reason, confirmed_strength, score_phase3/4, introduced_in_sha, suggested_follow_up, related_parent_finding_id, plus the coupling triple (current_state, disposition, is_actionable). Top-level allowed: comment_id, trivial_mode, pr_state, pr_number. Arrays/objects and immutable fields (id, file, claim, sources, score_history, fix_attempts, validation_result, line_range) are rejected with a listing of allowed names. Stage 2 may need to add top-level `metrics` / `subagent_tokens` setters — will add a `--set-json` flag when that comes up, rather than overloading `--set`.
+
+- **2026-04-17 — `--append-fix-attempt` combines with `--set` per DESIGN §26.** In one patch: `--set current_state=resolved --set disposition=resolved --append-fix-attempt '...'`. Order within the call is `--set` first (transitions + coupling checks run), then the attempt is appended. Cleaner than forcing two sequential `artifact-patch.py` invocations for every Phase 9 step.
 
 ---
 
