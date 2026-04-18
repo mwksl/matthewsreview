@@ -11,8 +11,13 @@ Modes (CLI flags; mutually exclusive):
   --set field=value         mutate a scalar field (repeatable). With
                             --finding-id, targets a finding; without,
                             targets top-level artifact fields.
+  --append-fix-attempt <json>  append an entry to a finding's fix_attempts[]
+                               (requires --finding-id). Combinable with
+                               --set in a single call (DESIGN §26 worked
+                               example: set current_state=resolved and
+                               append the attempt in one patch).
 
-Later modes added in subsequent commits: --append-fix-attempt, --dry-run.
+Later modes added in subsequent commits: --dry-run.
 
 ### --set semantics
 
@@ -383,20 +388,42 @@ def _apply_artifact_set(artifact, pairs):
     return set(pair_map.keys())
 
 
-def cmd_set(args):
-    """Apply one or more --set field=value mutations (§21.2)."""
-    pairs = [parse_set_pair(p) for p in args.set]
-    if not pairs:
-        c.err_prompt("--set requires at least one field=value pair", action="e.g., --set disposition=confirmed_auto")
-        return c.EXIT_USAGE
+def cmd_set_and_or_append(args):
+    """Combined --set + --append-fix-attempt (DESIGN §26).
 
+    Either or both can be present. Both operate on --finding-id when
+    given (or top-level, for --set only). Order: --set first (so state
+    transitions apply before the fix-attempt record lands), then
+    append. One atomic write.
+    """
     artifact = _load_or_fail(args.path)
+
+    set_pairs = [parse_set_pair(p) for p in args.set] if args.set else []
+
+    if args.append_fix_attempt is not None and not args.finding_id:
+        c.err_prompt(
+            "--append-fix-attempt requires --finding-id",
+            action="fix_attempts is a per-finding list; pass --finding-id <id>."
+        )
+        return c.EXIT_USAGE
 
     if args.finding_id:
         finding = _find_finding(artifact, args.finding_id)
-        _apply_finding_set(finding, pairs)
+        if set_pairs:
+            _apply_finding_set(finding, set_pairs)
+        if args.append_fix_attempt is not None:
+            attempt = read_json_arg(args.append_fix_attempt, "--append-fix-attempt")
+            if not isinstance(attempt, dict):
+                c.err_prompt(
+                    f"--append-fix-attempt expects a JSON object, got {type(attempt).__name__}",
+                    action="pass a fix_attempt object matching DESIGN §6."
+                )
+                return c.EXIT_USAGE
+            finding.setdefault("fix_attempts", []).append(attempt)
     else:
-        _apply_artifact_set(artifact, pairs)
+        # --set only, top-level.
+        if set_pairs:
+            _apply_artifact_set(artifact, set_pairs)
 
     return _write_and_emit(args.path, artifact)
 
@@ -426,6 +453,12 @@ def build_parser():
         metavar="FIELD=VALUE",
         help="repeatable: set a scalar field to a JSON-parseable value (null/true/85/foo)"
     )
+    p.add_argument(
+        "--append-fix-attempt",
+        dest="append_fix_attempt",
+        metavar="ATTEMPT_JSON",
+        help="append an entry to finding.fix_attempts[] (requires --finding-id; inline JSON, @file, or -)"
+    )
     mode = p.add_mutually_exclusive_group(required=False)
     mode.add_argument(
         "--init",
@@ -446,15 +479,15 @@ def main():
 
     try:
         if args.init is not None:
-            if args.set:
-                parser.error("--set cannot combine with --init")
+            if args.set or args.append_fix_attempt:
+                parser.error("--init cannot combine with --set or --append-fix-attempt")
             return cmd_init(args)
         if args.add_finding is not None:
-            if args.set:
-                parser.error("--set cannot combine with --add-finding")
+            if args.set or args.append_fix_attempt:
+                parser.error("--add-finding cannot combine with --set or --append-fix-attempt")
             return cmd_add_finding(args)
-        if args.set:
-            return cmd_set(args)
+        if args.set or args.append_fix_attempt is not None:
+            return cmd_set_and_or_append(args)
     except SystemExit:
         raise
     except Exception as e:
@@ -465,7 +498,7 @@ def main():
         traceback.print_exc(file=sys.stderr)
         return c.EXIT_UNEXPECTED
 
-    parser.error("no mode selected (use --init, --add-finding, or --set)")
+    parser.error("no mode selected (use --init, --add-finding, --set, or --append-fix-attempt)")
 
 
 if __name__ == "__main__":
