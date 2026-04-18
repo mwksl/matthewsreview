@@ -32,7 +32,18 @@ under `phase_1_5`.
 
 ### 1.5.1. Readiness check (up-front, before any launch)
 
-Capture `phase_1_5_start_epoch=$(date +%s)`.
+Capture `phase_1_5_start_epoch=$(date +%s)`. Create a scratch directory
+under `/tmp` for transient CLI outputs — DESIGN §9.3 keeps
+`$review_dir` clean of ephemeral noise:
+
+```bash
+scratch_dir="/tmp/adams-review-$review_id"
+mkdir -p "$scratch_dir"
+```
+
+(Cleanup happens at the end of Phase 1.5, step 1.5.5. The review-
+persistent copies of anything worth keeping — only the normalized
+candidate set — lands in the artifact via `--add-finding` at 1.5.6.)
 
 Check CodeRabbit availability:
 
@@ -79,7 +90,7 @@ id. The diff used is `$base_branch..HEAD`.
 
 ```bash
 coderabbit review --agent -t all --base "$base_branch" \
-  > "$review_dir/coderabbit.out" 2> "$review_dir/coderabbit.err"
+  > "$scratch_dir/coderabbit.out" 2> "$scratch_dir/coderabbit.err"
 ```
 
 Launch with the Bash tool using `run_in_background: true`. Capture the
@@ -104,7 +115,7 @@ Then launch:
 
 ```bash
 node "$CODEX_COMPANION" task --prompt-file "/tmp/adams-review-codex-$review_id.md" \
-  > "$review_dir/codex.out" 2> "$review_dir/codex.err"
+  > "$scratch_dir/codex.out" 2> "$scratch_dir/codex.err"
 ```
 
 Launch with `run_in_background: true`; capture shell id as `codex_shell_id`.
@@ -118,10 +129,10 @@ While the CLI reviewers are running, synchronously scrape bot comments:
 if [[ "$mode" == "pr" ]]; then
     ~/.claude/commands/_shared/tools/external-scrape.sh \
         --pr "$pr_number" --since "$review_started_at" \
-        > "$review_dir/pr-scrape.json" 2> "$review_dir/pr-scrape.err"
+        > "$scratch_dir/pr-scrape.json" 2> "$scratch_dir/pr-scrape.err"
     scrape_exit=$?
 else
-    echo "[]" > "$review_dir/pr-scrape.json"
+    echo "[]" > "$scratch_dir/pr-scrape.json"
     scrape_exit=0
 fi
 ```
@@ -166,7 +177,7 @@ Dispatch via `Agent` with `model: sonnet`. Prompt essence:
 > **1. PR bot comments** (JSON array; may be empty):
 >
 > ```
-> <contents of $review_dir/pr-scrape.json>
+> <contents of $scratch_dir/pr-scrape.json>
 > ```
 >
 > Each entry has `{id, author_login, author_type, created_at, body, kind,
@@ -175,13 +186,13 @@ Dispatch via `Agent` with `model: sonnet`. Prompt essence:
 > **2. CodeRabbit stdout** (free-form Markdown text; may be empty):
 >
 > ```
-> <contents of $review_dir/coderabbit.out>
+> <contents of $scratch_dir/coderabbit.out>
 > ```
 >
 > **3. Codex stdout** (free-form Markdown/JSON; may be empty):
 >
 > ```
-> <contents of $review_dir/codex.out>
+> <contents of $scratch_dir/codex.out>
 > ```
 >
 > Extract concrete issues from each. If a single comment or message covers
@@ -231,6 +242,16 @@ For each normalized candidate, call `artifact-patch.py --add-finding` with
 the same field defaults as Phase 1.4 step 3 — monotonically continuing the
 finding-id sequence (if Phase 1 produced F001-F030, external starts at F031).
 `origin_confidence` stays `"low"` per the normalizer's output.
+
+### 1.5.6b. Clean up scratch_dir
+
+```bash
+rm -rf -- "$scratch_dir"
+```
+
+Keep `$review_dir` free of transient CLI output (§9.3). Any
+orchestrator-fatal failure before this point leaves the scratch dir
+for post-mortem inspection.
 
 ### 1.5.7. Log Phase 1.5 summary
 

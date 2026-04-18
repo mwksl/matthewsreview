@@ -123,6 +123,21 @@ be called in every mode, with local mode as a no-op.
 
 **PR mode:**
 
+First capture any `comment_id` that was persisted to the artifact
+during this run (from a prior `--init` seed via Phase 0 step 0.14, or
+from a prior same-branch run whose `latest.txt` loaded into this
+session's state):
+
+```bash
+comment_id_from_artifact=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+  --path "$artifact_path" --filter '.comment_id // empty' 2>/dev/null || true)
+```
+
+Empty string means no prior comment id recorded; non-empty means we can
+short-circuit §13.4's discovery chain via PATCH directly.
+
+Build the publish invocation:
+
 ```bash
 publish_args=(
     --mode pr
@@ -132,20 +147,21 @@ publish_args=(
     --branch "$head_branch"
     --review-dir "$review_dir"
 )
-if [[ -n "$existing_comment_id" ]]; then
-    # existing_comment_id was captured in Phase 0 step 0.14 if we detected
-    # a prior-run PR comment with no local artifact.
+# Prefer artifact-recorded comment_id (survives across runs on the same
+# branch). Fall back to existing_comment_id from Phase 0 step 0.14 (PR
+# has a prior comment but no local artifact).
+if [[ -n "$comment_id_from_artifact" ]]; then
+    publish_args+=(--comment-id "$comment_id_from_artifact")
+elif [[ -n "$existing_comment_id" ]]; then
     publish_args+=(--comment-id "$existing_comment_id")
 fi
-if [[ -n "$comment_id_from_artifact" ]]; then
-    # comment_id might have been persisted into the artifact on a prior
-    # run (re-runs on the same PR pick it up from latest.txt's artifact).
-    publish_args+=(--comment-id "$comment_id_from_artifact")
-fi
 
-stdout=$("~/.claude/commands/_shared/tools/artifact-publish.sh" "${publish_args[@]}")
+stdout=$(~/.claude/commands/_shared/tools/artifact-publish.sh "${publish_args[@]}")
 publish_exit=$?
 ```
+
+Note the unquoted tilde — Bash expands `~/` only when it's not inside
+quotes. The helper script path must be unquoted (or use `$HOME/...`).
 
 On stdout emission `{"comment_id": N}` (post + first-time-located),
 persist to artifact per §13.4:

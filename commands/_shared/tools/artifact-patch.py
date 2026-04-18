@@ -260,7 +260,10 @@ JSON_SETTABLE_FINDING_FIELDS = frozenset({
     "sources",
     "source_families",
     "validation_result",
-    "score_history",
+    # score_history is intentionally NOT here — it's append-only, driven
+    # automatically by --set score_phase3/score_phase4 (see
+    # _apply_finding_set). Bypassing that would let callers overwrite
+    # history, which defeats the audit trail.
 })
 
 JSON_SETTABLE_ARTIFACT_FIELDS = frozenset({

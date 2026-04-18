@@ -135,30 +135,26 @@ For each returned entry, compute:
 
 - `advances_to_phase_4 = (score >= 45) OR (count(distinct source_families) >= 2)`
 
-If `advances_to_phase_4 == true`: clear the below_gate disposition if it
-was set during Phase 1 default (leave disposition unset so Phase 4 can
-assign it; set `reason=null` to erase the Phase-3 scoring-rationale line).
+If `advances_to_phase_4 == true`: leave the candidate's disposition as
+`below_gate` (the Phase-1 parking value). Phase 4 will overwrite with
+the real verdict. Erase the Phase-3 rationale from `reason` so it
+doesn't bleed into the Phase-4 record:
 
 ```bash
 ~/.claude/commands/_shared/tools/artifact-patch.py \
   --path "$artifact_path" --finding-id "$id" \
-  --set disposition=null --set is_actionable=false \
   --set reason=null
 ```
 
-(Schema allows `disposition: null`? Check — if not, use a neutral value
-like `below_gate` and let Phase 4 overwrite. See note below.)
-
-**Schema note.** `schema-v1.json` requires `disposition` to be a specific
-enum value, not null. The workaround: leave gated-in candidates at
-`disposition=below_gate` temporarily (since that's the Phase-1 default),
-with `is_actionable=false`. Phase 4 will overwrite disposition with the
-real verdict from the §13.1 Phase-4 table. Phase-3-gated-IN candidates
-that Phase 4 then DISPROVES land at `disposition=disproven` per §13.1.
-The `below_gate` → Phase-4-verdict transition is not a schema violation
-because `below_gate` is just a parking value here — the final disposition
-is what matters. Leave a `trace.md` note: "below_gate is used as a
-pre-Phase-4 parking state — see fragment 04-scoring-gate.md."
+**Schema note.** `schema-v1.json` requires `disposition` to be a
+specific enum value, not null. `below_gate` serves as the pre-Phase-4
+parking state through both Phase 1 detection and Phase 3 gate-in.
+Phase 4 overwrites with the §13.1 Phase-4 table verdict. The
+`below_gate` → Phase-4-verdict transition is not a schema violation —
+`below_gate` is just a parking value, the final disposition is what
+matters to the report. Leave one `trace.md` line at Phase 3 exit:
+"below_gate is the pre-Phase-4 parking state for gate-in candidates;
+Phase 4 overwrites."
 
 If `advances_to_phase_4 == false`: lock in the gate-out state:
 
