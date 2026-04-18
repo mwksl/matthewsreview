@@ -536,7 +536,7 @@ fi
 # V. pr_state=OPEN (uppercase from gh) would fail schema — the 00-preflight
 # transform at step 0.4 must lowercase it. This asserts the schema rejects
 # uppercase directly, so the transform has something to protect.
-BAD_SEED=$(cat "$FIX/artifact-seed.json" | jq '.pr_state = "OPEN"')
+BAD_SEED=$(jq '.pr_state = "OPEN"' "$FIX/artifact-seed.json")
 stderr=$("$TOOLS/artifact-patch.py" --init "$BAD_SEED" --path "$WORK/art-badstate.json" 2>&1 >/dev/null); code=$?
 if [[ "$code" != "0" ]] && echo "$stderr" | grep -q "pr_state"; then
     pass "V: schema rejects pr_state='OPEN' (uppercase — protects 00-preflight transform)"

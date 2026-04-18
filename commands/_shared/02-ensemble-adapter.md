@@ -337,7 +337,7 @@ phase_1_5_elapsed=$(( $(date +%s) - phase_1_5_start_epoch ))
     --arg name ensemble-adapter \
     --argjson elapsed "$phase_1_5_elapsed" \
     --argjson added "$external_candidate_count" \
-    '{name:$name, elapsed_sec:$elapsed, counts_by_state:{open:$added}, counts_by_disposition:{unassigned:$added}, delta:"+\($added) external"}')"
+    '{name:$name, elapsed_sec:$elapsed, counts_by_state:{open:$added}, counts_by_disposition:{pending_validation:$added}, delta:"+\($added) external"}')"
 ```
 
 Where `coderabbit_status` is one of `success|failed|skipped|timed_out`

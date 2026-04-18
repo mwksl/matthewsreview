@@ -350,7 +350,7 @@ total_candidates=$(~/.claude/commands/_shared/tools/artifact-read.sh \
     --arg name detection \
     --argjson elapsed "$phase_1_elapsed" \
     --argjson total "$total_candidates" \
-    '{name:$name, elapsed_sec:$elapsed, counts_by_state:{open:$total}, counts_by_disposition:{unassigned:$total}, delta:"+\($total) open"}')"
+    '{name:$name, elapsed_sec:$elapsed, counts_by_state:{open:$total}, counts_by_disposition:{pending_validation:$total}, delta:"+\($total) open"}')"
 ```
 
 Capture `phase_1_start_epoch` via `phase_1_start_epoch=$(date +%s)` immediately

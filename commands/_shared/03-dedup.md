@@ -85,6 +85,16 @@ as-is.
 `sources` and `source_families` arrays across all group members into the
 keeper. Delete every non-keeper.
 
+**`origin_confidence` on merge.** The keeper's existing
+`origin_confidence` stays. If the group members disagree
+(e.g. internal L2 `high` + external candidate `low`), this means
+first-id-wins deterministically. The rationale: internal findings
+typically hold lower ids (Phase 1 writes first; Phase 1.5 appends
+later), so the internal high-confidence signal wins over external
+low-confidence corroboration. If you want the merged keeper to adopt
+the HIGHER confidence explicitly, add a `--set origin_confidence=<v>`
+after the union patch — but by default leave it alone.
+
 Concretely, for each group `[K, D1, D2, ...]` (K = keeper, Di = dupes):
 
 1. Read the current state of every id in the group:
@@ -146,7 +156,7 @@ merged=$(( pre_dedup_count - post_count ))
     --argjson elapsed "$phase_2_elapsed" \
     --argjson survivors "$post_count" \
     --argjson merged "$merged" \
-    '{name:"dedup", elapsed_sec:$elapsed, counts_by_state:{open:$survivors}, counts_by_disposition:{unassigned:$survivors}, delta:"-\($merged) merged"}')"
+    '{name:"dedup", elapsed_sec:$elapsed, counts_by_state:{open:$survivors}, counts_by_disposition:{pending_validation:$survivors}, delta:"-\($merged) merged"}')"
 ```
 
 Capture `phase_2_start_epoch` and `pre_dedup_count` at the top of Phase 2

@@ -193,8 +193,9 @@ elif [[ -n "$existing_comment_id" ]]; then
     publish_args+=(--comment-id "$existing_comment_id")
 fi
 
-stdout=$(~/.claude/commands/_shared/tools/artifact-publish.sh "${publish_args[@]}")
-publish_exit=$?
+stdout=$(~/.claude/commands/_shared/tools/artifact-publish.sh "${publish_args[@]}") \
+    || publish_exit=$?
+publish_exit=${publish_exit:-0}
 ```
 
 Note the unquoted tilde — Bash expands `~/` only when it's not inside

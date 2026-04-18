@@ -110,12 +110,20 @@ write to `trace.md` with tag `phase_5_parse_failed` and skip this step
 — the artifact stays without `cross_cutting_groups` set. It's observability
 that's missing, not correctness: the pipeline proceeds to Phase 6.
 
-If parsing succeeds, write the groups to the artifact. Write the group
-JSON to a tmpfile so `--set-json` can use `@file` form (groups can be
-large if there are many cross-cutting interactions):
+If parsing succeeds, extract `.cross_cutting_groups` from the sub-
+agent's outer envelope (same pattern as 05-validation.md step 4.4 —
+the sub-agent returns `{cross_cutting_groups: [...],
+per_finding_annotations: [...]}`; schema's
+`artifact.cross_cutting_groups` is the array only, not the envelope).
+Write the groups to a tmpfile so `--set-json` can use `@file` form
+(groups can be large if there are many cross-cutting interactions):
 
 ```bash
-echo "$cc_groups_json" > "/tmp/adams-review-ccg-$review_id.json"
+# If the sub-agent already returned just the groups array, the `// .`
+# fallback preserves the value. If it returned the outer envelope,
+# we pluck the inner array.
+jq -c '.cross_cutting_groups // .' <<<"$subagent_response_json" \
+    > "/tmp/adams-review-ccg-$review_id.json"
 ~/.claude/commands/_shared/tools/artifact-patch.py \
   --path "$artifact_path" \
   --set-json "cross_cutting_groups=@/tmp/adams-review-ccg-$review_id.json"
