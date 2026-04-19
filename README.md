@@ -1,11 +1,12 @@
 # adams-review
 
-Build repo for two personal Claude Code slash commands:
+Build repo for three personal Claude Code slash commands:
 
 - **`/adams-review`** — multi-lens code review of a branch or PR (phases 0–6).
 - **`/adams-review-fix`** — automated fix loop for auto-fixable findings surfaced by `/adams-review` (phases 7–9).
+- **`/adams-review-promote`** — human override that promotes a single finding to auto-fixable (bypasses the Phase 8 impact_type lane filter and score threshold; see DESIGN §27).
 
-Both commands live under `commands/_shared/` and are consumed from `~/.claude/commands/` via symlink (see *Layout* below).
+All three live under `commands/` (with phase fragments under `commands/_shared/`) and are consumed from `~/.claude/commands/` via symlink (see *Layout* below).
 
 ## Documents
 

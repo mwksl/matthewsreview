@@ -12,12 +12,13 @@ grep -n '2026-04-18'  docs/BUILD.md       # everything that happened that day
 
 ## What this repo is
 
-Build repo for two personal Claude Code slash commands:
+Build repo for three personal Claude Code slash commands:
 
 - **`/adams-review`** — multi-lens code review of a branch or PR (Phases 0–6).
 - **`/adams-review-fix`** — automated fix loop for auto-fixable findings (Phases 7–9).
+- **`/adams-review-promote`** — human override that promotes a single finding to auto-fixable, bypassing the Phase 8 impact_type lane filter and score threshold (see DESIGN §27). Metadata-only; run `/adams-review-fix` afterwards to apply.
 
-Both are **built and in production use** as of 2026-04-18 (Stages 1, 2, 2.5, 2.6, 2.7, 2.8, 3 closed). The only unexecuted scope is Stage 4 (fragment shrink), scoped in `plans/stage-4-fragment-shrink.md`.
+All three are **built and in production use** as of 2026-04-18 (Stages 1, 2, 2.5, 2.6, 2.7, 2.8, 3 closed). The only unexecuted scope is Stage 4 (fragment shrink), scoped in `plans/stage-4-fragment-shrink.md`.
 
 ## Layout
 
