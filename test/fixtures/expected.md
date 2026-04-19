@@ -8,15 +8,15 @@
 **Sub-agent tokens:** 12,000 across 8 invocations
 
 Found 7 findings across all lanes:
-- Deep lane (correctness/security): 1 resolved, 1 confirmed-manual, 1 uncertain
-- Light lane (ux/policy/architecture): 1 confirmed-auto, 1 uncertain
+- Deep lane (correctness/security): 1 resolved, 1 manual, 1 uncertain
+- Light lane (ux/policy/architecture): 1 auto-fixable, 1 uncertain
 - Pre-existing (high-confidence origin, report-only): 1
 
 ---
 
 ## Deep lane — correctness & security
 
-### ✓ Auto-fixable (1) — `disposition: confirmed_auto | partial | regression | resolved`
+### ✓ Auto-fixable (1)
 
 | # | Score | Impact | File | Issue | Status |
 |---|-------|--------|------|-------|--------|
@@ -33,13 +33,15 @@ Found 7 findings across all lanes:
 
 </details>
 
-### ⚠ Requires manual attention (1) — `disposition: confirmed_manual`
+### ⚠ Requires manual attention (1)
+
+_Not touched by `/adams-review-fix` by default. To force-apply as auto-fix, run `/adams-review-promote <finding_id>`._
 
 | # | Score | Impact | File | Issue | Why manual |
 |---|-------|--------|------|-------|-------------|
 | F002 | 78 | correctness | `src/billing/invoice.ts:55-80` | Partial-refund branch incomplete | design decision; needs product input |
 
-### ℹ Uncertain (1) — `disposition: uncertain`
+### ℹ Uncertain (1)
 
 | # | Score | Impact | File | Issue |
 |---|-------|--------|------|-------|
@@ -50,12 +52,14 @@ further investigation with fresh context.
 
 ## Light lane — ux, policy, architecture
 
+_Light-lane findings are not touched by `/adams-review-fix` by default — including rows labeled auto-fixable. To force-apply any row as auto-fix, run `/adams-review-promote <finding_id>`._
+
 | # | Score | Impact | File | Finding | Disposition |
 |---|-------|--------|------|---------|-------------|
-| F004 | 60 | ux | `src/components/DeleteButton.tsx:12` | Missing loading state on destructive action | confirmed_auto |
+| F004 | 60 | ux | `src/components/DeleteButton.tsx:12` | Missing loading state on destructive action | auto-fixable |
 | F006 | 48 | architecture | `src/models/preferences.ts:15-22` | Deprecated pattern used in new code path | uncertain |
 
-## Pre-existing — report-only (1) — `disposition: pre_existing_report`
+## Pre-existing — report-only (1)
 
 Shown only when `origin_confidence: high`. Never auto-fixed in v1 (§13.1 pre-existing override).
 

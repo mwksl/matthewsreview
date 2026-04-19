@@ -28,16 +28,19 @@ import _common as c  # noqa: E402
 
 MARKER = "<!-- adams-review-v1 -->"
 
-# Disposition → (section ordering key, human label, glyph).
+# Disposition → (section ordering key, section label, glyph, short label).
+# `section label` titles sections; `short label` appears in summary bullets and
+# the Light-lane Disposition cell. Raw enum values never appear in rendered
+# output — they stay machine-facing in artifact.json.
 SECTION_LABEL = {
-    "confirmed_auto": ("01", "Auto-fixable", "✓"),
-    "confirmed_manual": ("02", "Requires manual attention", "⚠"),
-    "uncertain": ("03", "Uncertain", "ℹ"),
-    "confirmed_report": ("04", "Confirmed — informational", "ℹ"),
-    "pre_existing_report": ("05", "Pre-existing — report-only", "ℹ"),
-    "partial": ("06", "Partially fixed (retry-eligible)", "⚠"),
-    "regression": ("07", "Regression (reverted; retry-eligible)", "✗"),
-    "resolved": ("08", "Resolved", "✓"),
+    "confirmed_auto": ("01", "Auto-fixable", "✓", "auto-fixable"),
+    "confirmed_manual": ("02", "Requires manual attention", "⚠", "manual"),
+    "uncertain": ("03", "Uncertain", "ℹ", "uncertain"),
+    "confirmed_report": ("04", "Confirmed — informational", "ℹ", "informational"),
+    "pre_existing_report": ("05", "Pre-existing — report-only", "ℹ", "pre-existing"),
+    "partial": ("06", "Partially fixed (retry-eligible)", "⚠", "partial"),
+    "regression": ("07", "Regression (reverted; retry-eligible)", "✗", "regression"),
+    "resolved": ("08", "Resolved", "✓", "resolved"),
 }
 
 DEEP_AUTO_FIX_DISPOSITIONS = ("confirmed_auto", "partial", "regression", "resolved")
@@ -179,7 +182,7 @@ def render_summary(buckets):
                  "confirmed_manual", "confirmed_report", "uncertain"):
         n = len(deep(disp))
         if n:
-            deep_bits.append(f"{n} {disp.replace('_', '-')}")
+            deep_bits.append(f"{n} {SECTION_LABEL[disp][3]}")
 
     light_bits = []
     # `uncertain` included: §13.1 Phase-4 rule "score 45-59 → uncertain" applies
@@ -189,7 +192,7 @@ def render_summary(buckets):
     for disp in ("confirmed_auto", "confirmed_manual", "confirmed_report", "uncertain"):
         n = len(light(disp))
         if n:
-            light_bits.append(f"{n} {disp.replace('_', '-')}")
+            light_bits.append(f"{n} {SECTION_LABEL[disp][3]}")
 
     pre_existing_n = len(buckets.get("pre_existing_report", []))
 
@@ -219,7 +222,7 @@ def render_deep_auto(buckets, cross_cutting_groups):
     show_status = any(f.get("fix_attempts") for f in rows)
 
     lines = []
-    lines.append(f"### ✓ Auto-fixable ({len(rows)}) — `disposition: confirmed_auto | partial | regression | resolved`")
+    lines.append(f"### ✓ Auto-fixable ({len(rows)})")
     lines.append("")
     if show_status:
         lines.append("| # | Score | Impact | File | Issue | Status |")
@@ -292,8 +295,10 @@ def _finding_detail(f):
         lines.append(
             f"**Human-confirmed:** @{hc.get('reviewer', '?')} at {hc.get('ts', '?')} — {hc.get('reason', '')}"
         )
+        pf_disp = pf.get("disposition")
+        pf_disp_label = SECTION_LABEL[pf_disp][3] if pf_disp in SECTION_LABEL else "?"
         lines.append(
-            f"_Promoted from disposition=`{pf.get('disposition', '?')}` / "
+            f"_Promoted from disposition=`{pf_disp_label}` / "
             f"actionability=`{pf.get('actionability', '?')}` / "
             f"score_phase4={pf.get('score_phase4')}_"
         )
@@ -353,9 +358,14 @@ def render_deep_other(buckets, disposition):
     rows = [f for f in buckets.get(disposition, []) if f.get("validation_lane") == "deep"]
     if not rows:
         return ""
-    _, label, glyph = SECTION_LABEL[disposition]
-    lines = [f"### {glyph} {label} ({len(rows)}) — `disposition: {disposition}`", ""]
+    _, label, glyph, _short = SECTION_LABEL[disposition]
+    lines = [f"### {glyph} {label} ({len(rows)})", ""]
     if disposition == "confirmed_manual":
+        lines.append(
+            "_Not touched by `/adams-review-fix` by default. "
+            "To force-apply as auto-fix, run `/adams-review-promote <finding_id>`._"
+        )
+        lines.append("")
         lines.append("| # | Score | Impact | File | Issue | Why manual |")
         lines.append("|---|-------|--------|------|-------|-------------|")
         for f in rows:
@@ -393,12 +403,19 @@ def render_light_lane(buckets):
     if not rows:
         return ""
     lines = ["## Light lane — ux, policy, architecture", ""]
+    if any(f.get("disposition") in ("confirmed_auto", "confirmed_manual") for f in rows):
+        lines.append(
+            "_Light-lane findings are not touched by `/adams-review-fix` by default — "
+            "including rows labeled auto-fixable. To force-apply any row as auto-fix, "
+            "run `/adams-review-promote <finding_id>`._"
+        )
+        lines.append("")
     lines.append("| # | Score | Impact | File | Finding | Disposition |")
     lines.append("|---|-------|--------|------|---------|-------------|")
     for f in rows:
         lines.append(
             f"| {f.get('id')} | {f.get('score_phase4') or ''} | {f.get('impact_type', '?')} | "
-            f"{file_link(f)} | {_claim_with_promotion(f)} | {f.get('disposition', '')} |"
+            f"{file_link(f)} | {_claim_with_promotion(f)} | {SECTION_LABEL[f['disposition']][3]} |"
         )
     return "\n".join(lines)
 
@@ -407,7 +424,7 @@ def render_pre_existing(buckets):
     rows = buckets.get("pre_existing_report", [])
     if not rows:
         return ""
-    lines = [f"## Pre-existing — report-only ({len(rows)}) — `disposition: pre_existing_report`", ""]
+    lines = [f"## Pre-existing — report-only ({len(rows)})", ""]
     lines.append("Shown only when `origin_confidence: high`. Never auto-fixed in v1 (§13.1 pre-existing override).")
     lines.append("")
     lines.append("| # | Score | File | Finding | Follow-up |")

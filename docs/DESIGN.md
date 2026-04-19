@@ -780,15 +780,15 @@ The rendered report is a set of filtered views over `findings[]`. **Section sele
 **Sub-agent tokens:** 482,301 across 34 invocations
 
 Found 9 findings across all lanes:
-- Deep lane (correctness/security): 4 confirmed-auto, 1 confirmed-manual, 1 uncertain
-- Light lane (ux/policy/architecture): 1 confirmed-auto, 1 confirmed-manual
+- Deep lane (correctness/security): 4 auto-fixable, 1 manual, 1 uncertain
+- Light lane (ux/policy/architecture): 1 auto-fixable, 1 manual
 - Pre-existing (high-confidence origin, report-only): 1
 
 ---
 
 ## Deep lane — correctness & security
 
-### ✓ Auto-fixable (4) — `disposition: confirmed_auto`
+### ✓ Auto-fixable (4)
 
 | # | Score | Impact | File | Issue |
 |---|-------|--------|------|-------|
@@ -801,13 +801,15 @@ Found 9 findings across all lanes:
 
 <details><summary>Details and fix proposals</summary>... per-finding rich blocks ...</details>
 
-### ⚠ Requires manual attention (1) — `disposition: confirmed_manual`
+### ⚠ Requires manual attention (1)
+
+_Not touched by `/adams-review-fix` by default. To force-apply as auto-fix, run `/adams-review-promote <finding_id>`._
 
 | # | Score | Impact | File | Issue | Why manual |
 |---|-------|--------|------|-------|-------------|
 | F005 | 78 | correctness | `src/billing/invoice.ts:55-80` | Partial-refund branch incomplete | design decision; needs product input |
 
-### ℹ Uncertain (1) — `disposition: uncertain`
+### ℹ Uncertain (1)
 
 | # | Score | Impact | File | Issue |
 |---|-------|--------|------|-------|
@@ -820,14 +822,16 @@ further investigation with fresh context.
 
 ## Light lane — ux, policy, architecture
 
+_Light-lane findings are not touched by `/adams-review-fix` by default — including rows labeled auto-fixable. To force-apply any row as auto-fix, run `/adams-review-promote <finding_id>`._
+
 | # | Score | Impact | File | Finding | Disposition |
 |---|-------|--------|------|---------|-------------|
-| F007 | 60 | ux | `src/components/DeleteButton.tsx:12` | Missing loading state on destructive action | confirmed_manual |
-| F008 | 65 | policy | `src/utils/array.ts:4` | Should use `Array.from` per CLAUDE.md | confirmed_auto |
+| F007 | 60 | ux | `src/components/DeleteButton.tsx:12` | Missing loading state on destructive action | manual |
+| F008 | 65 | policy | `src/utils/array.ts:4` | Should use `Array.from` per CLAUDE.md | auto-fixable |
 
 ---
 
-## Pre-existing — report-only (1) — `disposition: pre_existing_report`
+## Pre-existing — report-only (1)
 
 Shown only when `origin_confidence: high`. Never auto-fixed in v1 (§13.1 pre-existing override).
 

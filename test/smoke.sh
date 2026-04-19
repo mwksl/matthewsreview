@@ -718,10 +718,10 @@ fi
 # surfaces with a clear "light uncertain dropped" signal rather than a generic
 # rendering diff.
 if grep -q "^| F006 | 48 | architecture |" "$MD" \
-    && grep -q "1 confirmed-auto, 1 uncertain" "$MD"; then
+    && grep -q "1 auto-fixable, 1 uncertain" "$MD"; then
     pass "Y: Light-lane uncertain finding renders in table + summary (Stage 2.5.D)"
 else
-    fail "Y: expected F006 row + 'confirmed-auto, 1 uncertain' in $MD" "$(cat "$MD")"
+    fail "Y: expected F006 row + '1 auto-fixable, 1 uncertain' in $MD" "$(cat "$MD")"
 fi
 
 # X. --apply-decisions rejects a confirmed-band tuple that omits actionability.
