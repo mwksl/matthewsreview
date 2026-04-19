@@ -227,7 +227,7 @@ def render_deep_auto(buckets, cross_cutting_groups):
         for f in rows:
             lines.append(
                 f"| {f.get('id')} | {f.get('score_phase4') or f.get('score_phase3') or ''} | "
-                f"{f.get('impact_type', '?')} | {file_link(f)} | {f.get('claim', '')} | "
+                f"{f.get('impact_type', '?')} | {file_link(f)} | {_claim_with_promotion(f)} | "
                 f"{status_cell(f)} |"
             )
     else:
@@ -236,7 +236,7 @@ def render_deep_auto(buckets, cross_cutting_groups):
         for f in rows:
             lines.append(
                 f"| {f.get('id')} | {f.get('score_phase4') or f.get('score_phase3') or ''} | "
-                f"{f.get('impact_type', '?')} | {file_link(f)} | {f.get('claim', '')} |"
+                f"{f.get('impact_type', '?')} | {file_link(f)} | {_claim_with_promotion(f)} |"
             )
 
     # Cross-cutting group callouts that include any of our rows.
@@ -264,6 +264,14 @@ def render_deep_auto(buckets, cross_cutting_groups):
     return "\n".join(lines)
 
 
+def _claim_with_promotion(f):
+    """Claim cell for finding tables, suffixed with (human-confirmed) tag when promoted."""
+    claim = f.get("claim", "")
+    if f.get("human_confirmation"):
+        return f"{claim} <sub>(human-confirmed)</sub>"
+    return claim
+
+
 def _finding_detail(f):
     lines = []
     lines.append(f"#### {f.get('id')} — {f.get('claim', '')}")
@@ -278,6 +286,17 @@ def _finding_detail(f):
         lines.append(score_line)
     if f.get("reason"):
         lines.append(f"**Reason:** {f['reason']}")
+    hc = f.get("human_confirmation")
+    if hc:
+        pf = hc.get("promoted_from") or {}
+        lines.append(
+            f"**Human-confirmed:** @{hc.get('reviewer', '?')} at {hc.get('ts', '?')} — {hc.get('reason', '')}"
+        )
+        lines.append(
+            f"_Promoted from disposition=`{pf.get('disposition', '?')}` / "
+            f"actionability=`{pf.get('actionability', '?')}` / "
+            f"score_phase4={pf.get('score_phase4')}_"
+        )
 
     vr = f.get("validation_result") or {}
     evidence = vr.get("evidence") or []
@@ -379,7 +398,7 @@ def render_light_lane(buckets):
     for f in rows:
         lines.append(
             f"| {f.get('id')} | {f.get('score_phase4') or ''} | {f.get('impact_type', '?')} | "
-            f"{file_link(f)} | {f.get('claim', '')} | {f.get('disposition', '')} |"
+            f"{file_link(f)} | {_claim_with_promotion(f)} | {f.get('disposition', '')} |"
         )
     return "\n".join(lines)
 
