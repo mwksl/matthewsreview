@@ -1696,6 +1696,121 @@ else
     fail "CF-ES-2: expected exit 64 + unknown-arg; got code=$es_code stderr=$es_stderr"
 fi
 
+# ------------------------------------------------------------------ MP-* /adams-review-promote (§27)
+#
+# Covers the human_confirmation field, Phase 8 eligibility bypass
+# (§5.2.1, §13.1, §13.2), and the renderer's (human-confirmed) tag.
+# Fixture's F006 is architecture/light-lane/score=48/uncertain — the
+# canonical "would never be Phase-8-eligible without a human override"
+# case, so perfect for the eligibility-bypass assertions.
+
+MP_ART="$WORK/art-promote.json"
+cp "$ART" "$MP_ART"  # reuse the fully-populated post-stage-1 artifact
+
+# MP-1: --set-json human_confirmation=null succeeds (schema accepts null).
+if "$TOOLS/artifact-patch.py" --path "$MP_ART" --finding-id F006 \
+        --set-json human_confirmation=null >/dev/null 2>&1; then
+    pass "MP-1 (§27.3): --set-json human_confirmation=null accepted"
+else
+    fail "MP-1: --set-json human_confirmation=null should succeed"
+fi
+
+# MP-2: --set-json human_confirmation=<valid object> succeeds.
+MP_HC_VALID=$(jq -nc '{
+    reviewer: "tester@example.com",
+    reason:   "smoke test promotion",
+    ts:       "2026-04-18T12:00:00Z",
+    promoted_from: {disposition:"uncertain", actionability:"report_only", score_phase4:48}
+}')
+if "$TOOLS/artifact-patch.py" --path "$MP_ART" --finding-id F006 \
+        --set-json "human_confirmation=$MP_HC_VALID" >/dev/null 2>&1; then
+    pass "MP-2 (§27.3): --set-json human_confirmation=<valid object> accepted"
+else
+    fail "MP-2: --set-json with valid human_confirmation object should succeed"
+fi
+
+# MP-3: incomplete human_confirmation (missing promoted_from) rejected.
+# Top-level schema is anyOf: [null, <object-with-required-fields>]; jsonschema
+# reports "is not valid under any of the given schemas" with the field path
+# ($findings[N].human_confirmation) rather than naming the specific missing
+# sub-field. Grep on the field path — specific enough to prove the rejection
+# is about this field and not, say, a typo elsewhere.
+MP_HC_BAD=$(jq -nc '{reviewer: "x", reason: "y", ts: "2026-04-18T12:00:00Z"}')
+mp3_stderr=$("$TOOLS/artifact-patch.py" --path "$MP_ART" --finding-id F006 \
+        --set-json "human_confirmation=$MP_HC_BAD" 2>&1 >/dev/null); mp3_code=$?
+if [[ "$mp3_code" != "0" ]] && echo "$mp3_stderr" | grep -q "human_confirmation"; then
+    pass "MP-3 (§27.3): incomplete human_confirmation (missing promoted_from) rejected"
+else
+    fail "MP-3: expected non-zero + 'human_confirmation' in stderr; code=$mp3_code stderr=$mp3_stderr"
+fi
+
+# MP-4: F006 is NOT in Phase 8 eligible set at baseline — architecture impact_type
+# fails the lane filter, score 48 fails the 60-threshold, and no human_confirmation
+# to bypass. Asserts the unpromoted path (the failure case the bypass is designed
+# to rescue). Uses the same jq as 09-fix-execution.md step 8.1.
+MP_BASELINE="$WORK/art-promote-baseline.json"
+cp "$ART" "$MP_BASELINE"  # fresh copy, no MP-2 mutation
+mp4_ids=$(jq -r --argjson thr 60 '
+    [.findings[]
+     | select(.current_state == "open")
+     | select(.disposition == "confirmed_auto" or .disposition == "partial" or .disposition == "regression")
+     | select(
+         (.human_confirmation != null)
+         or (
+           (.impact_type == "correctness" or .impact_type == "security")
+           and (.score_phase4 != null and .score_phase4 >= $thr)
+         )
+       )
+     | .id
+    ] | join(",")
+' "$MP_BASELINE")
+if [[ ",$mp4_ids," != *,F006,* ]]; then
+    pass "MP-4 (§5.2.1, §13.1): unpromoted F006 (architecture, score=48, uncertain) is NOT Phase-8-eligible"
+else
+    fail "MP-4: F006 should be ineligible without human_confirmation; got ids=$mp4_ids"
+fi
+
+# MP-5: after promoting F006 (disposition=confirmed_auto + actionability=auto_fixable +
+# human_confirmation set), the same Phase 8 selector DOES include it. Tests the bypass.
+MP_PROMOTED="$WORK/art-promote-done.json"
+cp "$ART" "$MP_PROMOTED"
+"$TOOLS/artifact-patch.py" --path "$MP_PROMOTED" --finding-id F006 \
+    --set disposition=confirmed_auto \
+    --set actionability=auto_fixable \
+    --set-json "human_confirmation=$MP_HC_VALID" >/dev/null 2>&1 \
+    || fail "MP-5 setup: promote patch failed"
+mp5_ids=$(jq -r --argjson thr 60 '
+    [.findings[]
+     | select(.current_state == "open")
+     | select(.disposition == "confirmed_auto" or .disposition == "partial" or .disposition == "regression")
+     | select(
+         (.human_confirmation != null)
+         or (
+           (.impact_type == "correctness" or .impact_type == "security")
+           and (.score_phase4 != null and .score_phase4 >= $thr)
+         )
+       )
+     | .id
+    ] | join(",")
+' "$MP_PROMOTED")
+if [[ ",$mp5_ids," == *,F006,* ]]; then
+    pass "MP-5 (§5.2.1, §13.1, §27.6): promoted F006 IS Phase-8-eligible (bypass works)"
+else
+    fail "MP-5: F006 should be eligible after promotion; got ids=$mp5_ids"
+fi
+
+# MP-6: renderer output contains "(human-confirmed)" somewhere after promotion.
+# F006 is light-lane so it lands in render_light_lane; the helper inserts the tag
+# in both deep and light lane tables, so this also exercises _claim_with_promotion.
+MP_MD="$WORK/art-promote-done.md"
+"$TOOLS/artifact-render.py" --input "$MP_PROMOTED" --output "$MP_MD" \
+    || fail "MP-6 setup: render failed"
+if grep -q "(human-confirmed)" "$MP_MD"; then
+    pass "MP-6 (§7, §27.7): rendered artifact.md shows (human-confirmed) tag on promoted finding"
+else
+    fail "MP-6: '(human-confirmed)' tag missing from rendered output"
+fi
+
 echo
 echo "smoke: PASS ($N assertions)"
 exit 0
