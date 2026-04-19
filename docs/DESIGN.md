@@ -47,6 +47,7 @@ A secondary goal: split the monolith so review and fix can be run separately —
 |---|---|---|
 | `/adams-review` | Run the review pipeline. Pass `--ensemble` to additionally include external reviewers (Codex, CodeRabbit) in the candidate pool. Persist a structured artifact locally. | `[--ensemble]` |
 | `/adams-review-fix [threshold]` | Consume the most recent review artifact for the current branch. Apply fixes above `threshold`. Re-review against working tree before commit. May be run multiple times against the same review. | optional int, default `60` |
+| `/adams-review-promote <finding_id>` | Human override: promote a single finding to auto-fixable, bypassing the Phase 8 lane filter and score threshold. Records provenance in `human_confirmation`. See §27. | `<finding_id> [--reason "..."] [--force]` |
 
 The fix command is agnostic to how the review was produced — it only reads the artifact. `--ensemble` is a detection-phase flag only; downstream phases are identical.
 
@@ -2400,3 +2401,128 @@ This walk demonstrates rev-7's contract tightening in action:
 - `fix_group_id` values (FG-1..FG-4) are unique within this `run_id` only (item #8) — the next run may use the same ids for entirely different groupings.
 
 This is the canonical "reference trace" for what the system does when things mostly-work. Edge cases (overlap-abort, all-regression, revert failure) use the symmetric no-commit branch of §4 Phase 9e step 2.
+
+## 27. `/adams-review-promote` — human-override slash command
+
+Single-finding human override path. The automated pipeline's score and
+lane gates are calibrated conservatively (LLM validators are least
+trustworthy on subjective ux / architecture claims and on findings
+near the 45–60 score band). When a reviewer reads the PR comment and
+decides the pipeline missed a real issue, `/adams-review-promote`
+patches the artifact so the finding flows into `/adams-review-fix`'s
+eligibility set on the next run.
+
+### 27.1 Invocation
+
+```
+/adams-review-promote <finding_id> [--reason "..."] [--force]
+```
+
+- `<finding_id>` — positional, required. Matches `^F[0-9]+$`.
+- `--reason` — optional quoted string. If absent, the command prompts
+  with three canned reasons and a free-form option.
+- `--force` — required when promoting a `disposition=disproven`
+  finding (Phase 4 found positive evidence the issue isn't real;
+  force makes the human override the validator's counter-evidence
+  rather than filling a null).
+
+### 27.2 Preconditions
+
+Read the finding's current disposition. Reject or no-op per the table
+below; otherwise proceed. Trace every rejection to `trace.md` under a
+`## promote (<ts>) — rejected` block.
+
+| Current `disposition` | Action |
+|---|---|
+| `confirmed_auto` (with `human_confirmation`) | exit 0: already promoted, no-op |
+| `confirmed_auto` (validator-set) | exit 0: already confirmed_auto by Phase 4, no-op |
+| `resolved` | exit 1: fix already ran; cannot promote |
+| `disproven` without `--force` | exit 1: validator found positive evidence this isn't real; use `--force` to override |
+| `disproven` with `--force` | proceed (log warning to trace) |
+| `uncertain` / `below_gate` / `pre_existing_report` / `confirmed_manual` / `confirmed_report` / `pending_validation` / `partial` / `regression` | proceed |
+
+### 27.3 Mutations
+
+One atomic `artifact-patch.py` call writes:
+
+```
+finding.disposition        = confirmed_auto
+finding.actionability      = auto_fixable
+finding.human_confirmation = {
+  reviewer:      <git config user.email or user.name, else "unknown">,
+  reason:        <--reason arg or user-selected reason>,
+  ts:            <now, UTC ISO-8601>,
+  promoted_from: {
+    disposition:   <prior disposition>,
+    actionability: <prior actionability>,
+    score_phase4:  <prior score_phase4 — preserved, NOT mutated>
+  }
+}
+# is_actionable is derived by the helper from the new disposition.
+```
+
+`score_phase4` is explicitly NOT mutated. The validator's honest score
+stays in the artifact for audit; Phase 8 eligibility bypasses the
+score threshold via the `human_confirmation != null` selector gate
+(§5.2.1, §13.1, §13.2).
+
+### 27.4 Side effects
+
+1. **Re-render.** `artifact.md` regenerates from the patched JSON so
+   the auto-fixable table picks up the promoted finding and carries a
+   `(human-confirmed)` tag (§7 renderer).
+2. **Re-publish.** PR mode: PATCH the existing `comment_id` on the PR
+   via `artifact-publish.sh`, same path Phase 9e uses. Local mode:
+   trace-only no-op.
+3. **Trace.** Append a `## promote (<ts>)` block to `trace.md` with
+   `finding`, `reviewer`, `force`, `promoted_from`, and `reason`.
+
+Publish failures are non-fatal — the artifact patch stands; the user
+gets a final-status note telling them how to re-publish manually
+(§24.4 artifact-records-commit-before-network invariant applies).
+
+### 27.5 What it does NOT do
+
+- **Does not run `/adams-review-fix`.** Promote is metadata-only; the
+  user runs fix explicitly when ready.
+- **No batch mode.** One finding per invocation. Shell-loop for
+  multiple.
+- **No demotion / undo command.** If the user changes their mind
+  before the next fix run, they patch manually with
+  `artifact-patch.py --set-json human_confirmation=null --set
+  disposition=<prior>`. A symmetric `/adams-review-demote` is future
+  work.
+- **No re-run persistence.** Fresh `/adams-review` on the same branch
+  overwrites the artifact. A future sidecar `overrides.json` keyed by
+  claim fingerprint is sketched in `plans/manual-review-promote.md §13`.
+
+### 27.6 Interaction with Phase 8
+
+The Phase 8 selector (§5.2.1, §13.1) treats `human_confirmation != null`
+as a bypass of BOTH the impact_type lane filter and the score_phase4
+threshold. Validator-scored findings continue to pass both gates
+independently. The bypass is narrowly targeted: only the specific
+findings a human explicitly promoted skip the automatic gates.
+
+A promoted finding goes through Phase 8 → Phase 9 exactly like any
+other `confirmed_auto` finding: the fix-group agent attempts the fix,
+the Phase 9a post-fix reviewer verifies, and the finding transitions
+to `resolved` / `partial` / `regression` accordingly. `human_confirmation`
+rides along untouched — it's provenance metadata that survives the
+full fix lifecycle.
+
+### 27.7 Audit trail
+
+A reader investigating "why did this ux finding get auto-fixed?"
+traces:
+
+1. `artifact.md` auto-fixable table shows the `(human-confirmed)` tag.
+2. Details block shows the Human-confirmed line (reviewer + ts + reason)
+   and Promoted-from line (prior disposition/actionability/score).
+3. `artifact.json` stores the full `human_confirmation` object.
+4. `trace.md` has the `## promote` entry recording when + by whom.
+5. If Phase 9 resolved it, `fix_attempts[].run_id` links to the fix
+   run; if it regressed, the revert is in the same trace.
+
+Every signal needed to reconstruct the decision is local to the review
+directory — no cross-referencing Git history or external systems.
