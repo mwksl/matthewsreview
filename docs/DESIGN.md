@@ -557,16 +557,25 @@ Three extra fields do the work that extra states used to do:
 - `is_actionable` is derived: `true` iff `disposition ∈ {confirmed_auto, partial, regression}`. Writer scripts keep the two in sync. A `--set is_actionable=X` that contradicts `disposition` is rejected.
 - `current_state == resolved` ⇔ `disposition == resolved`. Any other combination is invalid.
 - `current_state == attempted` transiently has whatever `disposition` the finding had before Phase 8 ran (typically `confirmed_auto`, `partial`, or `regression`). Phase 9 updates it.
+- `human_confirmation` is absent or `null` on validator-driven findings. Set only by `/adams-review-promote` (§27). Present-and-non-null implies the human has overridden the validator's verdict; Phase 8 eligibility treats `human_confirmation != null` as a bypass of both the impact_type lane filter (§13.2) and the `score_phase4 >= threshold` gate (§13.1). The field is additive — it does not couple to `disposition` or `current_state`, and promotion does NOT mutate `score_phase4` (the validator's honest score is preserved for audit).
 
 **Phase 8 eligibility** (§13.1):
 
 ```
 current_state == open
   AND disposition ∈ {confirmed_auto, partial, regression}
-  AND score_phase4 >= threshold
+  AND (
+    human_confirmation != null                                      // §27 bypass
+    OR (
+      impact_type ∈ {correctness, security}                         // §13.2 lane filter
+      AND score_phase4 >= threshold                                 // §13.2 fix gate
+    )
+  )
 ```
 
 `partial` and `regression` both stay fix-eligible so that a subsequent `/adams-review-fix` can pick them up armed with the `revised_fix_proposal` and the prior `phase_9_finding`. Regression retries are not user-gated in v1 — the user can inspect the artifact and pass a higher threshold to exclude them if desired.
+
+A non-null `human_confirmation` (set by `/adams-review-promote`, §27) bypasses both the impact_type lane filter and the score threshold. The point of manual promotion is that a human has explicitly overridden the validator's conservative defaults; re-gating on those defaults would make promotion a no-op for exactly the cases where it matters most (ux / architecture findings, findings below threshold).
 
 `reason` remains a free-form display string (e.g. "fix partial: missed guest.ts writer") layered on top of `disposition`. Carries specificity for humans; never parsed by machine logic.
 
@@ -1204,11 +1213,18 @@ Phase 9 regression  → disposition: regression, current_state: open,     is_act
 ```
 current_state == open
   AND disposition ∈ {confirmed_auto, partial, regression}
-  AND score_phase4 >= threshold
-  (threshold default 60; user-overridable via /adams-review-fix arg)
+  AND (
+    human_confirmation != null                                      // §27 bypass
+    OR (
+      impact_type ∈ {correctness, security}                         // §13.2 lane filter
+      AND score_phase4 >= threshold                                 // default 60; /adams-review-fix arg
+    )
+  )
 ```
 
 Note that `partial` and `regression` are both retry-eligible. The v1 default lets the user re-run fix without a flag to clear residual partial/regression findings, armed with the `revised_fix_proposal` and prior `phase_9_finding` from each finding's last `fix_attempts` entry. Pass a higher threshold (e.g., `/adams-review-fix 80`) to exclude them if needed.
+
+**Manual override.** `/adams-review-promote` (§27) sets `disposition=confirmed_auto`, `actionability=auto_fixable`, and `human_confirmation=<object>` on any finding except `confirmed_auto` (no-op) and `resolved` (rejected). `disproven` requires `--force`. The existing `score_phase4` is preserved (the validator's honest score stays in the audit trail); the `human_confirmation != null` bypass above is what makes the finding fix-eligible regardless of impact_type or score.
 
 The three gating concepts remain distinct:
 
@@ -1224,6 +1240,8 @@ The three gating concepts remain distinct:
 | Fix gate | `score_phase4` (on auto_fixable deep-lane findings) | 60 (provisional) | Yes, arg to `/adams-review-fix` |
 
 Optional flag (future): `--include-light-fixes` to also fix light-lane `auto_fixable` findings (e.g., mechanical CLAUDE.md rule compliance). Off by default.
+
+**Human override precedence.** A non-null `finding.human_confirmation` (set by `/adams-review-promote`, §27) bypasses both the impact_type lane filter and the `score_phase4` threshold. The threshold above still applies to every validator-scored finding; it only ceases to apply to the specific findings a human has explicitly promoted.
 
 ### 13.3 Staleness protection
 

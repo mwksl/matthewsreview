@@ -9,15 +9,23 @@ groups survive or revert.
 ### 8.1. Compute `eligible_finding_ids`
 
 The Phase 8 fix gate filters on current_state + disposition +
-impact_type (deep lane only — §13.2) + `score_phase4 >= threshold`:
+impact_type (deep lane only — §13.2) + `score_phase4 >= threshold`.
+A non-null `human_confirmation` (set by `/adams-review-promote`, §27)
+bypasses both the impact_type lane filter AND the score threshold —
+the human has overridden the validator's conservative defaults:
 
 ```bash
 eligible_finding_ids=$(jq -r --argjson thr "$threshold" '
     [.findings[]
      | select(.current_state == "open")
      | select(.disposition == "confirmed_auto" or .disposition == "partial" or .disposition == "regression")
-     | select(.impact_type == "correctness" or .impact_type == "security")
-     | select(.score_phase4 != null and .score_phase4 >= $thr)
+     | select(
+         (.human_confirmation != null)
+         or (
+           (.impact_type == "correctness" or .impact_type == "security")
+           and (.score_phase4 != null and .score_phase4 >= $thr)
+         )
+       )
      | .id
     ] | join(",")
 ' "$artifact_path")
@@ -31,8 +39,13 @@ eligible_count=$(jq -r --argjson thr "$threshold" '
     [.findings[]
      | select(.current_state == "open")
      | select(.disposition == "confirmed_auto" or .disposition == "partial" or .disposition == "regression")
-     | select(.impact_type == "correctness" or .impact_type == "security")
-     | select(.score_phase4 != null and .score_phase4 >= $thr)
+     | select(
+         (.human_confirmation != null)
+         or (
+           (.impact_type == "correctness" or .impact_type == "security")
+           and (.score_phase4 != null and .score_phase4 >= $thr)
+         )
+       )
     ] | length
 ' "$artifact_path")
 ```
