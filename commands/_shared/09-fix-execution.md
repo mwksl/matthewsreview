@@ -148,8 +148,22 @@ Findings in this group:
 <jq output: for each finding_id in $group.finding_ids, emit the finding's
  full id, file, line_range, claim, validation_result (evidence,
  blast_radius, fix_proposal, verification_context), and — when the
- finding's latest fix_attempts entry has phase_9_outcome ∈ {partial,
- regression} — the prior phase_9_finding and revised_fix_proposal>
+ finding has human_confirmation.fix_hint set (promoted via
+ /adams-review-promote --fix-hint, §27) — a labeled block:
+
+   Human-authored fix direction (set via /adams-review-promote --fix-hint):
+   <fix_hint verbatim>
+
+   This is an explicit instruction from the reviewer. It takes
+   precedence over any ambiguity in the claim text. If the hint
+   and the claim can be reconciled, follow both; if they conflict,
+   follow the hint. If validation_result.fix_proposal.approach is
+   also present and disagrees with the hint, the hint wins — the
+   human has explicitly overridden the validator.
+
+ And — when the finding's latest fix_attempts entry has
+ phase_9_outcome ∈ {partial, regression} — the prior phase_9_finding
+ and revised_fix_proposal>
 
 Cross-cutting annotations:
 <jq output: any cross_cutting_groups entry whose finding_ids intersect

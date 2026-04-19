@@ -1339,6 +1339,35 @@ else
     fail "FX-GF-8: expected exit 1 + validation_result message; got code=$code stderr='$stderr'"
 fi
 
+# Assertion FX-GF-9: a PROMOTED finding with null validation_result is accepted
+# by the grouper — the human_confirmation override (§27) bypasses the
+# fix_proposal requirement. files_planned falls back to [finding.file].
+# Covers the §27 light-lane end-to-end path: promote → Phase 8 grouping →
+# fix-group dispatch. Without this fallback, group-fixes.py would hard-error
+# before Phase 8 ever sees the finding, nullifying the --fix-hint steering.
+GF_PROMOTED_ART="$WORK/gf-promoted.json"
+"$TOOLS/artifact-patch.py" --init "@$FIX/artifact-seed.json" --path "$GF_PROMOTED_ART" >/dev/null
+GF_PROMOTE_HC=$(jq -nc '{
+    reviewer: "tester@example.com",
+    reason:   "promote light-lane for fix",
+    ts:       "2026-04-19T12:00:00Z",
+    promoted_from: {disposition:"uncertain", actionability:"report_only", score_phase4:null},
+    fix_hint: "Update the docstring to match the code; do not modify the code."
+}')
+"$TOOLS/artifact-patch.py" --path "$GF_PROMOTED_ART" --finding-id F001 \
+    --set disposition=confirmed_auto \
+    --set current_state=open \
+    --set actionability=auto_fixable \
+    --set-json "human_confirmation=$GF_PROMOTE_HC" >/dev/null 2>&1 \
+    || fail "FX-GF-9 setup: promote patch failed"
+gf9_out=$("$GF_TOOL" --artifact "$GF_PROMOTED_ART" --eligible-finding-ids "F001" 2>"$WORK/gf9.err"); gf9_code=$?
+gf9_files=$(echo "$gf9_out" | jq -c '.[0].files_planned' 2>/dev/null)
+if [[ "$gf9_code" == "0" ]] && [[ "$gf9_files" == '["src/auth/session.ts"]' ]]; then
+    pass "FX-GF-9 (§21.5, §27): promoted finding with null validation_result groups with files_planned=[finding.file]"
+else
+    fail "FX-GF-9: expected exit 0 + files_planned=[src/auth/session.ts]; got code=$gf9_code files=$gf9_files stderr=$(cat "$WORK/gf9.err")"
+fi
+
 # ------------------------------------------------------------------ Stage 3 — apply-fix-* modes
 #
 # --apply-fix-start collapses Phase 8 step 8.4 (bulk open→attempted) to a
@@ -1862,6 +1891,65 @@ if grep -q "(human-confirmed)" "$MP_MD"; then
     pass "MP-6 (§7, §27.7): rendered artifact.md shows (human-confirmed) tag on promoted finding"
 else
     fail "MP-6: '(human-confirmed)' tag missing from rendered output"
+fi
+
+# MP-7: schema accepts human_confirmation with non-empty fix_hint string. Covers
+# the §27.3 / schema rev-adding-fix_hint path — this is the on-disk shape
+# /adams-review-promote --fix-hint "..." produces after step 5's jq build.
+MP_HC_WITH_HINT=$(jq -nc '{
+    reviewer: "tester@example.com",
+    reason:   "promote with steering",
+    ts:       "2026-04-19T12:00:00Z",
+    promoted_from: {disposition:"uncertain", actionability:"report_only", score_phase4:48},
+    fix_hint: "Update the docstring to match the code; do not modify the code."
+}')
+MP_ART_HINT="$WORK/art-promote-hint.json"
+cp "$ART" "$MP_ART_HINT"
+if "$TOOLS/artifact-patch.py" --path "$MP_ART_HINT" --finding-id F006 \
+        --set disposition=confirmed_auto \
+        --set actionability=auto_fixable \
+        --set-json "human_confirmation=$MP_HC_WITH_HINT" >/dev/null 2>&1; then
+    pass "MP-7 (§27.3, schema): human_confirmation with non-empty fix_hint accepted"
+else
+    fail "MP-7: human_confirmation with fix_hint should succeed"
+fi
+
+# MP-8: empty-string fix_hint rejected (schema minLength: 1 on the non-null branch).
+# Null or absent are both fine; empty-string is not. Guards the invariant that
+# "absent == no hint" — callers should omit the key, not pass "".
+MP_HC_EMPTY_HINT=$(jq -nc '{
+    reviewer: "tester@example.com",
+    reason:   "x",
+    ts:       "2026-04-19T12:00:00Z",
+    promoted_from: {disposition:"uncertain", actionability:"report_only", score_phase4:48},
+    fix_hint: ""
+}')
+mp8_stderr=$("$TOOLS/artifact-patch.py" --path "$MP_ART" --finding-id F006 \
+        --set-json "human_confirmation=$MP_HC_EMPTY_HINT" 2>&1 >/dev/null); mp8_code=$?
+if [[ "$mp8_code" != "0" ]] && echo "$mp8_stderr" | grep -q "human_confirmation"; then
+    pass "MP-8 (§27.3, schema): empty-string fix_hint rejected (minLength: 1)"
+else
+    fail "MP-8: expected non-zero + 'human_confirmation' in stderr; code=$mp8_code stderr=$mp8_stderr"
+fi
+
+# MP-9: renderer emits "**Fix direction:**" when fix_hint is set. Uses the same
+# rendering path MP-6 exercises; this catches the new _finding_detail branch.
+MP_MD_HINT="$WORK/art-promote-hint.md"
+"$TOOLS/artifact-render.py" --input "$MP_ART_HINT" --output "$MP_MD_HINT" \
+    || fail "MP-9 setup: render failed"
+if grep -q "Fix direction:.*Update the docstring" "$MP_MD_HINT"; then
+    pass "MP-9 (§7, §27.7): rendered artifact.md shows Fix direction line when fix_hint is set"
+else
+    fail "MP-9: '**Fix direction:**' line missing from rendered output with fix_hint"
+fi
+
+# MP-10: renderer does NOT emit "**Fix direction:**" when fix_hint is absent.
+# Reuses MP-6's MP_MD (rendered from MP_PROMOTED, whose human_confirmation has
+# no fix_hint). Guards against an accidental unconditional emit.
+if ! grep -q "Fix direction:" "$MP_MD"; then
+    pass "MP-10 (§7, §27.7): rendered artifact.md omits Fix direction line when fix_hint is absent"
+else
+    fail "MP-10: 'Fix direction:' should NOT appear when fix_hint is absent"
 fi
 
 echo

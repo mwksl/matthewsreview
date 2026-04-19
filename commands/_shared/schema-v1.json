@@ -311,6 +311,13 @@
                       ]
                     }
                   }
+                },
+                "fix_hint": {
+                  "description": "Optional human-authored steering hint surfaced to the Phase 8 fix-group agent (§19.8). Resolves ambiguity in light-lane promotions where validation_result.fix_proposal is null and the claim alone doesn't tell the fix agent which side of a code/text mismatch to change. Distinct from `reason` — `reason` is audit-focused (why I promoted); `fix_hint` is instruction-focused (how to fix). Optional; absent or null means no hint.",
+                  "anyOf": [
+                    { "type": "null" },
+                    { "type": "string", "minLength": 1 }
+                  ]
                 }
               }
             }

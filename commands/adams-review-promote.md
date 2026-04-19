@@ -1,6 +1,6 @@
 ---
 allowed-tools: Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-read.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-patch.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-validate.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-render.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-publish.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/repo-slug.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(cat:*), Bash(printf:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(tr:*), Read, AskUserQuestion
-argument-hint: "<finding_id> [--reason \"...\"] [--force]"
+argument-hint: "<finding_id> [--reason \"...\"] [--fix-hint \"...\"] [--force]"
 description: Promote a finding to auto-fixable via human override. Patches artifact, re-renders, re-publishes to PR.
 disable-model-invocation: false
 ---
@@ -16,7 +16,17 @@ eligibility bypass works.
 - `<finding_id>` (required, positional) — matches `^F[0-9]+$`. The id
   shown in the artifact's PR comment or `artifact.md`.
 - `--reason "..."` (optional) — free-form justification recorded in
-  `human_confirmation.reason`. If omitted, you'll be prompted.
+  `human_confirmation.reason`. Audit-focused ("why I promoted"). If
+  omitted, you'll be prompted.
+- `--fix-hint "..."` (optional) — free-form steering instruction
+  recorded in `human_confirmation.fix_hint` and surfaced to the
+  Phase 8 fix-group agent. Instruction-focused ("how to fix"). Use
+  this when the claim is ambiguous about which side of a code/text
+  mismatch to change (e.g. "update the docstring to match the code;
+  do not modify the code"). Auto-prompted when omitted on a
+  light-lane finding (one whose `validation_result` is null) so the
+  fix agent isn't left guessing. Deep-lane findings can still pass
+  it explicitly to override the validator's `fix_proposal.approach`.
 - `--force` (optional) — required when promoting a finding currently
   at `disposition=disproven` (validator found positive evidence it's
   wrong). Without `--force`, disproven findings reject promotion with
@@ -34,7 +44,9 @@ eligibility bypass works.
    - Anything else → proceeds.
 4. Patches the finding atomically via `artifact-patch.py`:
    `disposition=confirmed_auto`, `actionability=auto_fixable`,
-   `human_confirmation={reviewer, reason, ts, promoted_from:{...}}`.
+   `human_confirmation={reviewer, reason, ts, promoted_from:{...}, fix_hint?}`.
+   `fix_hint` is included only when provided (via flag or prompt); absent
+   otherwise so legacy-style `human_confirmation` objects remain schema-valid.
 5. Re-renders `artifact.md`.
 6. Re-publishes to the PR (PR mode) or no-ops (local mode) — the same
    `gh api PATCH` flow `/adams-review-fix` uses at Phase 9e.
@@ -53,18 +65,21 @@ headings.
 
 ### 1. Parse arguments
 
-Parse `$ARGUMENTS` (whitespace-split, respecting `"..."` quoted
-`--reason` values):
+Parse `$ARGUMENTS` (whitespace-split, respecting `"..."` quoted values
+for `--reason` and `--fix-hint`):
 
 - First token matching `^F[0-9]+$` → `finding_id`.
 - `--reason "..."` → `reason` (strip surrounding quotes).
+- `--fix-hint "..."` → `fix_hint` (strip surrounding quotes). Default:
+  empty string (treated as "absent" throughout — the jq at step 5
+  omits the key entirely when empty).
 - `--force` → `force=true` (else `false`).
 - Any other token → stop and ask the user to clarify.
 
 If no `finding_id` was provided, error-as-prompt:
 
 > ERROR: missing finding_id.
-> Valid input: /adams-review-promote F037 [--reason "..."] [--force]
+> Valid input: /adams-review-promote F037 [--reason "..."] [--fix-hint "..."] [--force]
 > Action: pass a finding id (matching `^F[0-9]+$`) as the first arg.
 
 If `--reason` was not provided, dispatch `AskUserQuestion` once with
@@ -76,6 +91,7 @@ three options:
 For the "Other" branch, ask for the free-form reason. For the two
 canned options, use the option text as `reason`. Capture the final
 `reason` string (non-empty).
+
 
 ### 2. Locate the artifact
 
@@ -160,6 +176,46 @@ For each exit-1 case, print a clear user message AND emit a one-line
 `## promote (<ts>) — rejected` block to `trace.md` so rejections are
 auditable.
 
+### 4.5. Auto-prompt for `--fix-hint` when needed
+
+Decide whether to prompt for `fix_hint` now that preconditions have
+passed. The logic keys off `$fix_hint` (possibly empty, from step 1)
+and the finding's `validation_result`:
+
+- `$fix_hint` is non-empty → skip the prompt; the user already
+  supplied a hint via the flag.
+- `$fix_hint` is empty AND `finding.validation_result` is populated
+  (the validator already supplied `fix_proposal.approach`) → skip
+  the prompt. The flag stays opt-in; users who want to override the
+  validator's approach can pass `--fix-hint` on the command line.
+- `$fix_hint` is empty AND `finding.validation_result` is `null` (no
+  validator fix_proposal exists — common for light-lane findings and
+  for deep-lane findings that Phase 4 marked `uncertain` or
+  `disproven`) → dispatch one `AskUserQuestion` whose option set
+  depends on the claim text.
+
+**Heuristic for the option set.** Lowercase the `claim` and scan for
+any of these substrings: `docstring`, `doc comment`, `jsdoc`, `tsdoc`,
+`comment`, `documentation`, `description`, `disagrees`, `mismatch`,
+`out of date`, `outdated`, `stale`. If any match, the claim is
+probably a doc/comment-vs-code mismatch; offer the canned options:
+
+- "Update the text/docstring to match the code"
+- "Update the code to match the text/docstring"
+- "Other (I'll provide the hint)"
+- "Skip — no steering hint"
+
+If none match, skip the canned options and offer only:
+
+- "Provide a hint (free-form)"
+- "Skip — no steering hint"
+
+For "Other" and "Provide a hint (free-form)", dispatch a follow-up
+`AskUserQuestion` asking for the free-form hint string. For the two
+canned options, use the option text verbatim as `fix_hint`. For
+"Skip", leave `fix_hint` empty. Capture the final `fix_hint` string
+(may be empty — empty means "no hint").
+
 ### 5. Build the human_confirmation object
 
 ```bash
@@ -173,6 +229,7 @@ hc_tmp=$(mktemp -t adams-promote-hc.XXXXXX)
 jq -n \
     --arg reviewer "$reviewer" \
     --arg reason "$reason" \
+    --arg fix_hint "${fix_hint:-}" \
     --arg ts "$ts" \
     --arg prior_disp "$curr_disp" \
     --arg prior_action "$curr_action" \
@@ -186,11 +243,15 @@ jq -n \
         actionability: $prior_action,
         score_phase4: $prior_score
       }
-    }' > "$hc_tmp"
+    }
+    + (if $fix_hint != "" then {fix_hint: $fix_hint} else {} end)' > "$hc_tmp"
 ```
 
 `$curr_score` was extracted as either a JSON integer string (e.g.,
 `"45"`) or literal `"null"`; `--argjson` parses either correctly.
+`fix_hint` is conditionally merged: omitted entirely (not literal
+`null`) when empty, so pre-promote artifacts and promotions-without-
+steering keep the legacy object shape.
 
 ### 6. Atomic patch
 
@@ -266,6 +327,7 @@ persists; user can manually re-publish with the helper).
     printf 'promoted_from: disposition=%s actionability=%s score_phase4=%s\n' \
         "$curr_disp" "$curr_action" "$curr_score"
     printf 'reason: %s\n' "$reason"
+    [[ -n "${fix_hint:-}" ]] && printf 'fix_hint: %s\n' "$fix_hint"
     printf '\n'
 } >> "$trace_log_path"
 ```
@@ -285,6 +347,16 @@ Promoted $finding_id:
 Next: run /adams-review-fix to apply this and any other
 confirmed_auto/partial/regression findings.
 ```
+
+When `fix_hint` is non-empty, append one additional line to the block
+BEFORE the blank line and `Next:` footer:
+
+```
+  fix_hint:       $fix_hint
+```
+
+Omit the line entirely when `fix_hint` is empty — keeps the summary
+tidy for promotions that didn't need steering.
 
 If the publish step failed, append:
 

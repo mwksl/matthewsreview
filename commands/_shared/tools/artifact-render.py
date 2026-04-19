@@ -302,6 +302,9 @@ def _finding_detail(f):
             f"actionability=`{pf.get('actionability', '?')}` / "
             f"score_phase4={pf.get('score_phase4')}_"
         )
+        fix_hint = hc.get("fix_hint")
+        if fix_hint:
+            lines.append(f"**Fix direction:** {fix_hint}")
 
     vr = f.get("validation_result") or {}
     evidence = vr.get("evidence") or []
@@ -417,6 +420,17 @@ def render_light_lane(buckets):
             f"| {f.get('id')} | {f.get('score_phase4') or ''} | {f.get('impact_type', '?')} | "
             f"{file_link(f)} | {_claim_with_promotion(f)} | {SECTION_LABEL[f['disposition']][3]} |"
         )
+
+    promoted_rows = [f for f in rows if f.get("human_confirmation")]
+    if promoted_rows:
+        lines.append("")
+        lines.append("<details><summary>Promoted findings — details</summary>")
+        for f in promoted_rows:
+            lines.append("")
+            lines.append(_finding_detail(f))
+        lines.append("")
+        lines.append("</details>")
+
     return "\n".join(lines)
 
 

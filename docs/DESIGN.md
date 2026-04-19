@@ -1731,7 +1731,7 @@ For each group, give a single `combined_approach`. **Only group when combining i
 
 ### 19.8 Phase 8 — fix-group agent (Opus per group)
 
-**Input:** all findings in the group + cross-cutting annotation (if any) + CLAUDE.md paths + prior `fix_attempts` for any findings whose latest attempt was `partial` or `regression` + union of files in the group.
+**Input:** all findings in the group + cross-cutting annotation (if any) + CLAUDE.md paths + prior `fix_attempts` for any findings whose latest attempt was `partial` or `regression` + union of files in the group + any finding's `human_confirmation.fix_hint` when set (labeled "Human-authored fix direction" in the prompt; takes precedence over claim-text ambiguity and over the validator's `fix_proposal.approach` when they conflict — see §27.6).
 
 **Output** (must match this shape verbatim; Phase 9b revert logic depends on the exact fields):
 
@@ -1913,6 +1913,8 @@ The orchestrator passes `artifact.reviewed_files_all` as the `--reviewed-files` 
 5. Emit JSON: `[{id: "FG-N", finding_ids: [...], files: [...]}]`.
 
 **Invariants:** pathological case (everything shares a file) collapses to one group. Disjoint-file singletons stay singletons.
+
+**Promoted-finding fallback (§27).** When an eligible finding has `human_confirmation != null` (promoted via `/adams-review-promote`) AND `validation_result` is `null` OR lacks `fix_proposal.files_to_modify`, the grouper accepts the finding and falls back to `[finding.file]` as its single planned file. This preserves the §27 bypass for Phase 8: a light-lane promotion (or a deep-lane promotion of an uncertain/disproven finding) no longer aborts the grouper for lack of Phase-4 `fix_proposal`. The human override stands in for the validator's file plan. Non-promoted findings with null `validation_result` / missing `fix_proposal` continue to hard-error — the fallback is narrowly scoped to `human_confirmation != null`.
 
 ### 21.6 Simpler scripts
 
@@ -2426,12 +2428,26 @@ eligibility set on the next run.
 ### 27.1 Invocation
 
 ```
-/adams-review-promote <finding_id> [--reason "..."] [--force]
+/adams-review-promote <finding_id> [--reason "..."] [--fix-hint "..."] [--force]
 ```
 
 - `<finding_id>` — positional, required. Matches `^F[0-9]+$`.
-- `--reason` — optional quoted string. If absent, the command prompts
-  with three canned reasons and a free-form option.
+- `--reason` — optional quoted string. Audit-focused ("why I
+  promoted"). If absent, the command prompts with three canned
+  reasons and a free-form option.
+- `--fix-hint` — optional quoted string. Instruction-focused ("how
+  to fix"). Surfaced to the Phase 8 fix-group agent alongside the
+  finding's claim and `validation_result`. When absent AND the
+  finding has `validation_result == null` (no validator
+  `fix_proposal.approach` to fall back on — the common case for
+  light-lane findings and for deep-lane findings Phase 4 marked
+  `uncertain`/`disproven`), the command prompts with a
+  claim-text-heuristic option set: doc/comment-vs-code canned picks
+  plus free-form and skip when the claim mentions
+  docs/comments/mismatch; just free-form and skip otherwise.
+  Findings with `validation_result` populated can still pass
+  `--fix-hint` explicitly to override the validator's
+  `fix_proposal.approach` but are never auto-prompted.
 - `--force` — required when promoting a `disposition=disproven`
   finding (Phase 4 found positive evidence the issue isn't real;
   force makes the human override the validator's counter-evidence
@@ -2467,10 +2483,19 @@ finding.human_confirmation = {
     disposition:   <prior disposition>,
     actionability: <prior actionability>,
     score_phase4:  <prior score_phase4 — preserved, NOT mutated>
-  }
+  },
+  fix_hint?:     <--fix-hint arg or user-selected hint, when non-empty>
 }
 # is_actionable is derived by the helper from the new disposition.
+# fix_hint is OMITTED from the object (not literal null) when empty,
+# keeping pre-§14 human_confirmation objects and promotions-without-
+# steering structurally identical on disk.
 ```
+
+`fix_hint` is instruction-focused; `reason` is audit-focused. Keeping
+them separate means trace.md readers and audit reviewers can tell
+"why the human promoted" apart from "how the human told the fix
+agent to proceed." The two fields never subsume each other.
 
 `score_phase4` is explicitly NOT mutated. The validator's honest score
 stays in the artifact for audit; Phase 8 eligibility bypasses the
@@ -2486,7 +2511,8 @@ score threshold via the `human_confirmation != null` selector gate
    via `artifact-publish.sh`, same path Phase 9e uses. Local mode:
    trace-only no-op.
 3. **Trace.** Append a `## promote (<ts>)` block to `trace.md` with
-   `finding`, `reviewer`, `force`, `promoted_from`, and `reason`.
+   `finding`, `reviewer`, `force`, `promoted_from`, `reason`, and
+   — when set — `fix_hint`.
 
 Publish failures are non-fatal — the artifact patch stands; the user
 gets a final-status note telling them how to re-publish manually
@@ -2522,16 +2548,34 @@ to `resolved` / `partial` / `regression` accordingly. `human_confirmation`
 rides along untouched — it's provenance metadata that survives the
 full fix lifecycle.
 
+When `human_confirmation.fix_hint` is present, the Phase 8 fix-group
+agent (§19.8) receives it as an explicit reviewer instruction in its
+per-finding payload, labeled "Human-authored fix direction" and
+framed as taking precedence over claim-text ambiguity and — when the
+two disagree — over the validator's `fix_proposal.approach`. This
+closes the light-lane auto-fix gap where `validation_result` is
+`null` and the claim alone can't tell the agent which side of a
+code/text mismatch to change (e.g. "docstring disagrees with code":
+fix which one?). For deep-lane findings that were promoted with
+`--fix-hint`, the hint acts as an override rather than a fallback
+— the validator's approach is still provided to the agent for
+context, but the agent is instructed to follow the hint when they
+conflict.
+
 ### 27.7 Audit trail
 
 A reader investigating "why did this ux finding get auto-fixed?"
 traces:
 
 1. `artifact.md` auto-fixable table shows the `(human-confirmed)` tag.
-2. Details block shows the Human-confirmed line (reviewer + ts + reason)
-   and Promoted-from line (prior disposition/actionability/score).
-3. `artifact.json` stores the full `human_confirmation` object.
-4. `trace.md` has the `## promote` entry recording when + by whom.
+2. Details block shows the Human-confirmed line (reviewer + ts + reason),
+   the Promoted-from line (prior disposition/actionability/score), and
+   — when the promotion supplied a hint — a `Fix direction:` line with
+   the `fix_hint` verbatim.
+3. `artifact.json` stores the full `human_confirmation` object,
+   including optional `fix_hint`.
+4. `trace.md` has the `## promote` entry recording when + by whom,
+   and the `fix_hint` when set.
 5. If Phase 9 resolved it, `fix_attempts[].run_id` links to the fix
    run; if it regressed, the revert is in the same trace.
 

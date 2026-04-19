@@ -145,19 +145,29 @@ def _check_eligible(finding, fid):
         sys.exit(c.EXIT_VALIDATION)
 
     vr = finding.get("validation_result")
+    promoted = finding.get("human_confirmation") is not None
     if not isinstance(vr, dict):
+        if promoted:
+            # Promoted findings (§27) may have null validation_result when
+            # they came from Phase 4b (light lane) or from Phase 4a with a
+            # non-confirmed decision. The human override bypasses Phase 4's
+            # fix_proposal requirement; the grouper falls back to
+            # finding.file as the single planned file (see _files_planned).
+            return
         c.err_prompt(
             f"finding {fid}: validation_result is required for fix grouping (got {type(vr).__name__ if vr is not None else 'null'})",
             context="Phase 4 deep-lane validators populate validation_result. confirmed_auto findings without one would have failed schema validation earlier — so this usually means a fixture or a stale patch.",
-            action="re-run /adams-review to refresh validation_result, or exclude this finding from --eligible-finding-ids."
+            action="re-run /adams-review to refresh validation_result, or exclude this finding from --eligible-finding-ids. (Promoted findings with null validation_result are accepted — this one is not promoted.)"
         )
         sys.exit(c.EXIT_VALIDATION)
 
     fp = vr.get("fix_proposal")
     if not isinstance(fp, dict):
+        if promoted:
+            return
         c.err_prompt(
             f"finding {fid}: validation_result.fix_proposal is missing",
-            action="the validator's fix_proposal.files_to_modify drives the file-union grouping; a finding without it cannot be grouped."
+            action="the validator's fix_proposal.files_to_modify drives the file-union grouping; a finding without it cannot be grouped. (Promoted findings bypass this requirement — this one is not promoted.)"
         )
         sys.exit(c.EXIT_VALIDATION)
 
@@ -173,13 +183,20 @@ def _check_eligible(finding, fid):
 def _files_planned(finding):
     """Return the sorted unique list of files this finding plans to touch.
 
-    Pulls from validation_result.fix_proposal.files_to_modify[].file.
-    Deduped and sorted so comparisons and output are deterministic.
+    Primary source: validation_result.fix_proposal.files_to_modify[].file.
+    For promoted findings (§27) with null validation_result or missing
+    fix_proposal, falls back to [finding.file] — a single-file plan
+    targeting just the finding's own location. Deduped and sorted so
+    comparisons and output are deterministic.
     """
     vr = finding.get("validation_result") or {}
     fp = vr.get("fix_proposal") or {}
     ftm = fp.get("files_to_modify") or []
     files = {e.get("file") for e in ftm if isinstance(e, dict) and e.get("file")}
+    if not files:
+        fallback = finding.get("file")
+        if fallback:
+            files = {fallback}
     return sorted(files)
 
 

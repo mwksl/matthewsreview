@@ -51,7 +51,7 @@ Top-level command files (`~/.claude/commands/adams-review.md`, `adams-review-fix
 test/smoke.sh
 ```
 
-Expects `smoke: PASS (105 assertions)`. Every helper script and renderer path is covered. Existing assertions should stay green across changes; new helpers should add 2-3 assertions in the OC-* / FR-* / RH-* / FX-* naming style.
+Expects `smoke: PASS (122 assertions)`. Every helper script and renderer path is covered. Existing assertions should stay green across changes; new helpers should add 2-3 assertions in the OC-* / FR-* / RH-* / FX-* naming style.
 
 ## Dependencies
 
