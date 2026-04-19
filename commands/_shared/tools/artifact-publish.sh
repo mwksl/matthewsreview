@@ -22,13 +22,15 @@
 #      --review-id, exit 1 with a staleness note.
 #
 # Comment discovery (§13.4, in order):
-#   1. --comment-id passed → verify + PATCH.
-#   2. Marker search: list PR issue-comments, filter to current gh user
-#      + body contains `<!-- adams-review-v1 -->`, take most recent → PATCH
-#      + emit {"comment_id": N} to stdout (orchestrator persists via
-#      artifact-patch.py --set comment_id=N).
-#   3. Create: POST new comment → emit {"comment_id": N}.
-#   4. PATCH-fails fallback: POST new, log failure to trace.md, emit new id.
+#   1. --comment-id passed → PATCH. On PATCH failure (comment deleted
+#      out-of-band) → POST, emit new {"comment_id": N}, log fallback.
+#   2. No --comment-id → POST new comment → emit {"comment_id": N}.
+#
+# The helper never auto-discovers a prior comment via marker search.
+# Continuation intent is the caller's responsibility: fresh /adams-review
+# calls without --comment-id (→ new comment); /adams-review-fix and
+# /adams-review-promote carry the prior comment_id forward from the
+# artifact and pass it explicitly (→ edit in place). See DESIGN §13.4.
 #
 # --dry-run: exits 0 after arg validation + md-path resolution; prints the
 # resolved md path to stdout. No gh api calls. Useful for smoke tests and
@@ -49,10 +51,10 @@ Usage:
 Modes:
   pr     Post or edit the rendered artifact.md on a GitHub PR via gh.
          Requires --pr plus one of --md-path, --review-dir, or
-         (--repo-slug AND --branch). Comment discovery order:
-         --comment-id → marker search → create. Emits {"comment_id": N}
-         to stdout when a new comment is created or an existing one is
-         located via marker search.
+         (--repo-slug AND --branch). Comment discovery:
+           --comment-id → PATCH (with POST fallback on failure).
+           no --comment-id → POST a new comment.
+         Emits {"comment_id": N} to stdout on POST.
   local  No-op. If --review-dir is given, appends a one-line entry to
          <review-dir>/trace.md so the orchestrator's trace reflects
          that publish ran.
@@ -183,10 +185,6 @@ gh_owner_repo() {
     gh repo view --json nameWithOwner -q .nameWithOwner
 }
 
-gh_current_user() {
-    gh api user -q .login
-}
-
 # gh api with method + JSON body via stdin. $1=method, $2=path, $3=body-file.
 gh_send_body() {
     local method="$1" path="$2" body_file="$3"
@@ -216,11 +214,6 @@ OWNER_REPO=$(gh_owner_repo) || {
     echo "Action: run 'gh auth login' and 'gh repo view' in this directory to verify." >&2
     exit 1
 }
-CURRENT_USER=$(gh_current_user) || {
-    echo "ERROR: could not resolve current gh user via 'gh api user'" >&2
-    echo "Action: run 'gh auth status' to verify authentication." >&2
-    exit 1
-}
 
 # Build the JSON body once (GitHub comment PATCH/POST both take {"body": "..."}).
 BODY_JSON=$(mktemp -t publish-body.XXXXXX)
@@ -244,22 +237,9 @@ post_comment() {
     emit_comment_id "$new_id"
 }
 
-find_by_marker() {
-    # Returns the most-recent matching comment id, or empty if none.
-    # Filters: author == current gh user AND body contains the stable
-    # marker line (§13.4).
-    #
-    # `gh api --paginate` may emit one JSON array per page as separate
-    # top-level values (not a single merged array). Slurp (-s) and
-    # flatten with `.[][]` so we consider every page, not just the first.
-    gh api --paginate "repos/$OWNER_REPO/issues/$PR_NUM/comments" \
-        | jq -rs --arg user "$CURRENT_USER" \
-                --arg marker "<!-- adams-review-v1 -->" \
-            '[.[][] | select(.user.login == $user) | select(.body | contains($marker))]
-             | sort_by(.created_at) | last | .id // empty'
-}
-
-# Step 1: --comment-id → PATCH directly (cheapest path, no list required).
+# Step 1: --comment-id → PATCH directly. Caller (e.g. /adams-review-fix,
+# /adams-review-promote, or Phase 0 step 0.14's opt-in recovery path)
+# carried the id forward from the artifact.
 if [[ -n "$COMMENT_ID" ]]; then
     if patch_comment "$COMMENT_ID"; then
         trace_append "patched comment_id=$COMMENT_ID (passed via --comment-id)"
@@ -272,19 +252,9 @@ if [[ -n "$COMMENT_ID" ]]; then
     exit 1
 fi
 
-# Step 2: marker search → PATCH if found.
-FOUND_ID=$(find_by_marker || true)
-if [[ -n "$FOUND_ID" ]]; then
-    if patch_comment "$FOUND_ID"; then
-        emit_comment_id "$FOUND_ID"
-        trace_append "patched comment_id=$FOUND_ID (found via marker search)"
-        exit 0
-    fi
-    # PATCH fallback (rare: permissions, comment deleted between list and patch).
-    trace_append "PATCH failed for comment_id=$FOUND_ID — falling back to POST"
-fi
-
-# Step 3: create new comment.
+# Step 2: no --comment-id → create a new comment. Fresh /adams-review
+# runs land here (each invocation is a new review event; prior comments
+# on the PR are left untouched). See DESIGN §13.4.
 if post_comment; then
     trace_append "created new comment on PR #$PR_NUM"
     exit 0

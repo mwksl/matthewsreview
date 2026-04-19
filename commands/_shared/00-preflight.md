@@ -397,10 +397,15 @@ and determine the prior state (per §4 Phase 0 step 11):
 
 | Condition | AskUserQuestion prompt |
 |---|---|
-| `prior.reviewed_sha == reviewed_sha` AND no `fix_attempts` on any finding | "You have a review for this exact commit from `<date>`. Re-run fresh (replaces), or abort?" |
-| `prior.reviewed_sha == reviewed_sha` AND some finding has a `fix_attempts[-1]` whose `output_sha` matches `HEAD` | "You have a review that was already fixed at this commit. Re-run fresh (replaces), or abort?" |
-| Any finding has `current_state=open` AND `is_actionable=true` | "Previous review has unresolved actionable findings. Options: (a) run `/adams-review-fix` first, (b) proceed with fresh review (replaces prior), (c) abort." |
-| Otherwise (prior exists but HEAD has moved beyond any known sha) | "Prior review at `<prior.reviewed_sha>`. Current HEAD is `<reviewed_sha>`. Proceed with fresh review (replaces prior)?" |
+| `prior.reviewed_sha == reviewed_sha` AND no `fix_attempts` on any finding | "You have a review for this exact commit from `<date>`. Re-run fresh, or abort?" |
+| `prior.reviewed_sha == reviewed_sha` AND some finding has a `fix_attempts[-1]` whose `output_sha` matches `HEAD` | "You have a review that was already fixed at this commit. Re-run fresh, or abort?" |
+| Any finding has `current_state=open` AND `is_actionable=true` | "Previous review has unresolved actionable findings. Options: (a) run `/adams-review-fix` first, (b) proceed with fresh review, (c) abort." |
+| Otherwise (prior exists but HEAD has moved beyond any known sha) | "Prior review at `<prior.reviewed_sha>`. Current HEAD is `<reviewed_sha>`. Proceed with fresh review?" |
+
+A "fresh review" supersedes the prior local artifact (new `review_id`,
+new `review_dir`, `latest.txt` re-pointed). In PR mode it also posts a
+new PR comment — the prior comment is **not** overwritten (per §13.4).
+If you want the prior comment gone, delete it on GitHub first.
 
 If `latest.txt` is missing: skip this step.
 
@@ -416,13 +421,25 @@ gh api --paginate "repos/$(gh repo view --json nameWithOwner -q .nameWithOwner)/
        | last // empty | .id'
 ```
 
-If a comment id is returned, run `AskUserQuestion`:
-"A prior review comment exists on this PR (`<comment_url>`) with no local
-artifact. (a) proceed fresh — the prior comment will be replaced on publish
-via its comment_id; (b) abort and recover the prior artifact first."
+If a comment id is returned, run `AskUserQuestion` with three choices:
 
-If the user proceeds, capture the returned comment id as `existing_comment_id`
-to pass to `artifact-publish.sh` in Phase 6.
+- **(a) Post a new comment alongside the existing one** (default). The
+  prior comment stays on the PR untouched; this run's rendered artifact
+  lands as a fresh comment. `existing_comment_id` stays unset.
+- **(b) Replace the existing comment in place.** Captures the returned
+  comment id as `existing_comment_id`; Phase 6 will PATCH it via
+  `--comment-id`. Use this when you're rehydrating a lost local artifact
+  and want the single canonical review comment updated.
+- **(c) Abort** and recover the prior artifact first.
+
+Suggested prompt: "A prior `/adams-review` comment exists on this PR
+(`<comment_url>`) but no local artifact was found. (a) post a new
+comment (prior stays), (b) replace the prior comment in place, (c)
+abort to recover the prior artifact first."
+
+Only option (b) sets `existing_comment_id`. The publisher has no
+auto-discovery fallback (§13.4), so any run that reaches Phase 6
+without `existing_comment_id` posts a fresh comment.
 
 ### 0.15. Create the review directory and initialize the artifact
 

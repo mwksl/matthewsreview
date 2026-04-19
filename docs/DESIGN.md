@@ -127,10 +127,12 @@ In PR mode, the rendered Markdown report is posted as a PR comment so it's visib
 |---|---|
 | HEAD matches `reviewed_sha`, no fix_attempts | "You have a review for this exact commit from `<date>`. Re-run fresh (replaces), or abort?" |
 | HEAD matches most recent fix_attempt `output_sha` | "You have a review that was already fixed at this commit. Re-run fresh (replaces), or abort?" |
-| HEAD moved beyond any known SHA | "Prior review at `<sha>`. Current HEAD is `<sha>`. Proceed with fresh review (replaces prior)?" |
+| HEAD moved beyond any known SHA | "Prior review at `<sha>`. Current HEAD is `<sha>`. Proceed with fresh review?" |
 | Any finding has `current_state: open` with `is_actionable: true` | "Previous review has unresolved actionable findings. Options: (a) run `/adams-review-fix` to address, (b) proceed with fresh review, (c) abort." |
 
-13. **Prior-PR-comment detection (PR mode, even without local artifact).** If `gh api` shows a comment on this PR authored by the current `gh auth` user containing the stable marker `<!-- adams-review-v1 -->`, AND no local `latest.txt` exists (e.g. re-run from a different machine, or local reviews were cleaned), `AskUserQuestion`: "A prior review comment exists on this PR (`<comment_url>`) with no local artifact. (a) proceed fresh (the prior comment will be replaced on publish via its `comment_id`), (b) abort and recover the prior artifact first." This closes the cross-machine gap — local-only persistence is still the design, but PR state is a secondary signal that at least prevents silently orphaning prior review comments.
+A fresh review supersedes the prior local artifact; in PR mode it also posts a new PR comment alongside the prior one — the prior is **not** overwritten (§13.4). If the user wants the prior comment gone they delete it on GitHub first.
+
+13. **Prior-PR-comment detection (PR mode, even without local artifact).** If `gh api` shows a comment on this PR authored by the current `gh auth` user containing the stable marker `<!-- adams-review-v1 -->`, AND no local `latest.txt` exists (e.g. re-run from a different machine, or local reviews were cleaned), `AskUserQuestion` with three choices: (a) post a new comment alongside the existing one (default — prior stays untouched), (b) replace the existing comment in place (captures the comment id as `existing_comment_id`; Phase 6 PATCHes it via `--comment-id`), (c) abort and recover the prior artifact first. This closes the cross-machine gap — local-only persistence is still the design, but PR state is a secondary signal that at least lets the user choose whether to rehydrate onto the prior comment.
 
 A note on race conditions: two simultaneous `/adams-review` runs on the same branch would race on `latest.txt`. In practice this is a one-user tool on one machine; the risk is a stale pointer. Writes to `latest.txt` are atomic (temp file + rename), so the file itself stays readable; at worst the "latest" pointer loses a race with another run completing a few seconds later. Acceptable for v1.
 
@@ -755,7 +757,7 @@ Any other transition is an error: the helper script rejects it with a valid-tran
 - **`reviewer_sources`** (top-level) is the run-level list of reviewer providers that produced at least one candidate: `"internal"`, adapter-registry names (`"codex"`, `"coderabbit"`), and `"external-pr:<bot-login>"` entries from Phase 1.5 scrape. Distinct from each finding's `sources[]`, which is fine-grained (e.g. `"L2-structural"`, `"codex"`, `"external-pr:greptile-apps[bot]"`).
 - **`review_started_at`** is captured at Phase 0 entry **before any state mutation (push, stash)** so Phase 1.5's external-comment scrape window doesn't miss bot comments posted in the gap between push and capture.
 - **`reviewed_files_all`** is the staleness envelope (every file in the diff at review time). The narrower `reviewed_files_with_findings` (union of `finding.file` across `findings[]`) is computed at render time for display and is *not* stored. Staleness logic (§13.3) uses `reviewed_files_all`.
-- **`comment_id`** is set the first time `artifact-publish.sh` successfully posts the review comment, and is used for O(1) PATCH on subsequent publishes. If missing, publish falls back to searching by the stable `<!-- adams-review-v1 -->` marker (§13.4).
+- **`comment_id`** is set the first time `artifact-publish.sh` successfully posts the review comment. `/adams-review-fix` and `/adams-review-promote` read it and pass it forward as `--comment-id` to PATCH the same comment in place. Fresh `/adams-review` runs start with `comment_id: null` and POST a new comment — the publisher has no marker-search auto-discovery fallback (§13.4).
 - **`trivial_mode`** downshifts the pipeline (§13.9). Stored so post-mortem and `phases.jsonl` diffs can explain why certain lenses didn't run.
 - **`base_context`** records the §13.10 freshness reconciliation for this run. Optional — artifacts written before §13.10 landed (or from builds that skip the fetch, e.g., offline) still validate without it. When present, `comparison_ref` is the authoritative ref that Phase 0/1 diff-producing code actually used; `base_branch` (required, top-level) stays as the user-visible name. Renderers surface non-`fresh` states via a header line (§7).
 - **Schema validation** runs at every write boundary. Invalid writes fail loud; the orchestrator sees the error and can retry.
@@ -764,7 +766,7 @@ Any other transition is an error: the helper script rejects it with a valid-tran
 
 ## 7. Report format
 
-The rendered report is a set of filtered views over `findings[]`. **Section selectors filter on `disposition`** (§5.2.1), so report counts are deterministic derivations from the same machine-readable field Phase 8 uses. Same content in the chat mirror and the PR comment. Markdown only — no embedded JSON block. The very first line of the body is an HTML-comment stable marker so `artifact-publish.sh` can locate the prior comment regardless of `review_id` (§13.4).
+The rendered report is a set of filtered views over `findings[]`. **Section selectors filter on `disposition`** (§5.2.1), so report counts are deterministic derivations from the same machine-readable field Phase 8 uses. Same content in the chat mirror and the PR comment. Markdown only — no embedded JSON block. The very first line of the body is a stable HTML-comment marker — used by Phase 0 step 0.14's recovery lookup when a prior PR comment exists but the local artifact was wiped (§13.4).
 
 ```markdown
 <!-- adams-review-v1 -->
@@ -838,7 +840,7 @@ Shown only when `origin_confidence: high`. Never auto-fixed in v1 (§13.1 pre-ex
 🤖 Generated with Adam's Claude Code Review Command
 ```
 
-After `/adams-review-fix` runs, the primary comment is edited in place (`gh api -X PATCH` — via `comment_id` or the stable marker, §13.4). A `## Fix runs` section is appended showing each run's summary, and the "Auto-fixable" table gains a Status column with `✓ verified` / `⚠ partial` / `✗ regression (reverted)`, each linking to a commit SHA (when a commit exists — regression-group findings link to no SHA because the revert means no commit was made for them; all-regression runs have no SHA at all).
+After `/adams-review-fix` runs, the primary comment is edited in place (`gh api -X PATCH` via the `comment_id` the fix loop reads from the artifact, §13.4). A `## Fix runs` section is appended showing each run's summary, and the "Auto-fixable" table gains a Status column with `✓ verified` / `⚠ partial` / `✗ regression (reverted)`, each linking to a commit SHA (when a commit exists — regression-group findings link to no SHA because the revert means no commit was made for them; all-regression runs have no SHA at all).
 
 ---
 
@@ -1260,19 +1262,24 @@ Else:
 
 ### 13.4 Comment updating (PR mode)
 
-`/adams-review-fix` and fresh `/adams-review` runs on the same PR edit the original review comment via `gh api -X PATCH` rather than posting new. The comment is pure Markdown (no embedded JSON), so edits are straightforward.
+Each of the three top-level commands has a clear rule for how it interacts with the PR comment:
 
-**Why this matters.** A fresh `/adams-review` generates a new `review_id` — so searching by review-id-bearing markup would fail to find the prior comment and the comment would accumulate alongside each fresh run. The rev-5 marker (`**Review ID:** \`<id>\``) had exactly this bug. Rev 6 fixes it via a **stable marker** that does not vary by `review_id`.
+- **Fresh `/adams-review`** — always `POST` a new comment. Every invocation is a distinct review event; the prior comment (if any) is left untouched on the PR.
+- **`/adams-review-fix`** — always `PATCH` the prior review's comment. The fix loop inherits `comment_id` from the artifact it's fixing and passes it to the publisher via `--comment-id`, so updated state lands on the same comment the review originally posted.
+- **`/adams-review-promote`** — always `PATCH` the same comment. Promote is a metadata edit of an existing review; it reads `comment_id` from the artifact and passes it explicitly.
 
 **Comment discovery — in order:**
 
-1. **`artifact.comment_id`** — If set on the local artifact, `gh api repos/{owner}/{repo}/issues/comments/{comment_id}` to verify the comment still exists and is editable. If yes → `PATCH` in place. Cheapest path; no list required.
-2. **Stable marker search** — If `comment_id` is missing (first publish, or artifact rebuilt), list PR comments via `gh api repos/.../issues/{pr}/comments`, filter to comments authored by the current `gh auth` user whose body contains the literal HTML-comment line `<!-- adams-review-v1 -->` (this is the first line of every rendered `artifact.md`, emitted by the §7 template). Take the most recent match → `PATCH`, then record the comment id into the artifact via `artifact-patch.py --set comment_id=<id>`.
-3. **Create new** — No prior comment exists. `POST` a new one; record the returned id into `artifact.comment_id`.
+1. **`--comment-id` supplied** → `PATCH` that comment directly. Caller has established continuation intent by passing the id.
+2. **No `--comment-id`** → `POST` a new comment.
 
-**Fallback behavior.** If `PATCH` fails mid-edit (e.g., the comment was deleted out of band), fall back to creating a new comment; log the old `comment_id` to `trace.md`; update the artifact with the new id. Never leaves the user without a visible review on the PR.
+The publisher does not auto-discover a prior comment. Continuation is the caller's responsibility.
 
-**Why not embed `review_id` in the marker.** The point of the marker is stability across runs. Any marker that changes per review defeats the purpose — a new run would create a new comment rather than replace the prior. The `review_id` still appears in the human-visible part of the comment body (see §7) so the user can see which run they're looking at; it just doesn't participate in comment-discovery logic.
+**Fallback behavior.** If `PATCH` fails mid-edit (e.g., the comment was deleted out of band), fall back to `POST`; log the old `comment_id` to `trace.md`; emit the new id for the caller to persist. Never leaves the user without a visible review on the PR.
+
+**Stable marker.** Every rendered `artifact.md` still opens with `<!-- adams-review-v1 -->`. It is no longer used by the publisher, but Phase 0 step 0.14 uses it as a recovery-lookup signal: when a prior PR comment exists with no local artifact, step 0.14 finds that comment by marker and offers the user three choices — post new (default), replace-in-place (opts into PATCH by capturing the comment id as `existing_comment_id`), or abort.
+
+**Design history.** Rev 5 used a `review_id`-bearing marker and a new run posted a fresh comment alongside the prior — the review comments accumulated. Rev 6 replaced this with a stable marker and auto-PATCH-by-marker-search in the publisher, so every run edited the same comment in place. Rev 7 (this rev) removes the publisher's auto-discovery: `/adams-review` reverts to the rev-5 behavior (new comment per run), but `/adams-review-fix` and `/adams-review-promote` keep the rev-6 behavior (edit in place) by carrying `comment_id` forward from the artifact. This lets each command follow the rule that actually matches its semantics, instead of a one-size-fits-all policy in the publisher.
 
 ### 13.5 Project-configurable verification commands
 
@@ -1549,7 +1556,7 @@ Still genuinely open:
 2. Run `/adams-review` on a small real PR. Inspect `phases.jsonl`, `trace.md`, and (as needed) the sub-agent JSONL transcripts via their agentIds. Verify dedup behavior and source-family tagging; verify `disposition` values render consistently in the report sections.
 3. Run `/adams-review` on a doc-only PR. Confirm `trivial_mode = true` in the artifact and that L2/L5/L6/Phase 4a are skipped per `phases.jsonl`.
 4. Run `/adams-review --ensemble` on a PR with active bot reviewers (e.g., Greptile). Confirm Phase 1.5 scrape picks up post-`review_started_at` bot comments and the normalizer emits candidates with `origin_confidence: low`.
-5. Run a fresh `/adams-review` on a PR that already has a prior review comment. Confirm the prior comment is PATCH-replaced (via `comment_id`, else stable `<!-- adams-review-v1 -->` marker), not duplicated.
+5. Run a fresh `/adams-review` on a PR that already has a prior review comment (with the local artifact still on disk). Confirm the prior comment is **not** touched and a new comment is posted alongside it (§13.4 rev-7: each fresh run is its own event). Then separately, on a branch where the local artifact has been wiped, confirm Phase 0 step 0.14 offers (a) post new / (b) replace in place / (c) abort; picking (b) PATCHes the prior comment via `--comment-id`.
 6. Run `/adams-review-fix` against the artifact with a clean working tree. Confirm fix-group dispatch, Phase 9 pre-commit sequence, `fix_attempts` appending, `disposition` transitions, state transitions via helper script.
 7. Run `/adams-review-fix` with a dirty working tree. Confirm the clean-tree gate (§4 Phase 7 step 5) prompts via AskUserQuestion; test both `stash` and `abort` branches.
 8. Re-run `/adams-review-fix` after Phase 9 finds partials. Confirm staleness check uses most-recent-known SHA and that retry uses `revised_fix_proposal` from each finding's last `fix_attempts` entry.
@@ -1906,7 +1913,7 @@ The orchestrator passes `artifact.reviewed_files_all` as the `--reviewed-files` 
 ### 21.6 Simpler scripts
 
 - `artifact-render.py --input <json>` — runs a template that produces the Markdown report from the JSON. Template sections match §7. Markdown only; no embedded JSON data block.
-- `artifact-publish.sh --mode pr|local --review-id <id> [--pr <num>] [--comment-id <id>]` — if `pr`: run comment discovery per §13.4. Discovery order: (1) try `--comment-id` if passed (orchestrator reads `artifact.comment_id` and passes it); (2) else list PR comments via `gh api repos/{owner}/{repo}/issues/{num}/comments`, filter to comments authored by the current `gh auth` user whose body contains the literal HTML-comment line `<!-- adams-review-v1 -->` (this marker is emitted as the first line of every rendered `artifact.md` by the §7 template and is stable across `review_id` changes); take the most recent match. If found → `gh api -X PATCH` to update. Else → `gh api -X POST` to create a new comment. **Whenever a new comment is created or an existing one is located for the first time this run, emit the comment id to stdout as `{"comment_id": <n>}`** so the orchestrator can persist it into the artifact via `artifact-patch.py --set comment_id=<n>`. Fallback on `PATCH` failure: post a new comment, log the failure to `trace.md`, emit the new `comment_id` on stdout. If `local`: no-op — the rendered `artifact.md` is already written to the per-review directory by `artifact-render.py`, and `latest.txt` was set by Phase 6's artifact-init (not by publish). Local mode exists so the orchestrator can call `artifact-publish.sh` unconditionally in every mode; it logs "local mode, nothing to publish" to `trace.md` and exits 0.
+- `artifact-publish.sh --mode pr|local --review-id <id> [--pr <num>] [--comment-id <id>]` — if `pr`: run comment discovery per §13.4. Discovery order: (1) `--comment-id` supplied → `gh api -X PATCH` that comment directly; (2) no `--comment-id` → `gh api -X POST` a new comment. The publisher does not auto-discover a prior comment by marker search — continuation intent is the caller's responsibility (fresh `/adams-review` omits `--comment-id`; `/adams-review-fix` and `/adams-review-promote` read `artifact.comment_id` and pass it forward). **When a new comment is POSTed, emit the comment id to stdout as `{"comment_id": <n>}`** so the orchestrator can persist it into the artifact via `artifact-patch.py --set comment_id=<n>`. Fallback on `PATCH` failure (e.g. comment deleted out of band): POST a new comment, log the failure to `trace.md`, emit the new `comment_id` on stdout. If `local`: no-op — the rendered `artifact.md` is already written to the per-review directory by `artifact-render.py`, and `latest.txt` was set by Phase 6's artifact-init (not by publish). Local mode exists so the orchestrator can call `artifact-publish.sh` unconditionally in every mode; it logs "local mode, nothing to publish" to `trace.md` and exits 0.
 - `log-phase.sh --phase <n> --name <name> --summary <text> [--elapsed <sec>]` — appends a section to `trace.md`.
 - `log-phase.sh --phase <n> --record '<json>'` — appends a one-line record to `phases.jsonl`.
 
@@ -2164,7 +2171,7 @@ Set up in Phase 0; consumed by every later phase.
 
 | Variable | Set by | Consumed by | Notes |
 |---|---|---|---|
-| `review_id` | Phase 0 (generated ULID at artifact init) | All phases, helper scripts, render templates | Written to `latest.txt` and into `artifact.json`. Not used for comment discovery (§13.4) — that's the stable marker's job. |
+| `review_id` | Phase 0 (generated ULID at artifact init) | All phases, helper scripts, render templates | Written to `latest.txt` and into `artifact.json`. Not used for comment discovery (§13.4) — continuation intent flows through `artifact.comment_id`, which fix/promote pass forward as `--comment-id`. |
 | `artifact_path` | Phase 0 (`~/.adams-reviews/<repo-slug>/<branch>/<review_id>/artifact.json`) | All writer scripts, render, publish | Absolute path; avoid recomputing it in each fragment. |
 | `repo_root` | Phase 0 (`git rev-parse --show-toplevel`) | L2, Phase 4a, Phase 8, `claude-md-paths.sh` | Used for path resolution. |
 | `repo_slug` | Phase 0 (per §9.2 derivation) | Directory creation, `latest.txt` path | Stable across checkouts. |

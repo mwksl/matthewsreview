@@ -244,6 +244,59 @@ else
     fail "B6: expected error naming ~/.adams-reviews/$ghost_slug/ghost-branch/latest.txt; code=$code stderr=$stderr"
 fi
 
+# OC. Fresh-run-won't-overwrite (DESIGN §13.4, rev 7).
+# The publisher no longer auto-discovers a prior comment by marker. Each
+# command carries its own continuation intent: fresh /adams-review
+# omits --comment-id (→ POST); /adams-review-fix and /adams-review-promote
+# pass --comment-id read from the artifact (→ PATCH).
+
+# OC-1: find_by_marker function is gone from the publisher.
+if grep -q 'find_by_marker' "$TOOLS/artifact-publish.sh"; then
+    fail "OC-1: artifact-publish.sh still references find_by_marker"
+else
+    pass "OC-1: artifact-publish.sh no longer contains find_by_marker"
+fi
+
+# OC-2: gh_current_user helper is gone (tier-2 was its only caller).
+if grep -q 'gh_current_user' "$TOOLS/artifact-publish.sh"; then
+    fail "OC-2: artifact-publish.sh still references gh_current_user"
+else
+    pass "OC-2: artifact-publish.sh no longer resolves current gh user"
+fi
+
+# OC-3: help text no longer lists 'marker search' as an active
+# discovery step. The header's negative reference ("never auto-discovers
+# ... via marker search") is fine — it's documentation of what the
+# publisher deliberately doesn't do. Scope the check to the usage block.
+usage_txt=$("$TOOLS/artifact-publish.sh" --help 2>&1)
+if echo "$usage_txt" | grep -qi 'marker search'; then
+    fail "OC-3: --help usage still documents 'marker search' tier"
+else
+    pass "OC-3: --help usage documents two-tier discovery only"
+fi
+
+# OC-4: --comment-id path still present (tier 1 intact).
+if grep -q '\-\-comment-id' "$TOOLS/artifact-publish.sh" \
+   && grep -q 'patch_comment "$COMMENT_ID"' "$TOOLS/artifact-publish.sh"; then
+    pass "OC-4: artifact-publish.sh --comment-id → PATCH path preserved"
+else
+    fail "OC-4: --comment-id PATCH path missing"
+fi
+
+# OC-5: publisher still lints clean after the removal.
+if bash -n "$TOOLS/artifact-publish.sh" 2>/dev/null; then
+    pass "OC-5: artifact-publish.sh is syntactically valid after tier-2 removal"
+else
+    fail "OC-5: artifact-publish.sh has syntax errors"
+fi
+
+# OC-6: DESIGN §13.4 documents the new rule (fresh /adams-review POSTs).
+if grep -q 'always .POST. a new comment' "$REPO/docs/DESIGN.md"; then
+    pass "OC-6: DESIGN §13.4 documents fresh-/adams-review-POSTs rule"
+else
+    fail "OC-6: DESIGN §13.4 missing new POST-on-fresh-review rule"
+fi
+
 # C. claude-md-paths synthetic tree: root + a/CLAUDE.md expected, root-first
 mkdir -p "$WORK/cm/a/b" "$WORK/cm/a/c"
 touch "$WORK/cm/CLAUDE.md" "$WORK/cm/a/CLAUDE.md" "$WORK/cm/a/b/file.ts" "$WORK/cm/a/c/file.ts"

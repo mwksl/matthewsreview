@@ -161,17 +161,19 @@ be called in every mode, with local mode as a no-op.
 **PR mode:**
 
 First capture any `comment_id` that was persisted to the artifact
-during this run (from a prior `--init` seed via Phase 0 step 0.14, or
-from a prior same-branch run whose `latest.txt` loaded into this
-session's state):
+during this run. On a fresh `/adams-review` this is normally empty —
+the seed at step 0.15 writes `comment_id: null` unless step 0.14's
+recovery prompt populated `existing_comment_id` (user chose "replace
+prior comment in place"):
 
 ```bash
 comment_id_from_artifact=$(~/.claude/commands/_shared/tools/artifact-read.sh \
   --path "$artifact_path" --filter '.comment_id // empty' 2>/dev/null || true)
 ```
 
-Empty string means no prior comment id recorded; non-empty means we can
-short-circuit §13.4's discovery chain via PATCH directly.
+Empty string means no comment id is known — the publisher will POST a
+new comment (§13.4). Non-empty means PATCH the existing comment in
+place.
 
 Build the publish invocation:
 
@@ -184,9 +186,12 @@ publish_args=(
     --branch "$head_branch"
     --review-dir "$review_dir"
 )
-# Prefer artifact-recorded comment_id (survives across runs on the same
-# branch). Fall back to existing_comment_id from Phase 0 step 0.14 (PR
-# has a prior comment but no local artifact).
+# Prefer artifact-recorded comment_id (which step 0.15's --init seeded
+# from step 0.14's existing_comment_id if the user opted into
+# "replace prior" recovery). Fall back to existing_comment_id directly
+# for defense-in-depth if the seed missed it for any reason.
+# Omitting --comment-id on a fresh /adams-review is intentional: the
+# publisher will POST a new comment. See DESIGN §13.4.
 if [[ -n "$comment_id_from_artifact" ]]; then
     publish_args+=(--comment-id "$comment_id_from_artifact")
 elif [[ -n "$existing_comment_id" ]]; then
