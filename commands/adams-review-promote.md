@@ -138,8 +138,8 @@ table), 4.5 (`fix_hint` heuristic prompt), 5 (build
 entry) live in the shared fragment below. It reads `$finding_id`,
 `$reason`, `$fix_hint`, `$force`, `$artifact_path`, and
 `$trace_log_path` from ambient context and populates `$curr_disp`,
-`$curr_action`, `$curr_score`, `$curr_hc`, `$curr_impact`, `$ts`, and
-`$reviewer` for use in steps 7, 8, and 10 below.
+`$curr_action`, `$curr_score`, `$curr_hc`, `$ts`, and `$reviewer` for
+use in steps 7, 8, and 10 below.
 
 !`cat ~/.claude/commands/_shared/promote-core.md`
 

@@ -349,11 +349,13 @@ Post-execution once-over re-reads the extracted `promote-core.md` against the or
 
 ## 18. Pre-existing bug surfaced during execution
 
-The once-over caught that promote's `confirmed_auto` + `curr_hc == null` precondition was a blanket no-op ("already confirmed_auto by validator; no-op"). This is correct for deep-lane findings (correctness/security — already Phase-8-eligible without promote) but silently broken for light-lane findings (ux/policy/architecture — Phase 8's impact_type filter skips them, so they genuinely DO need `human_confirmation != null` to become eligible). The bug predates this stage — it was present in the original `/adams-review-promote` since commit de54b4b.
+The once-over caught that promote's `confirmed_auto` + `curr_hc == null` precondition was a blanket no-op ("already confirmed_auto by validator; no-op"). The bug predates this stage (present in the original `/adams-review-promote` since commit de54b4b) but silently broke promoting two classes of findings:
 
-Fixed in this stage because the walkthrough hits it directly — walking through a light-lane `confirmed_auto` finding (F017/F012/F013/F015/F019 in the ray-finance case study) and trying to promote would otherwise exit no-op without landing the `human_confirmation`, leaving the finding still skipped by `/adams-review-fix`. The fix splits the precondition row by `impact_type`:
+- **Light-lane `confirmed_auto`** (impact_type ∈ ux/policy/architecture) — fails the Phase 8 impact_type filter; needs `human_confirmation` to bypass (§27.6). This is the F017/F012/F013/F015/F019 class in the ray-finance session that motivated the walkthrough.
+- **Deep-lane `confirmed_auto` below the user's planned `/adams-review-fix` threshold** — fails the score gate; needs `human_confirmation` to bypass the score gate. Not specific to the walkthrough but still wrong.
 
-- deep-lane + no `human_confirmation` → exit 0 (already eligible, consistent with prior behavior)
-- light-lane + no `human_confirmation` → **proceed** (sets `human_confirmation` to unlock Phase 8 lane bypass)
+First fix attempt split the precondition row by `impact_type` (deep-lane → no-op; light-lane → proceed). That was still wrong because promote doesn't know the user's planned `/adams-review-fix` threshold — a deep-lane finding at score 55 is NOT eligible if the user runs fix at threshold 70, but my first-pass split would have declared it eligible and no-op'd the promote.
 
-Applied to `commands/_shared/promote-core.md` step 4 + DESIGN §27.2. Smoke assertion WT-0 guards against accidental revert.
+Correct fix (landed): **always proceed** when `confirmed_auto` + `curr_hc == null`, regardless of impact_type or score. Always setting `human_confirmation` is strictly necessary in the two broken cases above and harmlessly redundant for deep-lane above-threshold findings (adds audit metadata; doesn't change behavior because Phase 8 would have picked it up either way).
+
+Applied to `commands/_shared/promote-core.md` step 4 + DESIGN §27.2. Smoke assertion WT-0 guards against regression: checks the "Proceed" verdict is present on the row AND the old "already confirmed_auto by validator; no-op" text is absent.

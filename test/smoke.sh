@@ -1963,16 +1963,18 @@ fi
 PROMOTE_MD="$REPO/commands/adams-review-promote.md"
 PROMOTE_CORE_MD="$REPO/commands/_shared/promote-core.md"
 
-# WT-0: promote-core precondition distinguishes deep-lane from light-lane
-# confirmed_auto. Pre-existing-bug guard: a blanket no-op on any
-# confirmed_auto + curr_hc == null silently breaks promoting light-lane
-# findings (§27.2, §27.6). If a future edit collapses the split back,
-# this surfaces it.
-if grep -q 'confirmed_auto.*curr_hc == null.*impact.*correctness.*security' "$PROMOTE_CORE_MD" \
-   || (grep -q 'curr_impact' "$PROMOTE_CORE_MD" && grep -q 'light-lane' "$PROMOTE_CORE_MD"); then
-    pass "WT-0 (§27.2, §27.6): promote-core precondition splits confirmed_auto by impact_type lane"
+# WT-0: promote-core precondition PROCEEDS (not no-op) for confirmed_auto +
+# curr_hc == null. Pre-existing-bug guard: a blanket no-op on that row silently
+# broke promoting light-lane findings and deep-lane below-threshold findings
+# (§27.2, §27.6). If a future edit re-adds the no-op language, this surfaces.
+# Checks: (a) the precondition table contains a **Proceed.** verdict on the
+# confirmed_auto + curr_hc == null row, (b) it does NOT contain the old
+# "already confirmed_auto by validator" no-op text.
+if grep -q '`confirmed_auto` | `curr_hc == null` | \*\*Proceed' "$PROMOTE_CORE_MD" \
+   && ! grep -q "already confirmed_auto by validator.*no-op" "$PROMOTE_CORE_MD"; then
+    pass "WT-0 (§27.2, §27.6): promote-core precondition proceeds for confirmed_auto + no human_confirmation"
 else
-    fail "WT-0: promote-core.md missing lane-aware confirmed_auto precondition split"
+    fail "WT-0: promote-core.md missing 'Proceed' verdict or still has blanket no-op for confirmed_auto + no hc"
 fi
 
 # The walkthrough scope-filter jq — must stay in sync with the expression in

@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-read.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-patch.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-validate.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-render.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-publish.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/repo-slug.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(cat:*), Bash(printf:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(tr:*), Agent, Read, AskUserQuestion
+allowed-tools: Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-read.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-patch.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-validate.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-render.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-publish.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/repo-slug.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/log-tokens.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(cat:*), Bash(printf:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(tr:*), Bash(awk:*), Bash(mktemp:*), Agent, Read, AskUserQuestion
 argument-hint: "[threshold]"
 description: Walk interactively through findings /adams-review-fix would skip. Per-finding briefing + options + recommendation, then batch re-render/re-publish and post a decisions-log PR comment.
 disable-model-invocation: false
@@ -181,6 +181,19 @@ row per finding), then dispatch `AskUserQuestion` with two options:
 
 If the reviewer picks Cancel, exit 0 with a one-line note. No mutation.
 
+Before entering the loop, capture the session timestamp + reviewer
+identity. Used by step 7 (decisions-log header) and step 8 (trace
+block header). Capturing before the loop ensures a single consistent
+value across the session even though promote-core re-resolves
+`$reviewer` per iteration:
+
+```bash
+walkthrough_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+reviewer=$(git config user.email 2>/dev/null)
+[[ -z "$reviewer" ]] && reviewer=$(git config user.name 2>/dev/null)
+[[ -z "$reviewer" ]] && reviewer="unknown"
+```
+
 ### 5. Per-finding loop
 
 Initialize an in-memory decisions array in your working context. Each
@@ -264,6 +277,12 @@ tokens. Prompt (see DESIGN §28.4):
 >
 >   - Emit ONE JSON object only. No surrounding prose. No code fences.
 >   - Labels are single uppercase letters starting from A.
+>   - Every option whose title implies a fix (i.e. NOT a "skip" or
+>     "defer" option) MUST have a non-null `fix_hint_if_picked`
+>     string. A null `fix_hint_if_picked` on a fix-style option would
+>     trigger promote-core's fallback heuristic prompt and disrupt
+>     the walkthrough's UX. Skip/defer options MAY have
+>     `fix_hint_if_picked: null`.
 >   - Prefer specific `fix_hint` strings with negative constraints.
 >     Avoid vague hints like "fix the docstring" — say what to change
 >     and what not to change.
@@ -279,7 +298,7 @@ Log the agent's token count to `tokens.jsonl` per §11 / §24.4:
 
 ```bash
 ~/.claude/commands/_shared/tools/log-tokens.sh \
-    --tokens-log "$review_dir/tokens.jsonl" \
+    --review-dir "$review_dir" \
     --phase walkthrough --agent-role briefing \
     --agent-id "walkthrough-$finding_id" \
     --model sonnet --finding-id "$finding_id" \
@@ -416,11 +435,20 @@ docstring). 4 of 10 processed."). No per-iteration render or publish.
 
 ### 6. Finalize — render + publish main comment
 
-Guard: if `decisions` contains ZERO promote entries (all skip/stop),
-there's nothing to re-render or re-publish. Skip steps 6.1 and 6.2;
-jump to step 7 (decisions-log comment). The scope filter + preview
-table already showed the user what's in the backlog; a decisions-log
-with "skipped all 10" is still useful audit.
+First, tally the decision counts from the `decisions[]` array so step
+7 (decisions-log) and step 8 (trace block) can reference them:
+
+```bash
+promote_count=$(jq -s '[.[] | select(.action == "promote")] | length' <<<"$(printf '%s\n' "${decisions[@]}")")
+skip_count=$(jq   -s '[.[] | select(.action == "skip")]    | length' <<<"$(printf '%s\n' "${decisions[@]}")")
+stop_count=$(jq   -s '[.[] | select(.action == "stop")]    | length' <<<"$(printf '%s\n' "${decisions[@]}")")
+```
+
+Guard: if `promote_count == 0` (all skip/stop), there's nothing to
+re-render or re-publish. Skip steps 6.1 and 6.2; jump to step 7
+(decisions-log comment). The scope filter + preview table already
+showed the user what's in the backlog; a decisions-log with
+"skipped all 10" is still useful audit.
 
 #### 6.1. Re-render `artifact.md`
 
@@ -541,10 +569,12 @@ decisions_comment_id=$(gh api \
 rm -f "$comment_body_path"
 ```
 
-Resolve `{owner}/{repo}` from `gh repo view --json nameWithOwner -q .nameWithOwner`
-(or reuse `$repo_slug` after stripping the `github.com-` prefix — but
-the `gh` way is more robust when the slug has been mangled by
-alternate hosts).
+`gh api` auto-substitutes `{owner}` and `{repo}` placeholders with
+the current git remote's owner/repo when invoked from inside the
+repo working tree — no manual resolution needed. Run the command
+from `$repo_root` (the command file's $repo_root is already set at
+step 2; the gh process inherits working directory unless we explicitly
+cd).
 
 Capture `decisions_comment_id` into trace only (do NOT mutate the
 artifact's `comment_id`).

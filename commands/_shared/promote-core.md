@@ -65,14 +65,7 @@ curr_disp=$(jq -r '.disposition' <<<"$finding_json")
 curr_action=$(jq -r '.actionability' <<<"$finding_json")
 curr_score=$(jq -r '.score_phase4 // "null"' <<<"$finding_json")
 curr_hc=$(jq -c '.human_confirmation // null' <<<"$finding_json")
-curr_impact=$(jq -r '.impact_type' <<<"$finding_json")
 ```
-
-`curr_impact` is used by the precondition table below to distinguish
-deep-lane (correctness/security — already Phase-8-eligible when
-`confirmed_auto`) from light-lane (ux/policy/architecture — NOT
-eligible without `human_confirmation`, so promote must proceed to
-set it).
 
 `curr_score` is the literal string `"null"` when the finding is
 unscored; pass it through that way (the JSON encoder at step 5 handles
@@ -83,8 +76,7 @@ both the integer and null cases via `--argjson`).
 | `curr_disp` | Additional condition | Action |
 |---|---|---|
 | `confirmed_auto` | `curr_hc != null` | Exit 0 with: "F$N already promoted by @$reviewer on $ts; no-op." |
-| `confirmed_auto` | `curr_hc == null` AND `curr_impact ∈ {correctness, security}` | Exit 0 with: "F$N already confirmed_auto by validator (score=$curr_score) AND impact_type=$curr_impact — already Phase-8-eligible via §13.1; no-op." |
-| `confirmed_auto` | `curr_hc == null` AND `curr_impact ∉ {correctness, security}` | **Proceed.** Light-lane `confirmed_auto` needs `human_confirmation != null` to bypass the Phase 8 impact_type lane filter (§13.1, §27.6). Promote the finding. |
+| `confirmed_auto` | `curr_hc == null` | **Proceed.** Set `human_confirmation` to record the human override. May be strictly necessary (light-lane `confirmed_auto` fails the Phase 8 impact_type filter, deep-lane below-threshold `confirmed_auto` fails the score gate) or redundant-but-harmless audit (deep-lane above-threshold `confirmed_auto` was already eligible). Promote can't know the user's planned `/adams-review-fix` threshold, so always proceed. |
 | `resolved` | — | Exit 1: "F$N is resolved (fix already ran); cannot promote." |
 | `disproven` | `force == false` | Exit 1: "F$N was disproven by Phase 4 (score=$curr_score). Validator found positive evidence this isn't a real issue. Re-run with --force to override." |
 | `disproven` | `force == true` | Proceed with a warning line in trace.md: `disproven→confirmed_auto via --force`. |
@@ -94,15 +86,25 @@ For each exit-1 case, print a clear user message AND emit a one-line
 `## promote (<ts>) — rejected` block to `trace.md` so rejections are
 auditable.
 
-**Note on the light-lane confirmed_auto row.** This was previously a
-blanket no-op for any `confirmed_auto` without `human_confirmation`,
-which silently broke promoting light-lane findings (the case
-`/adams-review-walkthrough` exists to address). The split is
-intentional: deep-lane `confirmed_auto` without `human_confirmation`
-is already eligible (validator-scored above threshold), so promoting
-would be a no-op; light-lane `confirmed_auto` without
-`human_confirmation` is skipped by the lane filter, so promoting
-DOES flip it into the eligible set.
+**Note on the `confirmed_auto` + `curr_hc == null` row.** Previously a
+blanket no-op ("already confirmed_auto by validator"). That was correct
+only when the finding would also pass the §13.1 eligibility gate at
+the threshold the user plans to fix at — which promote can't know.
+Examples where the old no-op silently broke promote:
+
+- Light-lane `confirmed_auto` (impact_type ∈ ux/policy/architecture) —
+  fails the Phase 8 impact_type filter; needs `human_confirmation` to
+  bypass (§27.6). This is the case `/adams-review-walkthrough`
+  exists to address.
+- Deep-lane `confirmed_auto` below the user's planned threshold — the
+  user may run `/adams-review-fix 70` on a finding scored 55, which
+  fails the score gate; needs `human_confirmation` to bypass the
+  score gate.
+
+The current "always proceed" is correct in both cases and harmlessly
+redundant for deep-lane above-threshold findings (adds provenance
+metadata confirming the human OK'd a fix that was already going to
+happen — useful audit, not a functional change).
 
 ### Step 4.5. Auto-prompt for `fix_hint` when needed
 

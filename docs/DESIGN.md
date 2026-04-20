@@ -2462,15 +2462,14 @@ eligibility set on the next run.
 
 ### 27.2 Preconditions
 
-Read the finding's current disposition **and impact_type**. Reject
-or no-op per the table below; otherwise proceed. Trace every
-rejection to `trace.md` under a `## promote (<ts>) — rejected` block.
+Read the finding's current disposition. Reject or no-op per the
+table below; otherwise proceed. Trace every rejection to `trace.md`
+under a `## promote (<ts>) — rejected` block.
 
 | Current `disposition` | Additional condition | Action |
 |---|---|---|
 | `confirmed_auto` | `human_confirmation != null` | exit 0: already promoted, no-op |
-| `confirmed_auto` | `human_confirmation == null` AND `impact_type ∈ {correctness, security}` | exit 0: already Phase-8-eligible via §13.1 (validator-scored deep-lane); no-op |
-| `confirmed_auto` | `human_confirmation == null` AND `impact_type ∉ {correctness, security}` | **proceed.** Light-lane `confirmed_auto` needs `human_confirmation != null` to bypass the Phase 8 impact_type filter (§27.6). |
+| `confirmed_auto` | `human_confirmation == null` | **proceed.** Promote can't know the user's planned `/adams-review-fix` threshold, so always set `human_confirmation`. Strictly necessary for light-lane (fails impact_type filter) and deep-lane below-threshold (fails score gate); redundant-but-harmless audit for deep-lane above-threshold (already eligible). |
 | `resolved` | — | exit 1: fix already ran; cannot promote |
 | `disproven` | `--force` absent | exit 1: validator found positive evidence this isn't real; use `--force` to override |
 | `disproven` | `--force` present | proceed (log warning to trace) |
@@ -2679,6 +2678,12 @@ Returns strict JSON:
   "recommendation": {"label": "A" | "B" | ..., "rationale": "..."}
 }
 ```
+
+`fix_hint_if_picked` MUST be non-null for fix-style options (any
+option whose selection triggers a promote). Skip / defer options
+may have `fix_hint_if_picked: null`. A null on a fix option would
+trigger the fallback heuristic prompt in `promote-core.md` step 4.5
+and disrupt the walkthrough's single-question-per-finding rhythm.
 
 One retry on parse failure; degraded UX on second failure (raw
 finding + skip/promote-without-hint options).
