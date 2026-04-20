@@ -125,10 +125,38 @@ the dispatch turn at 1.3 is pure launches with no side effects:
 
 ```bash
 cat > "/tmp/adams-review-codex-$review_id.md" <<PROMPT
-Review the code changes in this repository between $comparison_ref and HEAD.
-Focus on potential bugs, correctness issues, security concerns, and violations
-of project conventions. Return a structured list of findings with file, line
-range, and concrete description for each.
+Review this PR as a skeptical careful reader — the kind of reviewer who
+catches bugs a linter and the test suite miss. Range: the diff between
+$comparison_ref and HEAD, plus surrounding code you need to understand it.
+
+For every function the diff adds or modifies, look for:
+- Inputs the function silently accepts that it shouldn't (prefix parsers
+  like parseFloat/parseInt accepting trailing junk; regex gates that
+  check digit shape but not range; validators that trust their input
+  where a sibling in the same file is deliberately strict).
+- Failure paths that produce misleading errors — especially try/catch
+  blocks that wrap a state-changing operation (DB commit, file rename,
+  UPSERT, network publish) together with post-commit work, so a
+  post-commit throw surfaces as "operation failed" and users retry,
+  double-applying.
+- Termination / completion invariants that aren't checked — hand-rolled
+  parsers (state machines, tokenizers, CSV/JSON/form readers) that
+  don't verify they ended in a completed state at EOF.
+- Parallel paths whose strictness has diverged — sibling parsers or
+  validators in the same file where one is strict and one isn't; two
+  filter predicates that should apply the same rule and don't; a SQL
+  JOIN that fans out because the source table has multiple rows per
+  join key.
+- Filter predicates / COALESCE / NULLIF chains that miss a value some
+  upstream writer legitimately produces (negative numbers, zero, NULL,
+  duplicate-by-type rows) — trace every writer of the column, not just
+  the happy-path writer.
+- Project-convention violations visible in nearby CLAUDE.md rules or
+  adjacent code style.
+
+Return findings as a structured list — each with file path, line range,
+and concrete prose describing the bug and why it matters. Over-report;
+downstream filtering picks up the rest.
 PROMPT
 ```
 
@@ -185,19 +213,73 @@ inherits the parent command's grants — this already covers it).
 
 Prompt essence:
 
-> For every function, type, field, or API the diff between `$comparison_ref`
-> and HEAD changes, **trace into the rest of the repo**:
+> Read like a careful human reviewer who's been handed this PR. Your
+> job is to find bugs a skilled reader would flag: the ones a linter
+> and the test suite don't catch but a careful read of the diff plus
+> surrounding code would. Over-flag; Phase 3 filters.
+>
+> **Outer pass — cross-file blast-radius.** For every function, type,
+> field, or API the diff between `$comparison_ref` and HEAD changes,
+> trace into the rest of the repo:
 > - Who calls this? Are callers updated consistently?
-> - Who writes to this field? Do all writers share the same contract?
+> - Who writes to this field? Enumerate the full range of values each
+>   writer can produce (NULL, zero, negative, empty, duplicate-by-key).
 > - Is there a parallel code path (e.g. `foo()` and `fooAsync()`) that
 >   should receive a matching change?
 > - What invariants does the surrounding code assume? Does the diff
 >   preserve them?
 >
-> Read function bodies, not just signatures. Flag contract changes,
+> **Inner pass — small-radius careful read.** For each file the diff
+> touches, also run this checklist against the changed hunks and their
+> immediate neighbors:
+>
+> 1. **Sibling parsers / validators in the same file.** If the diff
+>    adds or modifies a parser, validator, or input-sanitizer (e.g.
+>    `parseFoo`, `validateBar`, a regex `.test(…)` gate, an inquirer
+>    `validate` callback), grep the same file/module for every other
+>    parser/validator and diff their strictness. Flag asymmetry —
+>    e.g. a strict anchored regex on one path while the sibling uses
+>    `parseFloat`/`parseInt`/`Number(…)` (prefix parsers that silently
+>    accept trailing junk); a date parser that round-trips through
+>    `Date` while a sibling accepts `\d{2}/\d{2}/\d{4}` without
+>    range-checking month/day; one branch throws on unknown keys while
+>    the sibling ignores them.
+>
+> 2. **Catch scope around state-changing operations.** When the diff
+>    introduces or modifies a `try/catch` (or equivalent), identify
+>    which statements inside the `try` commit state — DB commit, file
+>    rename, UPSERT, network publish, `process.exit(0)`. If a
+>    post-commit throw would land in the same `catch` as a pre-commit
+>    throw, flag the user-facing misleading error: the operation
+>    succeeded but the user sees "failed" and retries, double-applying.
+>
+> 3. **Hand-rolled parser EOF invariants.** For any state machine,
+>    tokenizer, or CSV/JSON/form/query parser the diff adds or touches,
+>    check end-of-input handling: does the terminal state represent a
+>    completed parse, or can the parser silently accept truncated input
+>    as if it were valid (e.g. `inQuotes==true` at EOF, brace depth
+>    nonzero, expected-next-token nonempty)?
+>
+> 4. **Filter-predicate / COALESCE / NULLIF sweeps.** For any SQL,
+>    regex, or COALESCE/NULLIF chain the diff adds or modifies,
+>    enumerate every value each upstream writer can produce (use the
+>    outer-pass writer list) and verify each is handled consistently.
+>    Negative numbers, zero, NULL, empty string, duplicate rows from
+>    UNIQUE constraints that permit multiple types per key — each one
+>    is a candidate bug.
+>
+> 5. **Same-block adjacency.** Once you've found one bug in a block,
+>    reread the ±10 lines around it before moving on. List any other
+>    candidate bugs in that neighborhood as separate entries — even
+>    half-confident ones. Phase 3 filters weak candidates; a bug
+>    co-located with a known bug usually shares a fix and is cheapest
+>    to surface now.
+>
+> Read function BODIES, not just signatures. Flag contract changes,
 > nullability shifts, return-shape changes, concurrent-write assumption
-> violations, and missing matching updates in parallel paths. **This lens
-> exists specifically to catch incomplete fixes — be thorough.** Over-flag.
+> violations, and missing matching updates in parallel paths. **This
+> lens exists specifically to catch incomplete fixes and narrow bugs a
+> careful reader would see — be thorough.**
 >
 > Return a JSON array of candidates with `impact_type: "correctness"`,
 > `source_family: "structural-family"`, and the same field shape as L1.
