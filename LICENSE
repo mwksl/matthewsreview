@@ -1,0 +1,54 @@
+Copyright (c) 2026 Adam Miller. All rights reserved.
+
+SPDX-License-Identifier: LicenseRef-Proprietary
+
+This software and its source code (the "Software") are proprietary to Adam
+Miller (the "Author"). No license, right, or permission of any kind is
+granted to any person or entity by this file or by the Software's presence
+in a public repository.
+
+Without a separate written agreement signed by the Author, you may not:
+use, run, execute, copy, reproduce, modify, adapt, translate, create
+derivative works of, merge, publish, distribute, sublicense, sell, rent,
+lease, host, offer as a service, or make available the Software, in whole
+or in part, in source or object form, for any purpose, commercial or
+non-commercial.
+
+Viewing the Software via the repository interface of the hosting provider
+is not a grant of any of the foregoing rights.
+
+All rights, title, and interest in and to the Software, including all
+intellectual property rights (including, where applicable, database and
+sui generis rights), remain exclusively with the Author. The Author may
+grant rights to specific persons or entities on terms determined solely
+by the Author, by separate written agreement. Any such grant applies only
+to the named recipient and only to the rights expressly stated in that
+agreement; no other rights are implied.
+
+Contributions. If you submit any pull request, patch, suggestion, code,
+documentation, issue content, or other material to this repository or to
+the Author in connection with the Software (each, a "Contribution"), you
+grant the Author a perpetual, worldwide, non-exclusive, royalty-free,
+irrevocable, transferable, sublicensable license to use, reproduce,
+modify, prepare derivative works of, publicly display, publicly perform,
+distribute, and relicense the Contribution under any terms, including
+proprietary and commercial terms, as part of the Software or otherwise.
+You retain all rights in your Contribution and may continue to use,
+license, and distribute it as you wish; this grant is non-exclusive and
+does not transfer ownership. You represent that (a) each Contribution is
+your original work or you otherwise have the right to submit it under
+this grant; (b) to your knowledge, your Contribution does not infringe
+any third party's rights; and (c) if your Contribution is made in the
+course of employment or other engagement that may claim rights in it,
+you have the authority to make this grant. The Author is under no
+obligation to accept, incorporate, use, credit, or retain any
+Contribution. Submitting a Contribution constitutes your agreement to
+this section.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING
+FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
