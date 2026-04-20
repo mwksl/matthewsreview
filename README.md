@@ -25,9 +25,8 @@ Steps 2 and 3 can land days or weeks after step 1 — the review artifact persis
 
 ## Documents
 
-- **`CLAUDE.md`** — operational guide for Claude Code sessions working in this repo. Read first on a fresh session.
-- **`docs/DESIGN.md`** — normative design (rev 8). The spec for schema, phase behavior, and helper contracts. Consult by section (e.g., `§13.1`) when tweaking pipeline behavior.
-- **`docs/BUILD.md`** — historical build journal covering Stages 1–3 + 2.5/2.6/2.7/2.8. Archive; consult for rationale on past decisions.
+- **`CLAUDE.md`** — operational guide for Claude Code sessions working in this repo. Self-contained for routine work; read first on a fresh session.
+- **`docs/archive/`** — frozen design + build docs (2026-04-19 onward). `DESIGN.md` (rev 8) is the original normative spec; `BUILD.md` is the stage-by-stage journal. Not maintained; consult only for historical rationale behind a specific decision. See `docs/archive/README.md`.
 - **`plans/`** — per-stage plan files. Stages 1–3 + 2.5/2.6/2.7/2.8 are closed. `stage-4-fragment-shrink.md` is the one live plan.
 
 ## Dependencies
@@ -95,8 +94,10 @@ PEP 668 (Python 3.12+ with Homebrew) marks system and user site-packages as exte
 ├── CLAUDE.md                         ← operational guide (read first)
 ├── README.md                         ← this file
 ├── docs/
-│   ├── DESIGN.md                     ← normative design (rev 8)
-│   └── BUILD.md                      ← historical build journal (Stages 1–3 + hardening)
+│   └── archive/                      ← frozen historical references (not maintained)
+│       ├── README.md                 ← frozen-as-of banner
+│       ├── DESIGN.md                 ← original normative design (rev 8)
+│       └── BUILD.md                  ← build journal (Stages 1–3 + hardening + walkthrough)
 ├── plans/                            ← per-stage plans
 ├── test/                             ← smoke harness + fixtures (Stage 1)
 └── commands/
@@ -127,4 +128,4 @@ Each top-level command file needs its own symlink in `~/.claude/commands/` (see 
 
 ## Status
 
-`/adams-review` and `/adams-review-fix` are built and in use. Stages 1, 2, 2.5, 2.6, 2.7, 2.8, and 3 closed between 2026-04-17 and 2026-04-18; see `docs/BUILD.md` for the full history. The only unexecuted scope is Stage 4 (fragment shrink — `plans/stage-4-fragment-shrink.md`), still pending plan approval.
+`/adams-review` and `/adams-review-fix` are built and in use. Stages 1, 2, 2.5, 2.6, 2.7, 2.8, and 3 closed between 2026-04-17 and 2026-04-18; see `docs/archive/BUILD.md` for the full history. The only unexecuted scope is Stage 4 (fragment shrink — `plans/stage-4-fragment-shrink.md`), still pending plan approval.
