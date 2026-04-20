@@ -846,6 +846,8 @@ Shown only when `origin_confidence: high`. Never auto-fixed in v1 (§13.1 pre-ex
 
 After `/adams-review-fix` runs, the primary comment is edited in place (`gh api -X PATCH` via the `comment_id` the fix loop reads from the artifact, §13.4). A `## Fix runs` section is appended showing each run's summary, and the "Auto-fixable" table gains a Status column with `✓ verified` / `⚠ partial` / `✗ regression (reverted)`, each linking to a commit SHA (when a commit exists — regression-group findings link to no SHA because the revert means no commit was made for them; all-regression runs have no SHA at all).
 
+When `/adams-review-walkthrough` runs (§28), the primary comment is re-rendered in place via the same `comment_id` path so it reflects any newly-promoted findings. Independently, a separate **Walkthrough decisions** comment is POSTed as a new comment — not an edit — carrying the per-finding audit log (briefing option picked, rationale, fix-hint) for that session. Each walkthrough run posts a fresh decisions comment; the primary comment stays canonical for current state.
+
 ---
 
 ## 8. Helper scripts contract
@@ -2672,18 +2674,21 @@ Returns strict JSON:
 {
   "summary": "2-4 sentences on what the finding is and what the validator concluded",
   "options": [
-    {"label": "A", "title": "...", "detail": "...", "fix_hint_if_picked": string | null},
+    {"label": "A", "title": "...", "detail": "...", "fix_hint_if_picked": string},
     ...
   ],
   "recommendation": {"label": "A" | "B" | ..., "rationale": "..."}
 }
 ```
 
-`fix_hint_if_picked` MUST be non-null for fix-style options (any
-option whose selection triggers a promote). Skip / defer options
-may have `fix_hint_if_picked: null`. A null on a fix option would
-trigger the fallback heuristic prompt in `promote-core.md` step 4.5
-and disrupt the walkthrough's single-question-per-finding rhythm.
+**Every option is a fix variant.** The briefer does NOT emit "skip"
+or "defer" options — those are provided separately by the
+walkthrough's own `AskUserQuestion` (§28.5). Emitting a parallel
+skip option from the briefer creates routing ambiguity (user-picked
+skip options get routed through the promote path with an empty
+`fix_hint`, triggering `promote-core.md` step 4.5's fallback
+prompt). `fix_hint_if_picked` MUST therefore be a non-null string
+on every emitted option.
 
 One retry on parse failure; degraded UX on second failure (raw
 finding + skip/promote-without-hint options).

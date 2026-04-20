@@ -240,16 +240,23 @@ tokens. Prompt (see DESIGN §28.4):
 >
 >   1. A 2-4 sentence summary of what the finding is about and what
 >      the validator concluded (include disproven halves, if any).
->   2. 3-5 concrete options the reviewer can pick from, each with a
->      one-line title and 1-2 sentence detail. Options should span
->      one or more "fix" variants (different `fix_hint` shapes), a
->      "skip — intentional / design decision" option, and a "defer"
->      option where appropriate.
->   3. A recommendation: which option + rationale + (for fix options)
->      a specific `fix_hint` string suitable to pass to the Phase 8
->      fix-group agent. Include negative constraints when
->      over-engineering is a risk ("do NOT add a new flag"; "do NOT
->      change the code").
+>   2. 2-5 concrete **fix-variant** options the reviewer can pick
+>      from, each with a one-line title and 1-2 sentence detail. Each
+>      option represents a different way to fix the finding (e.g.
+>      "update the docstring" vs "update the code" for a doc/code
+>      mismatch; "add parameter validation" vs "tighten the type
+>      signature" for a type-safety finding). Do NOT emit a generic
+>      "skip" or "defer" option — the walkthrough adds its own
+>      "Skip this finding" and "Stop the walkthrough" options after
+>      yours, and routing ambiguity between the two skip paths causes
+>      fallback-prompt UX glitches. If no fix variant seems right,
+>      emit only one or two weak-conviction options and let your
+>      recommendation say so in the rationale — the reviewer can still
+>      pick the walkthrough's Skip.
+>   3. A recommendation: which option + rationale + a specific
+>      `fix_hint` string suitable to pass to the Phase 8 fix-group
+>      agent. Include negative constraints when over-engineering is a
+>      risk ("do NOT add a new flag"; "do NOT change the code").
 >
 > Context (read the repo via the Read tool for the file snippet):
 >
@@ -266,7 +273,7 @@ tokens. Prompt (see DESIGN §28.4):
 > {
 >   "summary": "2-4 sentences",
 >   "options": [
->     {"label": "A", "title": "...", "detail": "...", "fix_hint_if_picked": "..." | null},
+>     {"label": "A", "title": "...", "detail": "...", "fix_hint_if_picked": "..."},
 >     ...
 >   ],
 >   "recommendation": {"label": "A" | "B" | ..., "rationale": "..."}
@@ -277,12 +284,11 @@ tokens. Prompt (see DESIGN §28.4):
 >
 >   - Emit ONE JSON object only. No surrounding prose. No code fences.
 >   - Labels are single uppercase letters starting from A.
->   - Every option whose title implies a fix (i.e. NOT a "skip" or
->     "defer" option) MUST have a non-null `fix_hint_if_picked`
->     string. A null `fix_hint_if_picked` on a fix-style option would
->     trigger promote-core's fallback heuristic prompt and disrupt
->     the walkthrough's UX. Skip/defer options MAY have
->     `fix_hint_if_picked: null`.
+>   - Every option MUST have a non-null `fix_hint_if_picked` string
+>     (every option is a fix variant — see rule 2 above). A null
+>     hint would fall through to promote-core's fallback heuristic
+>     prompt and break the walkthrough's single-question-per-finding
+>     rhythm.
 >   - Prefer specific `fix_hint` strings with negative constraints.
 >     Avoid vague hints like "fix the docstring" — say what to change
 >     and what not to change.
@@ -294,15 +300,20 @@ and fall through to a degraded UX: present the raw finding JSON with
 options `Skip (briefing failed)` / `Promote anyway (no fix-hint)` /
 `Stop the walkthrough`.
 
-Log the agent's token count to `tokens.jsonl` per §11 / §24.4:
+Log the agent's token count to `tokens.jsonl` per §11 / §24.4.
+Extract the agent id and token count from the Agent tool result's
+`<usage>` block. When the block is missing or unparseable, pass the
+literal `null` for tokens (same fallback pattern as §8.6 / Phase 8
+fix-group logging) — token tracking is observability, not
+correctness:
 
 ```bash
 ~/.claude/commands/_shared/tools/log-tokens.sh \
     --review-dir "$review_dir" \
     --phase walkthrough --agent-role briefing \
-    --agent-id "walkthrough-$finding_id" \
+    --agent-id <id-from-Agent-result> \
     --model sonnet --finding-id "$finding_id" \
-    --tokens "$agent_tokens"
+    --tokens <N or null>
 ```
 
 #### 5.3. Render the briefing to chat
@@ -351,18 +362,18 @@ this file for reference and for Claude Code's command-load
 preprocessor to resolve):
 
 ```bash
-fix_hint="${briefing_option.fix_hint_if_picked:-}"      # may be empty
+fix_hint="$briefing_option.fix_hint_if_picked"          # non-null per §5.2
 reason="walkthrough: $finding_id — picked option $label ($title)"
 force=false
 defer_publish=true
 ```
 
 Then execute the shared fragment's steps 3, 4, 4.5 (the prompt is
-skipped because `$fix_hint` is either non-empty from the briefing or
-deliberately empty to mean "no steering hint"), 5, 6, and 9 for this
-finding id. The fragment reads `$finding_id`, `$reason`, `$fix_hint`,
-`$force`, `$artifact_path`, and `$trace_log_path` from this ambient
-context.
+skipped because `$fix_hint` is always non-empty — the briefer at
+§5.2 is hard-constrained to emit a non-null `fix_hint_if_picked` on
+every option), 5, 6, and 9 for this finding id. The fragment reads
+`$finding_id`, `$reason`, `$fix_hint`, `$force`, `$artifact_path`,
+and `$trace_log_path` from this ambient context.
 
 **The fragment runs once per iteration** — read it as the per-finding
 playbook, not as a single-shot action. Each iteration patches one
@@ -442,7 +453,14 @@ First, tally the decision counts from the `decisions[]` array so step
 promote_count=$(jq -s '[.[] | select(.action == "promote")] | length' <<<"$(printf '%s\n' "${decisions[@]}")")
 skip_count=$(jq   -s '[.[] | select(.action == "skip")]    | length' <<<"$(printf '%s\n' "${decisions[@]}")")
 stop_count=$(jq   -s '[.[] | select(.action == "stop")]    | length' <<<"$(printf '%s\n' "${decisions[@]}")")
+unreviewed_count=$(( scope_count - promote_count - skip_count - stop_count ))
 ```
+
+`$unreviewed_count` is non-zero only when the reviewer picked "Stop
+the walkthrough" before reaching every scoped finding. Reported
+separately so the decisions-log (§7.1) and user-visible summary
+(§9) can't misleadingly imply the reviewer walked all scope_count
+findings.
 
 Guard: if `promote_count == 0` (all skip/stop), there's nothing to
 re-render or re-publish. Skip steps 6.1 and 6.2; jump to step 7
@@ -518,7 +536,7 @@ array.
 
 `$review_id` · threshold=$threshold · reviewer=$reviewer · ts=$walkthrough_ts
 
-Worked through $scope_count non-auto-eligible finding(s): **$promote_count promoted**, **$skip_count skipped**, **$stop_count stop signal**.
+Of **$scope_count** non-auto-eligible finding(s) in scope: **$promote_count promoted**, **$skip_count skipped**, **$stop_count stopped**, **$unreviewed_count unreviewed**.
 
 Promoted findings will be picked up by the next `/adams-review-fix $threshold` run via the `human_confirmation` bypass (DESIGN §27.6).
 
@@ -552,7 +570,10 @@ Current state: see the main review comment and `artifact.md`.
 ```
 
 Sections are emitted only when non-empty — a run with no stops omits
-the "Stopped" block entirely.
+the "Stopped" block entirely. Similarly, omit the `$unreviewed_count
+unreviewed` clause from the header sentence when `$unreviewed_count
+== 0` (i.e., every scoped finding was promoted, skipped, or stopped
+at).
 
 #### 7.2. POST via `gh api`
 
@@ -589,8 +610,8 @@ post it.
 ```bash
 {
     printf '## walkthrough (%s)\n' "$walkthrough_ts"
-    printf 'review_id=%s threshold=%s scope_count=%s promote_count=%s skip_count=%s stop_count=%s\n' \
-        "$review_id" "$threshold" "$scope_count" "$promote_count" "$skip_count" "$stop_count"
+    printf 'review_id=%s threshold=%s scope_count=%s promote_count=%s skip_count=%s stop_count=%s unreviewed_count=%s\n' \
+        "$review_id" "$threshold" "$scope_count" "$promote_count" "$skip_count" "$stop_count" "$unreviewed_count"
     printf 'decisions:\n'
     # one line per decision, in order
     for d in "${decisions[@]}"; do
@@ -611,10 +632,11 @@ post it.
 Print a clear summary block to chat (plain text, not a tool call):
 
 ```
-Walkthrough complete. Worked through $scope_count finding(s):
-  Promoted: $promote_count
-  Skipped:  $skip_count
-  Stopped:  $stop_count
+Walkthrough complete. Of $scope_count finding(s) in scope:
+  Promoted:    $promote_count
+  Skipped:     $skip_count
+  Stopped:     $stop_count
+  Unreviewed:  $unreviewed_count
 
 Promoted findings are now auto-fix-eligible via the human_confirmation
 bypass (§27.6). To apply them:
@@ -625,8 +647,14 @@ Decisions log comment: <url to the POSTed comment, if PR mode>
 Main review comment: updated in place.
 
 You can resume later by re-running /adams-review-walkthrough — the
-scope filter naturally excludes anything you already promoted.
+scope filter naturally excludes anything you already promoted, so the
+$unreviewed_count unreviewed finding(s) plus any newly-added ones
+will be what you see.
 ```
+
+Omit the "Unreviewed" line entirely (and the final re-run sentence's
+unreviewed-count clause) when `$unreviewed_count == 0` — keeps the
+common-case summary tidy.
 
 On any step failure earlier in the run, append a `Note:` section
 listing the deferred failures and their recovery actions (same

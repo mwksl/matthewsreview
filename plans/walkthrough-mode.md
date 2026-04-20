@@ -295,18 +295,20 @@ ln -s "$PWD/commands/adams-review-walkthrough.md" \
 
 ## 14. Smoke assertions (test/smoke.sh)
 
-Add `WT-*` block with 6 assertions:
+Add `WT-*` block with 7 assertions (WT-0 added during the once-over
+per §18):
 
 | # | Label | Checks |
 |---|---|---|
+| WT-0 | promote-core precondition proceeds on `confirmed_auto` + `curr_hc == null` | Structural grep: "**Proceed.**" verdict present; "already confirmed_auto by validator…no-op" absent (§18, §27.2, §27.6) |
 | WT-1 | scope filter excludes resolved/disproven/pending | Fixture with mixed dispositions; scope jq returns only the in-scope ids |
 | WT-2 | scope filter excludes already-promoted findings | Fixture with `human_confirmation != null` on F001; F001 not returned |
 | WT-3 | scope filter excludes fix-eligible findings (correctness, score ≥ threshold) | Deep finding at score 80 / confirmed_auto / correctness → not in scope |
 | WT-4 | scope filter includes light-lane confirmed_auto | ux / confirmed_auto / score 80 → IS in scope |
-| WT-5 | promote `--defer-publish` lands patch without calling render/publish | Patch state verified; render/publish helpers not invoked (check via pre/post mtimes on artifact.md) |
-| WT-6 | decisions-log markdown renders cleanly for a mixed decisions array | Fixture decisions → expected markdown (grep for finding ids + "Promoted:" / "Skipped:" markers) |
+| WT-5 | promote `--defer-publish` flag + promote-core include are wired | Structural grep on `commands/adams-review-promote.md` for `--defer-publish`, `defer_publish.*true`, `promote-core.md` |
+| WT-6 | decisions-log markdown template has required structural markers | Grep on walkthrough.md for `adams-review-walkthrough-v1`, `### Walkthrough decisions`, `#### Promoted/Skipped/Stopped` |
 
-Current total: 122. New total: **128**.
+Current total: 122. New total: **129**.
 
 ## 15. Execution order (commit-by-commit)
 

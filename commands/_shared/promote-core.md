@@ -75,7 +75,7 @@ both the integer and null cases via `--argjson`).
 
 | `curr_disp` | Additional condition | Action |
 |---|---|---|
-| `confirmed_auto` | `curr_hc != null` | Exit 0 with: "F$N already promoted by @$reviewer on $ts; no-op." |
+| `confirmed_auto` | `curr_hc != null` | Exit 0 with: "F$N already promoted by @$(jq -r '.reviewer' <<<"$curr_hc") on $(jq -r '.ts' <<<"$curr_hc"); no-op." — pulling reviewer and timestamp from the existing `human_confirmation` object (the bash `$reviewer` / `$ts` vars are not yet set in step 4). |
 | `confirmed_auto` | `curr_hc == null` | **Proceed.** Set `human_confirmation` to record the human override. May be strictly necessary (light-lane `confirmed_auto` fails the Phase 8 impact_type filter, deep-lane below-threshold `confirmed_auto` fails the score gate) or redundant-but-harmless audit (deep-lane above-threshold `confirmed_auto` was already eligible). Promote can't know the user's planned `/adams-review-fix` threshold, so always proceed. |
 | `resolved` | — | Exit 1: "F$N is resolved (fix already ran); cannot promote." |
 | `disproven` | `force == false` | Exit 1: "F$N was disproven by Phase 4 (score=$curr_score). Validator found positive evidence this isn't a real issue. Re-run with --force to override." |
