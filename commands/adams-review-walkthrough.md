@@ -176,26 +176,237 @@ row per finding), then dispatch `AskUserQuestion` with two options:
 
 If the reviewer picks Cancel, exit 0 with a one-line note. No mutation.
 
-### 5. Per-finding loop (stubbed in this commit)
+### 5. Per-finding loop
 
-[SCAFFOLDING ONLY — commit 4 of `plans/walkthrough-mode.md` wires up
-the briefing sub-agent, the AskUserQuestion decision flow, and the
-per-iteration promote-core include. This commit lays the command
-shape and ensures the scope + preview steps work in isolation.]
-
-For this commit, print a one-line notice:
+Initialize an in-memory decisions array in your working context. Each
+entry records the full outcome of one finding — whether promoted,
+skipped, or interrupted — so step 7's decisions-log comment has the
+complete audit trail:
 
 ```
-Scaffolding in place. Per-finding briefing loop lands in the next
-commit (plans/walkthrough-mode.md §15 commit 4). Exiting without
-mutating anything.
+decisions = []   # list of {finding_id, action, reason, fix_hint?, prior_disposition, prior_score}
 ```
 
-And exit 0.
+Iterate `scope_ids` **in the order returned by the jq** (no re-sort —
+that's the order the reviewer saw in the preview table at step 4).
+For each `$finding_id`:
 
-### 6. Finalize (stubbed in this commit)
+#### 5.1. Fetch the finding JSON
 
-[SCAFFOLDING ONLY — see commit 5 in `plans/walkthrough-mode.md`.]
+```bash
+finding_json=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+    --path "$artifact_path" \
+    --filter ".findings[] | select(.id == \"$finding_id\")")
+```
+
+Capture the `file` and `line_range` for the briefing agent's file
+snippet request:
+
+```bash
+f_file=$(jq -r '.file' <<<"$finding_json")
+f_line_start=$(jq -r '.line_range[0]' <<<"$finding_json")
+f_line_end=$(jq -r '.line_range[1]' <<<"$finding_json")
+f_disp=$(jq -r '.disposition' <<<"$finding_json")
+f_score=$(jq -r '.score_phase4 // "null"' <<<"$finding_json")
+f_impact=$(jq -r '.impact_type' <<<"$finding_json")
+f_claim=$(jq -r '.claim' <<<"$finding_json")
+```
+
+#### 5.2. Dispatch the briefing sub-agent
+
+One `Agent` tool-use per finding. Model: `sonnet`. Budget: ~3-5k
+tokens. Prompt (see DESIGN §28.4):
+
+> You are a code-review triage briefer. The reviewer is walking
+> through one finding and needs:
+>
+>   1. A 2-4 sentence summary of what the finding is about and what
+>      the validator concluded (include disproven halves, if any).
+>   2. 3-5 concrete options the reviewer can pick from, each with a
+>      one-line title and 1-2 sentence detail. Options should span
+>      one or more "fix" variants (different `fix_hint` shapes), a
+>      "skip — intentional / design decision" option, and a "defer"
+>      option where appropriate.
+>   3. A recommendation: which option + rationale + (for fix options)
+>      a specific `fix_hint` string suitable to pass to the Phase 8
+>      fix-group agent. Include negative constraints when
+>      over-engineering is a risk ("do NOT add a new flag"; "do NOT
+>      change the code").
+>
+> Context (read the repo via the Read tool for the file snippet):
+>
+>   - Finding JSON: <paste $finding_json verbatim>
+>   - File: $f_file (lines $f_line_start-$f_line_end, plus ±30 of
+>     context — use Read)
+>   - Repo root CLAUDE.md: read once and extract any rules that
+>     cite $f_file or the same pattern as $f_claim.
+>   - Other findings on the same file: <filter artifact-read by .file == $f_file>
+>
+> Return strict JSON matching:
+>
+> ```json
+> {
+>   "summary": "2-4 sentences",
+>   "options": [
+>     {"label": "A", "title": "...", "detail": "...", "fix_hint_if_picked": "..." | null},
+>     ...
+>   ],
+>   "recommendation": {"label": "A" | "B" | ..., "rationale": "..."}
+> }
+> ```
+>
+> Hard rules:
+>
+>   - Emit ONE JSON object only. No surrounding prose. No code fences.
+>   - Labels are single uppercase letters starting from A.
+>   - Prefer specific `fix_hint` strings with negative constraints.
+>     Avoid vague hints like "fix the docstring" — say what to change
+>     and what not to change.
+
+Parse the returned text as JSON (one retry on parse failure with an
+"emit JSON only; no surrounding prose" reminder). On second failure,
+log to `trace.md` under tag `walkthrough_briefing_failed:$finding_id`
+and fall through to a degraded UX: present the raw finding JSON with
+options `Skip (briefing failed)` / `Promote anyway (no fix-hint)` /
+`Stop the walkthrough`.
+
+Log the agent's token count to `tokens.jsonl` per §11 / §24.4:
+
+```bash
+~/.claude/commands/_shared/tools/log-tokens.sh \
+    --tokens-log "$review_dir/tokens.jsonl" \
+    --phase walkthrough --agent-role briefing \
+    --agent-id "walkthrough-$finding_id" \
+    --model sonnet --finding-id "$finding_id" \
+    --tokens "$agent_tokens"
+```
+
+#### 5.3. Render the briefing to chat
+
+Present the briefing as a markdown block the reviewer can read at a
+glance:
+
+```markdown
+## $finding_id — <first line of claim>
+
+**File:** `$f_file:$f_line_start-$f_line_end`
+**Score:** $f_score · **Impact:** $f_impact · **Disposition:** $f_disp
+
+**What it's about:** <briefing.summary>
+
+**Options:**
+
+- **A. <options[0].title>** — <options[0].detail>
+- **B. <options[1].title>** — <options[1].detail>
+- ...
+
+**Recommendation:** **<recommendation.label>** — <recommendation.rationale>
+```
+
+#### 5.4. Ask for a decision
+
+Dispatch `AskUserQuestion` with options built from the briefing:
+
+- One option per `briefing.options[]` entry, labeled with its letter
+  and title ("**A.** <title>").
+- One "Skip this finding" option.
+- One "Stop the walkthrough (finalize now with decisions made so
+  far)" option.
+
+Label the briefing's recommended option visually (e.g. prepend
+"⭐ (recommended)" to the title) so the reviewer can accept it with
+one click.
+
+#### 5.5. Dispatch per choice
+
+**If the reviewer picked a promote option (briefing option with
+`fix_hint_if_picked` non-null, or a promote option with null
+fix-hint):**
+
+Set ambient context for the shared promote-core fragment:
+
+```bash
+fix_hint="${briefing_option.fix_hint_if_picked:-}"      # may be empty
+reason="walkthrough: $finding_id — picked option $label ($title)"
+force=false
+defer_publish=true        # suppress render+publish in this command
+DEFER_PUBLISH=1           # belt-and-suspenders env-var form for
+                          # promote-core.md's guards
+```
+
+Then include the shared fragment inline (exactly as promote's step
+3–6, 9 would execute):
+
+!`cat ~/.claude/commands/_shared/promote-core.md`
+
+Capture the `$ts` and `$curr_disp` / `$curr_score` emitted by the
+fragment. Append to `decisions`:
+
+```
+{
+  finding_id: $finding_id,
+  action: "promote",
+  option_label: <briefing label>,
+  option_title: <briefing title>,
+  reason: $reason,
+  fix_hint: $fix_hint,          # may be empty
+  prior_disposition: $curr_disp,
+  prior_score: $curr_score,
+  ts: $ts
+}
+```
+
+**If the reviewer picked "Skip this finding":**
+
+```
+decisions += {
+  finding_id: $finding_id,
+  action: "skip",
+  option_label: null,
+  option_title: "skipped",
+  reason: "reviewer skipped during walkthrough",
+  prior_disposition: $f_disp,
+  prior_score: $f_score,
+  ts: <now>
+}
+```
+
+No mutation. Append a terse line to `trace.md` under the run's
+walkthrough entry (see step 8 below).
+
+**If the reviewer picked "Stop the walkthrough":**
+
+Break out of the loop immediately. Record a final `decisions` entry:
+
+```
+decisions += {
+  finding_id: $finding_id,
+  action: "stop",
+  option_label: null,
+  option_title: "walkthrough stopped by reviewer",
+  reason: "reviewer requested stop",
+  prior_disposition: $f_disp,
+  prior_score: $f_score,
+  ts: <now>
+}
+```
+
+Note: the current finding (`$finding_id`) is NOT mutated — "stop"
+is an explicit no-op on the current id. Only the previously-decided
+findings earlier in the loop have been promoted.
+
+Proceed to step 6 (finalize) with whatever decisions have accumulated.
+
+#### 5.6. Between iterations
+
+Append one terse line to the user-visible chat stream so the reviewer
+has running feedback (e.g. "F023 promoted (option A — update
+docstring). 4 of 10 processed."). No per-iteration render or publish.
+
+### 6. Finalize (render + publish + decisions-log comment)
+
+[Lands in commit 5. For this commit, if the loop completed, print
+"Loop complete — finalize step lands in commit 5." and exit 0.]
 
 ## What this command does NOT do
 
