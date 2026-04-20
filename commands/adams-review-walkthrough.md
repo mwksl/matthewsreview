@@ -403,10 +403,193 @@ Append one terse line to the user-visible chat stream so the reviewer
 has running feedback (e.g. "F023 promoted (option A — update
 docstring). 4 of 10 processed."). No per-iteration render or publish.
 
-### 6. Finalize (render + publish + decisions-log comment)
+### 6. Finalize — render + publish main comment
 
-[Lands in commit 5. For this commit, if the loop completed, print
-"Loop complete — finalize step lands in commit 5." and exit 0.]
+Guard: if `decisions` contains ZERO promote entries (all skip/stop),
+there's nothing to re-render or re-publish. Skip steps 6.1 and 6.2;
+jump to step 7 (decisions-log comment). The scope filter + preview
+table already showed the user what's in the backlog; a decisions-log
+with "skipped all 10" is still useful audit.
+
+#### 6.1. Re-render `artifact.md`
+
+```bash
+~/.claude/commands/_shared/tools/artifact-render.py \
+    --input "$artifact_path" \
+    --output "$review_dir/artifact.md"
+```
+
+On non-zero: log stderr to `trace.md` with tag
+`walkthrough_render_failed`. Continue to step 6.2 — the artifact
+patches stand; the user can manually re-render.
+
+#### 6.2. Re-publish the main review comment (PR mode only)
+
+Read mode + pr_number + comment_id from the artifact:
+
+```bash
+mode=$(jq -r '.mode' "$artifact_path")
+pr_number=$(jq -r '.pr_number // empty' "$artifact_path")
+comment_id=$(jq -r '.comment_id // empty' "$artifact_path")
+```
+
+If `mode == "pr"` AND `pr_number` is non-empty:
+
+```bash
+publish_args=(
+    --mode pr
+    --review-id "$review_id"
+    --pr "$pr_number"
+    --repo-slug "$repo_slug"
+    --branch "$head_branch"
+    --review-dir "$review_dir"
+)
+[[ -n "$comment_id" ]] && publish_args+=(--comment-id "$comment_id")
+
+~/.claude/commands/_shared/tools/artifact-publish.sh "${publish_args[@]}"
+```
+
+If `mode == "local"`: call with `--mode local --review-id "$review_id"
+--review-dir "$review_dir"` (no-op that appends a trace line).
+
+On non-zero: log stderr to `trace.md` with tag
+`walkthrough_publish_failed`. Continue to step 7 — the decisions-log
+is still worth posting even if the main-comment PATCH failed.
+
+### 7. Post the decisions-log PR comment
+
+Skip entirely when `mode == "local"` (no PR to comment on — the trace
+entry at step 8 is the audit record in local mode).
+
+In PR mode, render a decisions-log markdown block from `decisions`
+and POST it as a NEW PR comment (separate from the main review
+comment). DO NOT mutate `artifact.comment_id` — that stays pointing
+at the main review comment so future `/adams-review-fix` and
+`/adams-review-promote` runs edit the right comment.
+
+#### 7.1. Build the decisions-log markdown
+
+One header block, then one subsection per decision in the order they
+were made. Use the ids and titles verbatim from the `decisions[]`
+array.
+
+```markdown
+<!-- adams-review-walkthrough-v1 -->
+### Walkthrough decisions
+
+`$review_id` · threshold=$threshold · reviewer=$reviewer · ts=$walkthrough_ts
+
+Worked through $scope_count non-auto-eligible finding(s): **$promote_count promoted**, **$skip_count skipped**, **$stop_count stop signal**.
+
+Promoted findings will be picked up by the next `/adams-review-fix $threshold` run via the `human_confirmation` bypass (DESIGN §27.6).
+
+---
+
+#### Promoted
+
+- **F003** — [first line of claim] · option **A** (Update the docstring to match the code)
+  - **Why:** <option.detail> — <recommendation.rationale>
+  - **Fix hint:** `<fix_hint>` (or "— (no steering hint supplied)" when empty)
+  - **Prior:** disposition=<prior_disposition> · score=<prior_score>
+
+- **F016** — ...
+
+#### Skipped
+
+- **F006** — [first line of claim]
+  - Reviewer skipped during walkthrough.
+
+#### Stopped
+
+- **F023** — [first line of claim]
+  - Reviewer requested stop at this finding. Not mutated.
+  - Resume with `/adams-review-walkthrough $threshold`.
+
+---
+
+Decisions log: this comment is append-only audit — it's never edited
+in place. Each `/adams-review-walkthrough` run posts a fresh entry.
+Current state: see the main review comment and `artifact.md`.
+```
+
+Sections are emitted only when non-empty — a run with no stops omits
+the "Stopped" block entirely.
+
+#### 7.2. POST via `gh api`
+
+```bash
+comment_body_path=$(mktemp -t adams-walkthrough-body.XXXXXX)
+# ... write the rendered markdown to $comment_body_path ...
+
+decisions_comment_id=$(gh api \
+    --method POST \
+    "repos/{owner}/{repo}/issues/$pr_number/comments" \
+    -F "body=@$comment_body_path" \
+    --jq '.id')
+
+rm -f "$comment_body_path"
+```
+
+Resolve `{owner}/{repo}` from `gh repo view --json nameWithOwner -q .nameWithOwner`
+(or reuse `$repo_slug` after stripping the `github.com-` prefix — but
+the `gh` way is more robust when the slug has been mangled by
+alternate hosts).
+
+Capture `decisions_comment_id` into trace only (do NOT mutate the
+artifact's `comment_id`).
+
+On `gh` failure: log stderr to `trace.md` with tag
+`walkthrough_decisions_comment_failed`. Include the rendered markdown
+in the trace so the reviewer can recover the content and manually
+post it.
+
+### 8. Append walkthrough block to `trace.md`
+
+```bash
+{
+    printf '## walkthrough (%s)\n' "$walkthrough_ts"
+    printf 'review_id=%s threshold=%s scope_count=%s promote_count=%s skip_count=%s stop_count=%s\n' \
+        "$review_id" "$threshold" "$scope_count" "$promote_count" "$skip_count" "$stop_count"
+    printf 'decisions:\n'
+    # one line per decision, in order
+    for d in "${decisions[@]}"; do
+        printf '  %s %s option=%s hint=%s\n' \
+            "$(jq -r '.finding_id' <<<"$d")" \
+            "$(jq -r '.action' <<<"$d")" \
+            "$(jq -r '.option_label // "—"' <<<"$d")" \
+            "$(jq -r '.fix_hint // "—"' <<<"$d")"
+    done
+    [[ -n "${decisions_comment_id:-}" ]] && \
+        printf 'decisions_comment_id=%s\n' "$decisions_comment_id"
+    printf '\n'
+} >> "$trace_log_path"
+```
+
+### 9. User-visible summary
+
+Print a clear summary block to chat (plain text, not a tool call):
+
+```
+Walkthrough complete. Worked through $scope_count finding(s):
+  Promoted: $promote_count
+  Skipped:  $skip_count
+  Stopped:  $stop_count
+
+Promoted findings are now auto-fix-eligible via the human_confirmation
+bypass (§27.6). To apply them:
+
+  /adams-review-fix $threshold
+
+Decisions log comment: <url to the POSTed comment, if PR mode>
+Main review comment: updated in place.
+
+You can resume later by re-running /adams-review-walkthrough — the
+scope filter naturally excludes anything you already promoted.
+```
+
+On any step failure earlier in the run, append a `Note:` section
+listing the deferred failures and their recovery actions (same
+pattern as `/adams-review-promote` step 10).
 
 ## What this command does NOT do
 

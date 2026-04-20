@@ -2086,6 +2086,23 @@ else
     fail "WT-4: expected W030,W031,W032 (any order); got '$wt4_ids'"
 fi
 
+# WT-6: /adams-review-walkthrough decisions-log template contains the required
+# structural markers. Since the markdown is rendered inline by Claude at
+# runtime (the command file is a prompt, not a shell script), this is a
+# template-integrity check — guards against accidental removal of any
+# section so the posted PR comment stays auditable.
+WALK_MD="$REPO/commands/adams-review-walkthrough.md"
+if grep -q 'adams-review-walkthrough-v1' "$WALK_MD" \
+   && grep -q '### Walkthrough decisions' "$WALK_MD" \
+   && grep -q '#### Promoted' "$WALK_MD" \
+   && grep -q '#### Skipped' "$WALK_MD" \
+   && grep -q '#### Stopped' "$WALK_MD" \
+   && grep -q 'human_confirmation.* bypass' "$WALK_MD"; then
+    pass "WT-6 (§28.7): walkthrough decisions-log template has marker + Promoted/Skipped/Stopped sections"
+else
+    fail "WT-6: walkthrough decisions-log template missing required sections in $WALK_MD"
+fi
+
 # WT-5: /adams-review-promote wires --defer-publish and includes promote-core.md.
 # Structural check guarding against accidental removal of either piece (plans/
 # walkthrough-mode.md §5, §6). If a future refactor merges the shared fragment
