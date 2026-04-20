@@ -2146,6 +2146,73 @@ else
     fail "WT-5: --defer-publish or promote-core include missing from $PROMOTE_MD"
 fi
 
+# ------------------------------------------------------------------ Stage 2.6.D
+# Line-range sanity filter at Phase 1 join. line-range-check.sh rejects
+# candidates whose line_range[1] overshoots the file's actual length at
+# $reviewed_sha, catches missing-file references, and passes through the
+# Phase 1.5 "(unknown)" sentinel. Addresses the L5-ux hallucination
+# observed on the ray-finance 2026-04-19 run (ranges 1815-1826 in a
+# 1042-line file).
+#
+# Reuses the OC_DIR git fixture so file_a.py (4 lines) + file_b.py
+# (2 lines) provide concrete upper bounds to overshoot.
+
+# LR-1: valid in-range candidate is passed through unchanged.
+out=$(cd "$OC_DIR/repo" && "$TOOLS/line-range-check.sh" \
+    --reviewed-sha HEAD \
+    < <(echo '[{"sources":["L1-diff-local"],"file":"file_a.py","line_range":[1,4]}]') \
+    2> "$WORK/lr1.err")
+kept=$(echo "$out" | jq 'length')
+if [[ "$kept" == "1" ]] && [[ ! -s "$WORK/lr1.err" ]]; then
+    pass "LR-1: in-range candidate passes through unchanged (no audit stderr)"
+else
+    fail "LR-1: expected 1 kept and empty stderr; got kept=$kept stderr=$(cat "$WORK/lr1.err")"
+fi
+
+# LR-2: hallucinated range (99-100 on 4-line file_a.py) is dropped with
+# the lens_hallucinated_line_range trace tag on stderr.
+out=$(cd "$OC_DIR/repo" && "$TOOLS/line-range-check.sh" \
+    --reviewed-sha HEAD \
+    < <(echo '[{"sources":["L5-ux"],"file":"file_a.py","line_range":[99,100]}]') \
+    2> "$WORK/lr2.err")
+kept=$(echo "$out" | jq 'length')
+if [[ "$kept" == "0" ]] \
+    && grep -q 'lens_hallucinated_line_range:' "$WORK/lr2.err" \
+    && grep -q 'source=L5-ux' "$WORK/lr2.err" \
+    && grep -q 'actual_lines=4' "$WORK/lr2.err"; then
+    pass "LR-2: overshot range dropped with lens_hallucinated_line_range + source + actual_lines"
+else
+    fail "LR-2: expected 0 kept + hallucinated-range trace; got kept=$kept stderr=$(cat "$WORK/lr2.err")"
+fi
+
+# LR-3: file=="(unknown)" (Phase 1.5 external-scrape sentinel) passes
+# through without any audit stderr.
+out=$(cd "$OC_DIR/repo" && "$TOOLS/line-range-check.sh" \
+    --reviewed-sha HEAD \
+    < <(echo '[{"sources":["external-pr:coderabbitai"],"file":"(unknown)","line_range":[1,1]}]') \
+    2> "$WORK/lr3.err")
+kept=$(echo "$out" | jq 'length')
+if [[ "$kept" == "1" ]] && [[ ! -s "$WORK/lr3.err" ]]; then
+    pass "LR-3: file=='(unknown)' sentinel passes through with no audit stderr"
+else
+    fail "LR-3: expected 1 kept and empty stderr; got kept=$kept stderr=$(cat "$WORK/lr3.err")"
+fi
+
+# LR-4: file missing at $reviewed_sha is dropped with the
+# lens_referenced_missing_file trace tag.
+out=$(cd "$OC_DIR/repo" && "$TOOLS/line-range-check.sh" \
+    --reviewed-sha HEAD \
+    < <(echo '[{"sources":["L5-ux"],"file":"does_not_exist.py","line_range":[1,1]}]') \
+    2> "$WORK/lr4.err")
+kept=$(echo "$out" | jq 'length')
+if [[ "$kept" == "0" ]] \
+    && grep -q 'lens_referenced_missing_file:' "$WORK/lr4.err" \
+    && grep -q 'file=does_not_exist.py' "$WORK/lr4.err"; then
+    pass "LR-4: missing file dropped with lens_referenced_missing_file trace tag"
+else
+    fail "LR-4: expected 0 kept + missing-file trace; got kept=$kept stderr=$(cat "$WORK/lr4.err")"
+fi
+
 # ------------------------------------------------------------------ Phase 4 validator hardening
 # VR-* assertions cover the read-only preamble + fix-scope cross-check + post-wave
 # tree-cleanliness sweep added to 05-validation.md after the ray-finance 2026-04-19

@@ -243,6 +243,7 @@ All scripts live under `commands/_shared/tools/`. Grant `Bash(/Users/.../tools/<
 | `staleness.sh` | Bash | Phase 7 file-overlap classifier. `git diff --name-only latest_known_sha..HEAD ∩ reviewed_files_all`. |
 | `claude-md-paths.sh` | Bash | Walks up from each touched file to repo root; emits deduped CLAUDE.md paths root-first. |
 | `origin-crosscheck.sh` | Bash | Phase 1 post-lens. Blame-traces each candidate; forces `pre_existing:high` if fully reachable from `$comparison_ref`; downgrades conflicting lens verdicts. |
+| `line-range-check.sh` | Bash | Phase 1 join-step sanity filter. Drops candidates whose `line_range[1]` overshoots the file at `$reviewed_sha` (lens-hallucinated ranges); emits `lens_hallucinated_line_range:` / `lens_referenced_missing_file:` audit lines. Pass-through for `file == "(unknown)"`. |
 | `comment-freshness.sh` | Bash | Phase 1.5 post-scrape. Drops bot comments whose referenced code has changed since the comment was posted (§13.13). |
 | `repo-slug.sh` | Bash | Canonical `<repo-slug>` derivation. Single source of truth (Operational rule 7). |
 
