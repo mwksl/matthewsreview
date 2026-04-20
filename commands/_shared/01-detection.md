@@ -674,8 +674,14 @@ total_candidates=$(~/.claude/commands/_shared/tools/artifact-read.sh \
 # Surface Phase 1's loud-failure audit tags so the operator sees a non-
 # zero count in the trace + phases.jsonl summary rather than having to
 # grep trace.md themselves. Both zero on a healthy run.
-lens_drops=$(grep -c '^lens_dropped_unparseable:' "$trace_log_path" 2>/dev/null || echo 0)
-oc_skipped=$(grep -c '^origin_crosscheck_skipped:' "$trace_log_path" 2>/dev/null || echo 0)
+#
+# `grep -c … || true` matches 00-preflight.md's idiom. `grep -c` outputs
+# "0" to stdout on zero matches but exits 1 — `|| true` swallows the
+# non-zero so the assignment cleanly captures "0". Do NOT use `|| echo
+# 0` here: grep already prints "0" on no-match, so the fallback would
+# concatenate another "0" and the variable becomes "0\n0".
+lens_drops=$(grep -c '^lens_dropped_unparseable:' "$trace_log_path" 2>/dev/null || true)
+oc_skipped=$(grep -c '^origin_crosscheck_skipped:' "$trace_log_path" 2>/dev/null || true)
 
 ~/.claude/commands/_shared/tools/log-phase.sh \
   --review-dir "$review_dir" --phase 1 --name detection \
