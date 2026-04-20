@@ -183,7 +183,7 @@ Top-level command files need **per-command symlinks** into `~/.claude/commands/`
 test/smoke.sh
 ```
 
-Expects `smoke: PASS (129 assertions)`. Every helper script and renderer path is covered. Existing assertions should stay green across changes; new helpers should add 2–3 assertions in the OC-\* / FR-\* / RH-\* / FX-\* / MP-\* / WT-\* naming style.
+Expects `smoke: PASS (N assertions)` where N grows as helpers are added. Every helper script and renderer path is covered. Existing assertions should stay green across changes; new helpers should add 2–3 assertions in the OC-\* / FR-\* / RH-\* / FX-\* / MP-\* / WT-\* naming style.
 
 ## Dependencies
 

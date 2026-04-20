@@ -48,7 +48,7 @@ Steps 2 and 3 can land days or weeks after step 1 — the review artifact persis
 git clone <repo-url> ~/Projects/adams-review
 cd ~/Projects/adams-review
 bash scripts/install.sh
-bash test/smoke.sh          # expect "smoke: PASS (129 assertions)"
+bash test/smoke.sh          # expect "smoke: PASS (…)"
 ```
 
 Then try `/adams-review` in a Claude Code session on any branch or PR.

@@ -68,7 +68,7 @@ Installed:
   $COMMANDS_DIR/adams-review-promote.md      -> $REPO_ROOT/commands/adams-review-promote.md
 
 Next steps:
-  1. Verify: bash test/smoke.sh    (expect "smoke: PASS (129 assertions)")
+  1. Verify: bash test/smoke.sh    (expect "smoke: PASS (…)")
   2. Try /adams-review in a Claude Code session on a branch or PR.
 
 Uninstall: bash scripts/uninstall.sh
