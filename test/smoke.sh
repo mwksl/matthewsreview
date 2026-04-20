@@ -291,7 +291,8 @@ else
 fi
 
 # OC-6: DESIGN §13.4 documents the new rule (fresh /adams-review POSTs).
-if grep -q 'always .POST. a new comment' "$REPO/docs/DESIGN.md"; then
+# Path repointed to docs/archive/ after the 2026-04-19 docs-consolidation move.
+if grep -q 'always .POST. a new comment' "$REPO/docs/archive/DESIGN.md"; then
     pass "OC-6: DESIGN §13.4 documents fresh-/adams-review-POSTs rule"
 else
     fail "OC-6: DESIGN §13.4 missing new POST-on-fresh-review rule"
