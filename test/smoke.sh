@@ -1037,6 +1037,20 @@ else
     fail "OC-7: expected exit 1; got code=$code stderr=$stderr"
 fi
 
+# Assertion OC-8: blame failure captures stderr into the audit reason so
+# rc=128 cases are diagnosable in trace.md instead of opaque. Force the
+# failure by requesting a line range that overshoots file_a.py (4 lines).
+out=$(cd "$OC_DIR/repo" && "$TOOLS/origin-crosscheck.sh" \
+    --comparison-ref main \
+    --candidates '[{"id":"C8","file":"file_a.py","line_range":[99,100],"origin":"introduced_by_pr","origin_confidence":"high"}]' \
+    2> "$OC_DIR/c8.err")
+if grep -qE 'reason=blame-failed rc=[0-9]+; .+' "$OC_DIR/c8.err" \
+    && grep -q 'action=skipped' "$OC_DIR/c8.err"; then
+    pass "OC-8 (§13.11): blame failure records rc and captured stderr suffix in reason"
+else
+    fail "OC-8: expected 'reason=blame-failed rc=<N>; <stderr>' + action=skipped; got: $(cat "$OC_DIR/c8.err")"
+fi
+
 # ------------------------------------------------------------------ Stage 2.6.C
 # Renderer surfaces §13.10 freshness state in the header when non-default.
 
@@ -2130,6 +2144,193 @@ if grep -q -- '--defer-publish' "$PROMOTE_MD" \
     pass "WT-5 (§27, §28): promote command wires --defer-publish guards + includes promote-core fragment"
 else
     fail "WT-5: --defer-publish or promote-core include missing from $PROMOTE_MD"
+fi
+
+# ------------------------------------------------------------------ Stage 2.6.D
+# Line-range sanity filter at Phase 1 join. line-range-check.sh rejects
+# candidates whose line_range[1] overshoots the file's actual length at
+# $reviewed_sha, catches missing-file references, and passes through the
+# Phase 1.5 "(unknown)" sentinel. Addresses the L5-ux hallucination
+# observed on the ray-finance 2026-04-19 run (ranges 1815-1826 in a
+# 1042-line file).
+#
+# Reuses the OC_DIR git fixture so file_a.py (4 lines) + file_b.py
+# (2 lines) provide concrete upper bounds to overshoot.
+
+# LR-1: valid in-range candidate is passed through unchanged.
+out=$(cd "$OC_DIR/repo" && "$TOOLS/line-range-check.sh" \
+    --reviewed-sha HEAD \
+    < <(echo '[{"sources":["L1-diff-local"],"file":"file_a.py","line_range":[1,4]}]') \
+    2> "$WORK/lr1.err")
+kept=$(echo "$out" | jq 'length')
+if [[ "$kept" == "1" ]] && [[ ! -s "$WORK/lr1.err" ]]; then
+    pass "LR-1: in-range candidate passes through unchanged (no audit stderr)"
+else
+    fail "LR-1: expected 1 kept and empty stderr; got kept=$kept stderr=$(cat "$WORK/lr1.err")"
+fi
+
+# LR-2: hallucinated range (99-100 on 4-line file_a.py) is dropped with
+# the lens_hallucinated_line_range trace tag on stderr.
+out=$(cd "$OC_DIR/repo" && "$TOOLS/line-range-check.sh" \
+    --reviewed-sha HEAD \
+    < <(echo '[{"sources":["L5-ux"],"file":"file_a.py","line_range":[99,100]}]') \
+    2> "$WORK/lr2.err")
+kept=$(echo "$out" | jq 'length')
+if [[ "$kept" == "0" ]] \
+    && grep -q 'lens_hallucinated_line_range:' "$WORK/lr2.err" \
+    && grep -q 'source=L5-ux' "$WORK/lr2.err" \
+    && grep -q 'actual_lines=4' "$WORK/lr2.err"; then
+    pass "LR-2: overshot range dropped with lens_hallucinated_line_range + source + actual_lines"
+else
+    fail "LR-2: expected 0 kept + hallucinated-range trace; got kept=$kept stderr=$(cat "$WORK/lr2.err")"
+fi
+
+# LR-3: file=="(unknown)" (Phase 1.5 external-scrape sentinel) passes
+# through without any audit stderr.
+out=$(cd "$OC_DIR/repo" && "$TOOLS/line-range-check.sh" \
+    --reviewed-sha HEAD \
+    < <(echo '[{"sources":["external-pr:coderabbitai"],"file":"(unknown)","line_range":[1,1]}]') \
+    2> "$WORK/lr3.err")
+kept=$(echo "$out" | jq 'length')
+if [[ "$kept" == "1" ]] && [[ ! -s "$WORK/lr3.err" ]]; then
+    pass "LR-3: file=='(unknown)' sentinel passes through with no audit stderr"
+else
+    fail "LR-3: expected 1 kept and empty stderr; got kept=$kept stderr=$(cat "$WORK/lr3.err")"
+fi
+
+# LR-5: a file without a trailing newline must NOT produce false-
+# positive drops at its last visible line. The helper counts records
+# via `awk 'END{print NR}'` (not `wc -l`, which counts newlines and
+# would undercount by 1 on no-EOL files).
+(
+    cd "$OC_DIR/repo"
+    printf 'line1\nline2\nline3' > file_no_nl.py   # 3 lines, NO trailing newline
+    git add file_no_nl.py
+    git commit --quiet -m "add no-trailing-newline fixture"
+)
+out=$(cd "$OC_DIR/repo" && "$TOOLS/line-range-check.sh" \
+    --reviewed-sha HEAD \
+    < <(echo '[{"sources":["L1-diff-local"],"file":"file_no_nl.py","line_range":[1,3]}]') \
+    2> "$WORK/lr5.err")
+kept=$(echo "$out" | jq 'length')
+if [[ "$kept" == "1" ]] && [[ ! -s "$WORK/lr5.err" ]]; then
+    pass "LR-5: no-trailing-newline file — range to last line passes through (awk NR counts records, not newlines)"
+else
+    fail "LR-5: expected 1 kept + empty stderr for no-EOL file range [1,3]; got kept=$kept stderr=$(cat "$WORK/lr5.err")"
+fi
+
+# LR-4: file missing at $reviewed_sha is dropped with the
+# lens_referenced_missing_file trace tag.
+out=$(cd "$OC_DIR/repo" && "$TOOLS/line-range-check.sh" \
+    --reviewed-sha HEAD \
+    < <(echo '[{"sources":["L5-ux"],"file":"does_not_exist.py","line_range":[1,1]}]') \
+    2> "$WORK/lr4.err")
+kept=$(echo "$out" | jq 'length')
+if [[ "$kept" == "0" ]] \
+    && grep -q 'lens_referenced_missing_file:' "$WORK/lr4.err" \
+    && grep -q 'file=does_not_exist.py' "$WORK/lr4.err"; then
+    pass "LR-4: missing file dropped with lens_referenced_missing_file trace tag"
+else
+    fail "LR-4: expected 0 kept + missing-file trace; got kept=$kept stderr=$(cat "$WORK/lr4.err")"
+fi
+
+# ------------------------------------------------------------------ Stage 2.6.E
+# Polish / below-gate cluster renderer section. Dense runs of below_gate
+# findings in one area are hidden by default (Phase 3 parks them so the
+# report stays skimmable), but ≥3 within a 100-line window is its own
+# signal — surface them in a dedicated section with a cluster label so
+# a reviewer can spot what the pipeline filtered out.
+
+PC_DIR="$WORK/polish-clusters"
+mkdir -p "$PC_DIR"
+
+# Template for a below_gate finding; overrides via jq at call site.
+PC_TMPL='{"id":"F101","sources":["L5-ux"],"source_families":["ux-family"],"impact_type":"ux","origin":"introduced_by_pr","origin_confidence":"low","actionability":"manual","validation_lane":"light","current_state":"open","disposition":"below_gate","is_actionable":false,"reason":null,"confirmed_strength":null,"file":"src/cli/commands.ts","line_range":[920,920],"claim":"Net worth formatting mismatch","score_phase3":30,"score_phase4":null,"score_history":[{"phase":"phase_3","score":30}],"validation_result":null,"fix_attempts":[],"introduced_in_sha":null,"suggested_follow_up":null,"related_parent_finding_id":null}'
+
+jq '.findings = []' "$FIX/artifact-seed.json" > "$PC_DIR/base.json"
+
+# PC-1: 3 below_gate findings in one file, spanning 97 lines
+# (920, 960, 1017). ≤ 100 → cluster → section emitted.
+f1=$(echo "$PC_TMPL" | jq '.id="F101"|.line_range=[920,920]|.claim="nit-a"')
+f2=$(echo "$PC_TMPL" | jq '.id="F102"|.line_range=[960,960]|.claim="nit-b"')
+f3=$(echo "$PC_TMPL" | jq '.id="F103"|.line_range=[1017,1017]|.claim="nit-c"')
+jq --argjson a "$f1" --argjson b "$f2" --argjson c "$f3" \
+    '.findings=[$a,$b,$c]|.review_id="rev_pc1"' "$PC_DIR/base.json" > "$PC_DIR/pc1.json"
+"$TOOLS/artifact-render.py" --input "$PC_DIR/pc1.json" --output "$PC_DIR/pc1.md" >/dev/null
+if grep -q '## Polish — below threshold, clustered' "$PC_DIR/pc1.md" \
+    && grep -q '| F101 |' "$PC_DIR/pc1.md" \
+    && grep -q '| F102 |' "$PC_DIR/pc1.md" \
+    && grep -q '| F103 |' "$PC_DIR/pc1.md"; then
+    pass "PC-1 (§7): polish-cluster section emitted for 3+ below_gate in 100-line window"
+else
+    fail "PC-1: expected polish-cluster section with F101/F102/F103; got:\n$(cat "$PC_DIR/pc1.md")"
+fi
+
+# PC-2: 3 below_gate findings in same file but spanning > 100 lines.
+# No sliding window of size ≥3 fits → no cluster → no section.
+f1=$(echo "$PC_TMPL" | jq '.id="F201"|.line_range=[100,100]')
+f2=$(echo "$PC_TMPL" | jq '.id="F202"|.line_range=[250,250]')
+f3=$(echo "$PC_TMPL" | jq '.id="F203"|.line_range=[500,500]')
+jq --argjson a "$f1" --argjson b "$f2" --argjson c "$f3" \
+    '.findings=[$a,$b,$c]|.review_id="rev_pc2"' "$PC_DIR/base.json" > "$PC_DIR/pc2.json"
+"$TOOLS/artifact-render.py" --input "$PC_DIR/pc2.json" --output "$PC_DIR/pc2.md" >/dev/null
+if ! grep -q 'Polish — below threshold' "$PC_DIR/pc2.md"; then
+    pass "PC-2 (§7): polish-cluster section omitted when 3 findings span > 100 lines in same file"
+else
+    fail "PC-2: section should be absent; got:\n$(cat "$PC_DIR/pc2.md")"
+fi
+
+# PC-3: only 2 below_gate findings, densely clustered. < 3 → no section.
+f1=$(echo "$PC_TMPL" | jq '.id="F301"|.line_range=[100,100]')
+f2=$(echo "$PC_TMPL" | jq '.id="F302"|.line_range=[110,110]')
+jq --argjson a "$f1" --argjson b "$f2" \
+    '.findings=[$a,$b]|.review_id="rev_pc3"' "$PC_DIR/base.json" > "$PC_DIR/pc3.json"
+"$TOOLS/artifact-render.py" --input "$PC_DIR/pc3.json" --output "$PC_DIR/pc3.md" >/dev/null
+if ! grep -q 'Polish — below threshold' "$PC_DIR/pc3.md"; then
+    pass "PC-3 (§7): polish-cluster section omitted when fewer than 3 below_gate findings (even dense)"
+else
+    fail "PC-3: section should be absent; got:\n$(cat "$PC_DIR/pc3.md")"
+fi
+
+# ------------------------------------------------------------------ Phase 4 validator hardening
+# VR-* assertions cover the read-only preamble + fix-scope cross-check + post-wave
+# tree-cleanliness sweep added to 05-validation.md after the ray-finance 2026-04-19
+# run surfaced a validator that edited the working tree (F027) and two class-of-bug
+# misses whose prior fixes had scoped only to the obvious site (F032 ← F011,
+# F034 ← F037).
+VALIDATION_MD="$REPO/commands/_shared/05-validation.md"
+
+# VR-1: Phase 4a + 4b validator prompts contain a read-only preamble forbidding
+# Edit/Write. Prevents a repeat of the F027 incident where an Opus validator
+# modified src/cli/commands.ts and the orchestrator had to inline-revert with
+# no formal guardrail.
+if grep -qF '**Read-only.**' "$VALIDATION_MD" \
+    && grep -qF 'Do not use `Edit` or `Write`' "$VALIDATION_MD" \
+    && [[ "$(grep -cF '**Read-only.**' "$VALIDATION_MD")" -ge 2 ]]; then
+    pass "VR-1 (§19.5/§19.6): Phase 4a + 4b validator prompts contain read-only preamble"
+else
+    fail "VR-1: read-only preamble missing from one or both validator prompts in $VALIDATION_MD"
+fi
+
+# VR-2: Phase 4a validator prompt step 4 requires cross-checking
+# blast_radius.parallel_paths + grepping for in-repo precedent before
+# finalizing fix_proposal. Addresses the class-vs-instance gap.
+if grep -qF 'blast_radius.parallel_paths' "$VALIDATION_MD" \
+    && grep -qF 'in-repo precedent' "$VALIDATION_MD" \
+    && grep -qF 'the full class' "$VALIDATION_MD"; then
+    pass "VR-2 (§19.5): validator prompt step 4 requires parallel-path cross-check + precedent grep"
+else
+    fail "VR-2: class-not-instance fix-scope rule missing from $VALIDATION_MD"
+fi
+
+# VR-3: Post-wave tree-cleanliness sweep present as belt-and-braces for VR-1.
+# If a validator ignores the read-only preamble, the sweep reverts the tree
+# before Phase 5 and logs the incident to trace.md under phase_4_tree_dirty_reverted.
+if grep -qF 'phase_4_tree_dirty_reverted' "$VALIDATION_MD" \
+    && grep -qF 'status --porcelain' "$VALIDATION_MD"; then
+    pass "VR-3 (§4.4.5): post-wave tree-cleanliness sweep present with phase_4_tree_dirty_reverted trace tag"
+else
+    fail "VR-3: tree-cleanliness sweep missing from $VALIDATION_MD"
 fi
 
 echo

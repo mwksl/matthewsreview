@@ -444,10 +444,41 @@ pooled=$(jq -nc \
   '$internal + $external')
 ```
 
-**Step 2. Assign monotonic finding ids via the helper:**
+**Step 2. Line-range sanity filter.** Lens agents (notably L5-ux) have
+been observed fabricating `line_range` values well past the file's
+actual length — Phase 4 validators then "confirm" because they
+re-search the file for the claim pattern, and the rendered report
+carries unreachable line numbers. Drop hallucinated-range candidates
+before ids are assigned so wasted IDs don't litter the artifact:
 
 ```bash
-ided=$(printf '%s' "$pooled" \
+sanitized=$(printf '%s' "$pooled" \
+  | ~/.claude/commands/_shared/tools/line-range-check.sh \
+      --reviewed-sha "$reviewed_sha" \
+      2> >(tee -a "$trace_log_path" >&2))
+```
+
+Per-drop audit lines on stderr:
+
+- `lens_hallucinated_line_range: source=<src> file=<path> range=[a,b] actual_lines=<N>`
+- `lens_referenced_missing_file: source=<src> file=<path>`
+
+Phase 1.5 external-scrape candidates with `file == "(unknown)"` pass
+through untouched. On non-zero exit (bad ref / malformed JSON), log
+stderr to `trace.md` and fall through with `$pooled` unchanged —
+respecting every candidate is the safe default when the check can't
+run.
+
+```bash
+if [[ -z "$sanitized" ]]; then
+    sanitized="$pooled"
+fi
+```
+
+**Step 3. Assign monotonic finding ids via the helper:**
+
+```bash
+ided=$(printf '%s' "$sanitized" \
   | ~/.claude/commands/_shared/tools/assign-finding-ids.sh)
 ```
 
@@ -460,7 +491,7 @@ On non-zero exit (malformed pool JSON), log stderr to `trace.md` and
 bail — the whole detection phase must re-run because the pool is
 corrupt. This is a structural failure, not a per-candidate drop.
 
-**Step 3. Build full schema-valid findings + single `--add-finding`
+**Step 4. Build full schema-valid findings + single `--add-finding`
 sweep.** `artifact-patch.py --add-finding` does NOT default fields —
 it validates the payload against the full schema and rejects if
 anything required is missing. Partial candidates (from lenses) and
