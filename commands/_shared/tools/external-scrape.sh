@@ -22,7 +22,7 @@
 #   <dir>/issue_comments.json, <dir>/reviews.json, <dir>/review_comments.json
 # (missing files default to []). Skips all gh calls — useful for smoke
 # tests and ad-hoc rescoring of scraped data. Current user is read from
-# $ADAMS_REVIEW_FIXTURES_USER (default 'adammiller').
+# $ADAMS_REVIEW_FIXTURES_USER (default $(whoami)).
 # Default chain (first found wins):
 #   .claude/review-config.json                      (per-repo, cwd-relative)
 #   $ADAMS_REVIEW_CONFIG_ROOT/review-config.json    (override for tests)
@@ -156,7 +156,7 @@ if [[ -n "$FIXTURES_DIR" ]]; then
     # Offline mode — read pre-fetched JSON from a fixtures dir. Used for
     # unit-level smoke tests and ad-hoc replays. Each file must be a
     # JSON array (possibly empty); missing files are treated as [].
-    CURRENT_USER="${ADAMS_REVIEW_FIXTURES_USER:-adammiller}"
+    CURRENT_USER="${ADAMS_REVIEW_FIXTURES_USER:-$(whoami)}"
     for name in issue_comments reviews review_comments; do
         if [[ -f "$FIXTURES_DIR/$name.json" ]]; then
             cp "$FIXTURES_DIR/$name.json" "$WORK/$name.json"
