@@ -4,13 +4,13 @@ This directory is consumed by the `/adams-review` and `/adams-review-fix` slash 
 
 ## Layout
 
-- `schema-v1.json` — JSON Schema for `artifact.json`. See `docs/DESIGN.md` §6.
+- `schema-v1.json` — JSON Schema for `artifact.json`. See `docs/archive/DESIGN.md` §6 (archived rationale).
 - `tools/` — helper scripts invoked by the command orchestrator and (in a read-only subset) by sub-agents.
 - Phase fragment files (`00-preflight.md` … `10-post-fix-and-commit.md`) and lens reference files (`lens-ux-reference.md`, `lens-security-reference.md`).
 
 ## Helper scripts (`tools/`)
 
-See `docs/DESIGN.md` §8 for the full scripts contract and §21 for per-helper algorithmic sketches.
+See `docs/archive/DESIGN.md` §8 for the full scripts contract and §21 for per-helper algorithmic sketches (frozen reference).
 
 | Script | Language | Purpose |
 |---|---|---|
