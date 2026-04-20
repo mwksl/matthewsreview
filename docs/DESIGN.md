@@ -2462,18 +2462,19 @@ eligibility set on the next run.
 
 ### 27.2 Preconditions
 
-Read the finding's current disposition. Reject or no-op per the table
-below; otherwise proceed. Trace every rejection to `trace.md` under a
-`## promote (<ts>) — rejected` block.
+Read the finding's current disposition **and impact_type**. Reject
+or no-op per the table below; otherwise proceed. Trace every
+rejection to `trace.md` under a `## promote (<ts>) — rejected` block.
 
-| Current `disposition` | Action |
-|---|---|
-| `confirmed_auto` (with `human_confirmation`) | exit 0: already promoted, no-op |
-| `confirmed_auto` (validator-set) | exit 0: already confirmed_auto by Phase 4, no-op |
-| `resolved` | exit 1: fix already ran; cannot promote |
-| `disproven` without `--force` | exit 1: validator found positive evidence this isn't real; use `--force` to override |
-| `disproven` with `--force` | proceed (log warning to trace) |
-| `uncertain` / `below_gate` / `pre_existing_report` / `confirmed_manual` / `confirmed_report` / `pending_validation` / `partial` / `regression` | proceed |
+| Current `disposition` | Additional condition | Action |
+|---|---|---|
+| `confirmed_auto` | `human_confirmation != null` | exit 0: already promoted, no-op |
+| `confirmed_auto` | `human_confirmation == null` AND `impact_type ∈ {correctness, security}` | exit 0: already Phase-8-eligible via §13.1 (validator-scored deep-lane); no-op |
+| `confirmed_auto` | `human_confirmation == null` AND `impact_type ∉ {correctness, security}` | **proceed.** Light-lane `confirmed_auto` needs `human_confirmation != null` to bypass the Phase 8 impact_type filter (§27.6). |
+| `resolved` | — | exit 1: fix already ran; cannot promote |
+| `disproven` | `--force` absent | exit 1: validator found positive evidence this isn't real; use `--force` to override |
+| `disproven` | `--force` present | proceed (log warning to trace) |
+| `uncertain` / `below_gate` / `pre_existing_report` / `confirmed_manual` / `confirmed_report` / `pending_validation` / `partial` / `regression` | — | proceed |
 
 ### 27.3 Mutations
 

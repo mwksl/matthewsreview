@@ -100,23 +100,30 @@ PEP 668 (Python 3.12+ with Homebrew) marks system and user site-packages as exte
 ├── plans/                            ← per-stage plans
 ├── test/                             ← smoke harness + fixtures (Stage 1)
 └── commands/
-    └── _shared/                      ← symlinked into ~/.claude/commands/_shared
-        ├── schema-v1.json            ← JSON Schema for artifact.json
-        ├── tools/
-        │   ├── _common.py            ← shared Python helpers
-        │   ├── artifact-patch.py     ← machine-state writer
-        │   ├── artifact-render.py    ← JSON → Markdown
-        │   ├── artifact-validate.sh  ← schema check (bash wrapper)
-        │   ├── artifact-read.sh      ← jq wrapper
-        │   ├── artifact-publish.sh   ← PR comment post/patch
-        │   ├── claude-md-paths.sh    ← walk-up CLAUDE.md finder
-        │   ├── staleness.sh          ← git diff intersection
-        │   ├── log-phase.sh          ← trace.md + phases.jsonl appender
-        │   └── log-tokens.sh         ← tokens.jsonl appender
-        └── <phase fragments>          ← added in Stage 2 / Stage 3
+    ├── adams-review.md                ← top-level /adams-review slash command
+    ├── adams-review-walkthrough.md    ← top-level /adams-review-walkthrough slash command
+    ├── adams-review-fix.md            ← top-level /adams-review-fix slash command
+    ├── adams-review-promote.md        ← top-level /adams-review-promote slash command
+    └── _shared/                       ← symlinked into ~/.claude/commands/_shared
+        ├── schema-v1.json             ← JSON Schema for artifact.json
+        ├── promote-core.md            ← shared precondition + patch fragment (used by promote and walkthrough)
+        ├── 00-preflight.md … 10-post-fix-and-commit.md  ← per-phase fragments for the review + fix commands
+        ├── lens-*-reference.md        ← per-lens prompt references
+        └── tools/
+            ├── _common.py             ← shared Python helpers
+            ├── artifact-patch.py      ← machine-state writer
+            ├── artifact-render.py     ← JSON → Markdown
+            ├── artifact-validate.sh   ← schema check (bash wrapper)
+            ├── artifact-read.sh       ← jq wrapper
+            ├── artifact-publish.sh    ← PR comment post/patch
+            ├── claude-md-paths.sh     ← walk-up CLAUDE.md finder
+            ├── staleness.sh           ← git diff intersection
+            ├── log-phase.sh           ← trace.md + phases.jsonl appender
+            ├── log-tokens.sh          ← tokens.jsonl appender
+            └── (other helpers: group-fixes.py, repo-slug.sh, comment-freshness.sh, origin-crosscheck.sh, external-scrape.sh, assign-finding-ids.sh)
 ```
 
-The top-level command files (`~/.claude/commands/adams-review.md`, `adams-review-fix.md`) are added in Stages 2 and 3.
+Each top-level command file needs its own symlink in `~/.claude/commands/` (see the *Setup* section above). The `_shared/` directory symlink propagates every fragment, helper, and schema automatically.
 
 ## Status
 

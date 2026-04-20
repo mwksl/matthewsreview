@@ -65,7 +65,14 @@ curr_disp=$(jq -r '.disposition' <<<"$finding_json")
 curr_action=$(jq -r '.actionability' <<<"$finding_json")
 curr_score=$(jq -r '.score_phase4 // "null"' <<<"$finding_json")
 curr_hc=$(jq -c '.human_confirmation // null' <<<"$finding_json")
+curr_impact=$(jq -r '.impact_type' <<<"$finding_json")
 ```
+
+`curr_impact` is used by the precondition table below to distinguish
+deep-lane (correctness/security — already Phase-8-eligible when
+`confirmed_auto`) from light-lane (ux/policy/architecture — NOT
+eligible without `human_confirmation`, so promote must proceed to
+set it).
 
 `curr_score` is the literal string `"null"` when the finding is
 unscored; pass it through that way (the JSON encoder at step 5 handles
@@ -73,18 +80,29 @@ both the integer and null cases via `--argjson`).
 
 ### Step 4. Check preconditions
 
-| `curr_disp` | Action |
-|---|---|
-| `confirmed_auto` and `curr_hc != null` | Exit 0 with: "F$N already promoted by @$reviewer on $ts; no-op." |
-| `confirmed_auto` and `curr_hc == null` | Exit 0 with: "F$N already confirmed_auto by validator (score=$curr_score); no-op." |
-| `resolved` | Exit 1: "F$N is resolved (fix already ran); cannot promote." |
-| `disproven` and `force == false` | Exit 1: "F$N was disproven by Phase 4 (score=$curr_score). Validator found positive evidence this isn't a real issue. Re-run with --force to override." |
-| `disproven` and `force == true` | Proceed with a warning line in trace.md: `disproven→confirmed_auto via --force`. |
-| `uncertain`, `below_gate`, `pre_existing_report`, `confirmed_manual`, `confirmed_report`, `pending_validation`, `partial`, `regression` | Proceed. |
+| `curr_disp` | Additional condition | Action |
+|---|---|---|
+| `confirmed_auto` | `curr_hc != null` | Exit 0 with: "F$N already promoted by @$reviewer on $ts; no-op." |
+| `confirmed_auto` | `curr_hc == null` AND `curr_impact ∈ {correctness, security}` | Exit 0 with: "F$N already confirmed_auto by validator (score=$curr_score) AND impact_type=$curr_impact — already Phase-8-eligible via §13.1; no-op." |
+| `confirmed_auto` | `curr_hc == null` AND `curr_impact ∉ {correctness, security}` | **Proceed.** Light-lane `confirmed_auto` needs `human_confirmation != null` to bypass the Phase 8 impact_type lane filter (§13.1, §27.6). Promote the finding. |
+| `resolved` | — | Exit 1: "F$N is resolved (fix already ran); cannot promote." |
+| `disproven` | `force == false` | Exit 1: "F$N was disproven by Phase 4 (score=$curr_score). Validator found positive evidence this isn't a real issue. Re-run with --force to override." |
+| `disproven` | `force == true` | Proceed with a warning line in trace.md: `disproven→confirmed_auto via --force`. |
+| `uncertain`, `below_gate`, `pre_existing_report`, `confirmed_manual`, `confirmed_report`, `pending_validation`, `partial`, `regression` | — | Proceed. |
 
 For each exit-1 case, print a clear user message AND emit a one-line
 `## promote (<ts>) — rejected` block to `trace.md` so rejections are
 auditable.
+
+**Note on the light-lane confirmed_auto row.** This was previously a
+blanket no-op for any `confirmed_auto` without `human_confirmation`,
+which silently broke promoting light-lane findings (the case
+`/adams-review-walkthrough` exists to address). The split is
+intentional: deep-lane `confirmed_auto` without `human_confirmation`
+is already eligible (validator-scored above threshold), so promoting
+would be a no-op; light-lane `confirmed_auto` without
+`human_confirmation` is skipped by the lane filter, so promoting
+DOES flip it into the eligible set.
 
 ### Step 4.5. Auto-prompt for `fix_hint` when needed
 

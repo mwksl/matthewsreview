@@ -138,23 +138,21 @@ table), 4.5 (`fix_hint` heuristic prompt), 5 (build
 entry) live in the shared fragment below. It reads `$finding_id`,
 `$reason`, `$fix_hint`, `$force`, `$artifact_path`, and
 `$trace_log_path` from ambient context and populates `$curr_disp`,
-`$curr_action`, `$curr_score`, `$curr_hc`, `$ts`, and `$reviewer` for
-use in steps 7, 8, and 10 below.
+`$curr_action`, `$curr_score`, `$curr_hc`, `$curr_impact`, `$ts`, and
+`$reviewer` for use in steps 7, 8, and 10 below.
 
 !`cat ~/.claude/commands/_shared/promote-core.md`
 
 ### 7. Re-render `artifact.md`
 
-Skip this step entirely when `defer_publish == true`. The caller is
-expected to run `artifact-render.py` once after all deferred promotes
-have landed.
+Skip this step entirely when `defer_publish == true` — jump to step
+8. The caller is expected to run `artifact-render.py` once after
+all deferred promotes have landed.
 
 ```bash
-if [[ "${defer_publish:-false}" != "true" ]]; then
-    ~/.claude/commands/_shared/tools/artifact-render.py \
-        --input "$artifact_path" \
-        --output "$review_dir/artifact.md"
-fi
+~/.claude/commands/_shared/tools/artifact-render.py \
+    --input "$artifact_path" \
+    --output "$review_dir/artifact.md"
 ```
 
 On non-zero: log stderr to `trace.md` with tag `promote_render_failed`,
@@ -163,17 +161,9 @@ re-render).
 
 ### 8. Re-publish to the PR (PR mode only)
 
-Skip this step entirely when `defer_publish == true`. The caller is
-expected to run `artifact-publish.sh` once after all deferred promotes
-have landed.
-
-```bash
-if [[ "${defer_publish:-false}" == "true" ]]; then
-    # Step 10 below will print a terse one-liner pointing at the
-    # helpers the caller must run.
-    :
-else
-```
+Skip this step entirely when `defer_publish == true` — jump to step
+10. The caller is expected to run `artifact-publish.sh` once after
+all deferred promotes have landed.
 
 Read `mode`, `pr_number`, `comment_id` from the artifact:
 
@@ -205,10 +195,6 @@ If `mode == "local"`: call with `--mode local --review-id "$review_id"
 On non-zero exit: log stderr to `trace.md` with tag
 `promote_publish_failed`. Surface to user at step 10 (artifact state
 persists; user can manually re-publish with the helper).
-
-```bash
-fi  # end of defer_publish guard opened at top of step 8
-```
 
 ### 10. User-visible summary
 

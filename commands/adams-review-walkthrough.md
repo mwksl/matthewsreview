@@ -131,7 +131,12 @@ scope_ids=$(jq -r --argjson thr "$threshold" '
     ] | join(",")
 ' "$artifact_path")
 
-scope_count=$(echo "$scope_ids" | awk -F, 'NF && $1 != "" {print NF; exit} END { if (NR==0) print 0 }')
+if [[ -z "$scope_ids" ]]; then
+    scope_count=0
+else
+    # scope_ids is comma-separated; count fields directly.
+    scope_count=$(awk -F, '{print NF; exit}' <<<"$scope_ids")
+fi
 ```
 
 If `scope_ids` is empty:
@@ -319,28 +324,34 @@ one click.
 
 #### 5.5. Dispatch per choice
 
-**If the reviewer picked a promote option (briefing option with
-`fix_hint_if_picked` non-null, or a promote option with null
-fix-hint):**
+**If the reviewer picked a promote option:**
 
-Set ambient context for the shared promote-core fragment:
+Set ambient context for the shared promote-core fragment (steps 3,
+4, 4.5, 5, 6, 9 — the body of which is inlined once at the end of
+this file for reference and for Claude Code's command-load
+preprocessor to resolve):
 
 ```bash
 fix_hint="${briefing_option.fix_hint_if_picked:-}"      # may be empty
 reason="walkthrough: $finding_id — picked option $label ($title)"
 force=false
-defer_publish=true        # suppress render+publish in this command
-DEFER_PUBLISH=1           # belt-and-suspenders env-var form for
-                          # promote-core.md's guards
+defer_publish=true
 ```
 
-Then include the shared fragment inline (exactly as promote's step
-3–6, 9 would execute):
+Then execute the shared fragment's steps 3, 4, 4.5 (the prompt is
+skipped because `$fix_hint` is either non-empty from the briefing or
+deliberately empty to mean "no steering hint"), 5, 6, and 9 for this
+finding id. The fragment reads `$finding_id`, `$reason`, `$fix_hint`,
+`$force`, `$artifact_path`, and `$trace_log_path` from this ambient
+context.
 
-!`cat ~/.claude/commands/_shared/promote-core.md`
+**The fragment runs once per iteration** — read it as the per-finding
+playbook, not as a single-shot action. Each iteration patches one
+finding + appends one `## promote` block to `trace.md`; render and
+publish stay deferred until step 6 of this command.
 
-Capture the `$ts` and `$curr_disp` / `$curr_score` emitted by the
-fragment. Append to `decisions`:
+Capture the `$ts`, `$curr_disp`, `$curr_score` the fragment emits
+for this iteration. Append to `decisions`:
 
 ```
 {
@@ -604,3 +615,15 @@ pattern as `/adams-review-promote` step 10).
   promotions you already made stand. Re-invoking the walkthrough
   skips them naturally (the scope filter excludes
   `human_confirmation != null`).
+
+---
+
+## Appendix — shared promote-core fragment
+
+The body below is the verbatim content of
+`commands/_shared/promote-core.md`, included once via the Claude Code
+preprocessor. Step 5.5 above references this content — treat it as
+the per-iteration playbook for a single promote decision, not as
+a single-shot action.
+
+!`cat ~/.claude/commands/_shared/promote-core.md`

@@ -346,3 +346,14 @@ Each commit runs `test/smoke.sh` and stays green.
 - **Idempotent re-invocation**: if user re-runs walkthrough mid-session (after promoting some), the scope filter excludes already-promoted findings; no double-promote possible.
 
 Post-execution once-over re-reads the extracted `promote-core.md` against the original promote command to confirm behavioral parity, and re-reads each DESIGN / README / CLAUDE.md edit for drift.
+
+## 18. Pre-existing bug surfaced during execution
+
+The once-over caught that promote's `confirmed_auto` + `curr_hc == null` precondition was a blanket no-op ("already confirmed_auto by validator; no-op"). This is correct for deep-lane findings (correctness/security — already Phase-8-eligible without promote) but silently broken for light-lane findings (ux/policy/architecture — Phase 8's impact_type filter skips them, so they genuinely DO need `human_confirmation != null` to become eligible). The bug predates this stage — it was present in the original `/adams-review-promote` since commit de54b4b.
+
+Fixed in this stage because the walkthrough hits it directly — walking through a light-lane `confirmed_auto` finding (F017/F012/F013/F015/F019 in the ray-finance case study) and trying to promote would otherwise exit no-op without landing the `human_confirmation`, leaving the finding still skipped by `/adams-review-fix`. The fix splits the precondition row by `impact_type`:
+
+- deep-lane + no `human_confirmation` → exit 0 (already eligible, consistent with prior behavior)
+- light-lane + no `human_confirmation` → **proceed** (sets `human_confirmation` to unlock Phase 8 lane bypass)
+
+Applied to `commands/_shared/promote-core.md` step 4 + DESIGN §27.2. Smoke assertion WT-0 guards against accidental revert.

@@ -1961,6 +1961,19 @@ fi
 # surfaces here.
 
 PROMOTE_MD="$REPO/commands/adams-review-promote.md"
+PROMOTE_CORE_MD="$REPO/commands/_shared/promote-core.md"
+
+# WT-0: promote-core precondition distinguishes deep-lane from light-lane
+# confirmed_auto. Pre-existing-bug guard: a blanket no-op on any
+# confirmed_auto + curr_hc == null silently breaks promoting light-lane
+# findings (§27.2, §27.6). If a future edit collapses the split back,
+# this surfaces it.
+if grep -q 'confirmed_auto.*curr_hc == null.*impact.*correctness.*security' "$PROMOTE_CORE_MD" \
+   || (grep -q 'curr_impact' "$PROMOTE_CORE_MD" && grep -q 'light-lane' "$PROMOTE_CORE_MD"); then
+    pass "WT-0 (§27.2, §27.6): promote-core precondition splits confirmed_auto by impact_type lane"
+else
+    fail "WT-0: promote-core.md missing lane-aware confirmed_auto precondition split"
+fi
 
 # The walkthrough scope-filter jq — must stay in sync with the expression in
 # commands/adams-review-walkthrough.md §3. Held as a shell variable so the
