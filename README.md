@@ -42,30 +42,68 @@ Steps 2 and 3 can land days or weeks after step 1 — the review artifact persis
 | `gh` | 2.x | `artifact-publish.sh`, `external-scrape.sh` | `brew install gh`, `gh auth login` |
 | `git` | 2.x | everywhere | standard |
 
-### Setup
+### Installation
 
 ```bash
-# One-time symlinks so Claude Code sees the shared dir + each top-level
-# command at its canonical path. The repo is the source of truth;
-# ~/.claude/commands/* just points at it.
-ln -s ~/Projects/adams-review/commands/_shared                         ~/.claude/commands/_shared
-ln -s ~/Projects/adams-review/commands/adams-review.md                 ~/.claude/commands/adams-review.md
-ln -s ~/Projects/adams-review/commands/adams-review-walkthrough.md     ~/.claude/commands/adams-review-walkthrough.md
-ln -s ~/Projects/adams-review/commands/adams-review-fix.md             ~/.claude/commands/adams-review-fix.md
-ln -s ~/Projects/adams-review/commands/adams-review-promote.md         ~/.claude/commands/adams-review-promote.md
+git clone <repo-url> ~/Projects/adams-review
+cd ~/Projects/adams-review
+bash scripts/install.sh
+bash test/smoke.sh          # expect "smoke: PASS (…)"
 ```
 
-The `_shared/` directory symlink propagates every helper script and fragment (including `promote-core.md`) automatically — only new **top-level command files** need per-command symlinks.
+Then try `/adams-review` in a Claude Code session on any branch or PR.
+
+**Uninstall:** `bash scripts/uninstall.sh`
+
+#### How install works
+
+The install script does two things:
+
+1. **Symlinks** five paths into `~/.claude/commands/` so Claude Code discovers the slash commands:
+
+   ```
+   ~/.claude/commands/_shared                     -> <repo>/commands/_shared
+   ~/.claude/commands/adams-review.md             -> <repo>/commands/adams-review.md
+   ~/.claude/commands/adams-review-fix.md         -> <repo>/commands/adams-review-fix.md
+   ~/.claude/commands/adams-review-walkthrough.md -> <repo>/commands/adams-review-walkthrough.md
+   ~/.claude/commands/adams-review-promote.md     -> <repo>/commands/adams-review-promote.md
+   ```
+
+   The `_shared/` symlink propagates every helper, fragment, and schema automatically — only new top-level command files need their own symlink.
+
+2. **Substitutes the tools-path prefix** in four command files' `allowed-tools:` YAML. Claude Code's permission model requires absolute paths in `allowed-tools` grants (no `$HOME`/`~` expansion), and the committed form is the maintainer's `/Users/adammiller/...`. The install script rewrites it to your `$HOME` so grants resolve on your machine.
+
+   If you are not the maintainer, this leaves the four command files (`commands/adams-review*.md`) showing as modified in `git status`. That is expected and reversible. **To submit a PR, run `bash scripts/uninstall.sh` first** to revert the substitution; make your edits; then reinstall.
+
+#### Verify manually
+
+```bash
+readlink ~/.claude/commands/_shared                     # should print <repo>/commands/_shared
+readlink ~/.claude/commands/adams-review.md             # should print <repo>/commands/adams-review.md
+uv --version                                            # 0.7+
+```
+
+<details>
+<summary>Manual setup (if the script doesn't fit your environment)</summary>
+
+```bash
+# 1. Rewrite /Users/adammiller/ → $HOME/ in the four command files (portable sed).
+for f in commands/adams-review*.md; do
+  sed "s|/Users/adammiller/|$HOME/|g" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+done
+
+# 2. Symlinks (repeat for each top-level command).
+mkdir -p ~/.claude/commands
+ln -sfn "$PWD/commands/_shared"                         ~/.claude/commands/_shared
+ln -sfn "$PWD/commands/adams-review.md"                 ~/.claude/commands/adams-review.md
+ln -sfn "$PWD/commands/adams-review-walkthrough.md"     ~/.claude/commands/adams-review-walkthrough.md
+ln -sfn "$PWD/commands/adams-review-fix.md"             ~/.claude/commands/adams-review-fix.md
+ln -sfn "$PWD/commands/adams-review-promote.md"         ~/.claude/commands/adams-review-promote.md
+```
+
+</details>
 
 No separate Python dep install. First invocation of any `*.py` helper triggers `uv` to resolve `jsonschema` (or any other declared dep) and cache it. Subsequent runs are fast.
-
-Verify:
-
-```bash
-readlink ~/.claude/commands/_shared                           # should print the repo path
-readlink ~/.claude/commands/adams-review-walkthrough.md       # should print the worktree/repo path
-uv --version                                                  # 0.7+
-```
 
 ### Review state location
 

@@ -183,7 +183,7 @@ adams-review/
     └── fixtures/
 ```
 
-Top-level command files need **per-command symlinks** into `~/.claude/commands/`. The `_shared/` directory symlink propagates fragments + helpers automatically. Add new top-level commands with `ln -s $PWD/commands/<name>.md ~/.claude/commands/<name>.md` (see README §Setup for the full list).
+Top-level command files need **per-command symlinks** into `~/.claude/commands/`, created by `scripts/install.sh`. The `_shared/` directory symlink propagates fragments + helpers automatically. Adding a new top-level command means adding its stem to the `for cmd in …` loops in both `scripts/install.sh` and `scripts/uninstall.sh` (the `adams-review*.md` sed glob covers new files automatically as long as the name matches that pattern), then re-running `scripts/install.sh`. See README §Installation for the end-user flow.
 
 ## How to test
 
@@ -191,7 +191,7 @@ Top-level command files need **per-command symlinks** into `~/.claude/commands/`
 test/smoke.sh
 ```
 
-Expects `smoke: PASS (129 assertions)`. Every helper script and renderer path is covered. Existing assertions should stay green across changes; new helpers should add 2–3 assertions in the OC-\* / FR-\* / RH-\* / FX-\* / MP-\* / WT-\* naming style.
+Expects `smoke: PASS (N assertions)` where N grows as helpers are added. Every helper script and renderer path is covered. Existing assertions should stay green across changes; new helpers should add 2–3 assertions in the OC-\* / FR-\* / RH-\* / FX-\* / MP-\* / WT-\* naming style.
 
 ## Dependencies
 
@@ -227,7 +227,7 @@ Enough to work without opening the archive. Each rule is a decision that was lea
 
 9. **Fix-group agents may not delete or rename files.** Layered enforcement: prompt prohibition + Phase 9.pre `git status --porcelain` scan for `D ` entries.
 
-10. **Absolute paths in `allowed-tools` grants.** Under the `_shared/` symlink, `Bash(/Users/.../tools/<script>.sh:*)` resolves cleanly. No relative-name + `PATH` fallback needed.
+10. **Absolute paths in `allowed-tools` grants.** Under the `_shared/` symlink, `Bash(/Users/.../tools/<script>.sh:*)` resolves cleanly. No relative-name + `PATH` fallback needed. Committed state shows `/Users/adammiller/...` literally; `scripts/install.sh` substitutes the current user's `$HOME` into the working tree at install time (no-op for the maintainer), and `scripts/uninstall.sh` reverses it.
 
 11. **Working set lives in-prompt, not shell vars.** Fragment composition (`` !`cat` ``) inlines markdown into a single prompt, so "variables" like `review_id`, `comparison_ref`, `reviewed_files_all` are orchestrator context values, not `$VAR`s. When a later fragment needs an artifact-stored value, call `artifact-read.sh --filter '.foo'` — don't pass it through prose. Run-level vars that don't live in the artifact (`run_id`, `threshold`, `stash_taken`) are surfaced once at the top of the top-level command file.
 
@@ -251,6 +251,7 @@ All scripts live under `commands/_shared/tools/`. Grant `Bash(/Users/.../tools/<
 | `staleness.sh` | Bash | Phase 7 file-overlap classifier. `git diff --name-only latest_known_sha..HEAD ∩ reviewed_files_all`. |
 | `claude-md-paths.sh` | Bash | Walks up from each touched file to repo root; emits deduped CLAUDE.md paths root-first. |
 | `origin-crosscheck.sh` | Bash | Phase 1 post-lens. Blame-traces each candidate; forces `pre_existing:high` if fully reachable from `$comparison_ref`; downgrades conflicting lens verdicts. |
+| `line-range-check.sh` | Bash | Phase 1 join-step sanity filter. Drops candidates whose `line_range[1]` overshoots the file at `$reviewed_sha` (lens-hallucinated ranges); emits `lens_hallucinated_line_range:` / `lens_referenced_missing_file:` audit lines. Pass-through for `file == "(unknown)"`. |
 | `comment-freshness.sh` | Bash | Phase 1.5 post-scrape. Drops bot comments whose referenced code has changed since the comment was posted (§13.13). |
 | `repo-slug.sh` | Bash | Canonical `<repo-slug>` derivation. Single source of truth (Operational rule 7). |
 
