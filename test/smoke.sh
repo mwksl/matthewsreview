@@ -1981,12 +1981,15 @@ fi
 # The walkthrough scope-filter jq — must stay in sync with the expression in
 # commands/adams-review-walkthrough.md §3. Held as a shell variable so the
 # assertions below can exercise it against different fixtures without drift.
+# NOTE: pre_existing_report findings are excluded from scope_full_ids — they
+# are routed exclusively to §6.5 issue filing, never walked for promotion.
 WT_SCOPE_JQ='
 [.findings[]
  | select(.current_state == "open")
  | select(.disposition != "resolved")
  | select(.disposition != "disproven")
  | select(.disposition != "pending_validation")
+ | select(.disposition != "pre_existing_report")
  | select(.human_confirmation == null)
  | select(
      (
@@ -2132,10 +2135,12 @@ else
     fail "WT-5: --defer-publish or promote-core include missing from $PROMOTE_MD"
 fi
 
-# WT-7: the "Qualifying" scope jq (step 3 of walkthrough) must exclude
-# below_gate and pre_existing_report while keeping everything else the
-# full-scope jq keeps. Mirrors the second jq in commands/adams-review-walkthrough.md;
-# keep in sync when that file changes.
+# WT-7: the "Qualifying" scope jq (step 3 of walkthrough) must additionally
+# exclude below_gate (which the full scope keeps for the reviewer who wants
+# to audit Phase-3-demoted findings). BOTH the full and qualifying scopes
+# exclude pre_existing_report — those are routed only to §6.5 issue filing
+# and are never walked for promotion. Mirrors the second jq in
+# commands/adams-review-walkthrough.md; keep in sync when that file changes.
 WT_QUALIFYING_JQ='
 [.findings[]
  | select(.current_state == "open")
@@ -2166,12 +2171,15 @@ wt7_findings=$(jq -nc \
 wt7_fx=$(wt_build_fixture "$wt7_findings")
 wt7_full=$(echo "$wt7_fx" | jq -r --argjson thr 60 "$WT_SCOPE_JQ")
 wt7_qual=$(echo "$wt7_fx" | jq -r --argjson thr 60 "$WT_QUALIFYING_JQ")
-if [[ ",$wt7_full," == *,W050,* && ",$wt7_full," == *,W051,* && ",$wt7_full," == *,W052,* && ",$wt7_full," == *,W053,* ]] \
+# Full scope includes below_gate (W050) but excludes pre_existing_report (W051)
+# — pre-existing is routed only to §6.5. Qualifying additionally excludes
+# below_gate (W050).
+if [[ ",$wt7_full," == *,W050,* && ",$wt7_full," != *,W051,* && ",$wt7_full," == *,W052,* && ",$wt7_full," == *,W053,* ]] \
    && [[ ",$wt7_qual," != *,W050,* && ",$wt7_qual," != *,W051,* ]] \
    && [[ ",$wt7_qual," == *,W052,* && ",$wt7_qual," == *,W053,* ]]; then
-    pass "WT-7 (§28 §3): qualifying scope excludes below_gate + pre_existing_report; full scope includes them"
+    pass "WT-7 (§28 §3): full scope excludes pre_existing_report but keeps below_gate; qualifying excludes both"
 else
-    fail "WT-7: full='$wt7_full' qual='$wt7_qual' (expected full=W050..W053, qual=W052,W053)"
+    fail "WT-7: full='$wt7_full' qual='$wt7_qual' (expected full=W050,W052,W053; qual=W052,W053)"
 fi
 
 # WT-8: the pre-existing isolation jq (step 3, third expression) must

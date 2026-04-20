@@ -101,6 +101,21 @@ Capture paths. Schema-validate:
 
 On non-zero: surface the validator stderr and abort.
 
+Extract `mode` and `pr_number` from the validated artifact now — both
+are needed by §3's mode-aware exit checks, §4's preflight messaging,
+§6.2's publish call, §6.5's issue-filing gate, and §7's decisions-log
+POST. Reading them once at the top of the run avoids the historical
+bug where §6.5 ran before §6.2's extraction and found `mode` unset:
+
+```bash
+mode=$(jq -r '.mode' "$artifact_path")
+pr_number=$(jq -r '.pr_number // empty' "$artifact_path")
+```
+
+(`comment_id` is extracted later in §6.2 — it's only read by the
+publish call, and deferring it keeps the "reviewer cancelled early"
+paths from unnecessarily reading it.)
+
 ### 3. Compute walkthrough scope
 
 The walkthrough surfaces findings `/adams-review-fix` would SKIP at
@@ -109,8 +124,14 @@ The walkthrough surfaces findings `/adams-review-fix` would SKIP at
 handle `pre_existing_report` findings on a separate track.
 
 **`scope_full_ids`** — the inverse of the Phase 8 eligibility selector
-at `09-fix-execution.md` step 8.1 (minus terminal + already-promoted).
-**Keep in sync with that fragment.**
+at `09-fix-execution.md` step 8.1 (minus terminal + already-promoted),
+**further reduced by excluding `pre_existing_report`** which is routed
+exclusively to §6.5's issue-filing phase and is never surfaced for
+promotion (a user may still direct Claude off-menu to promote a
+specific pre-existing finding; §6.5 defends against the double-
+processing that would otherwise create). **Keep the Phase-8-inverse
+shape in sync with `09-fix-execution.md`; the pre-existing exclusion
+is specific to the walkthrough.**
 
 ```bash
 scope_full_ids=$(jq -r --argjson thr "$threshold" '
@@ -120,6 +141,9 @@ scope_full_ids=$(jq -r --argjson thr "$threshold" '
      | select(.disposition != "resolved")
      | select(.disposition != "disproven")
      | select(.disposition != "pending_validation")
+     # Pre-existing findings are handled only via §6.5 issue filing;
+     # never walked for promotion. (See header comment above.)
+     | select(.disposition != "pre_existing_report")
      # Skip already-promoted (human_confirmation set). Re-running the
      # walkthrough mid-session naturally picks up where it left off.
      | select(.human_confirmation == null)
@@ -209,9 +233,25 @@ $threshold to apply them) or the review has no actionable findings
 left. Nothing to do.
 ```
 
-Exit 0. If `scope_full_count == 0` but `scope_preexisting_count > 0`,
-fall through to step 4 anyway — the preflight will note that the walk
-has no scope but the issue-filing phase still has work to offer.
+Exit 0.
+
+If `scope_full_count == 0` AND `scope_preexisting_count > 0` AND
+`mode == "local"`, also exit cleanly — the only remaining work
+(pre-existing issue filing at §6.5) requires a PR to link against, so
+local mode can't deliver it and falling through to §4 would promise
+work the run can't perform:
+
+```
+$scope_preexisting_count pre-existing finding(s) in this review, but
+local mode has no PR to file issues against. Re-run
+/adams-review-walkthrough on the PR branch (or use the GitHub UI)
+to file them. Nothing to do here.
+```
+
+Exit 0. If `scope_full_count == 0` but `scope_preexisting_count > 0`
+AND `mode == "pr"`, fall through to step 4 anyway — the preflight
+will note that the walk has no scope but the issue-filing phase still
+has work to offer.
 
 ### 4. Pre-flight summary + go/no-go
 
@@ -247,9 +287,15 @@ the reviewer sees the full picture before picking a tier). Add a
 
 ```bash
 preview=$(jq -r --arg ids "$scope_full_ids" --arg preids "$scope_preexisting_ids" --argjson thr "$threshold" '
-    ($ids | split(",")) as $want
-    | ($preids | split(",")) as $pre
-    | [.findings[] | select(.id as $id | $want | index($id)) | {
+    # Preview covers both walk-eligible ids (scope_full_ids) AND
+    # pre-existing ids (scope_preexisting_ids) so the reviewer sees
+    # every finding that either tier or §6.5 will touch. split("")
+    # on an empty string yields [""]; the inner select filters that
+    # out via the non-empty-id guard.
+    (($ids | split(",")) + ($preids | split(","))) as $want
+    | [.findings[]
+       | select(.id as $id | ($id | length) > 0 and ($want | index($id)))
+       | {
         id,
         tier: (
           if (.disposition == "below_gate") then "below_gate"
@@ -634,16 +680,9 @@ separately so the decisions-log (§7.1) and user-visible summary
 (§9) can't misleadingly imply the reviewer walked all scope_count
 findings.
 
-Extract `mode` + `pr_number` from the artifact NOW (before the guard
-below) so they are available to §6.5 and §7 even when §6.1/§6.2 are
-skipped:
-
-```bash
-mode=$(jq -r '.mode' "$artifact_path")
-pr_number=$(jq -r '.pr_number // empty' "$artifact_path")
-```
-
-(`comment_id` stays in §6.2 — it's only used by the publish call.)
+(`mode` and `pr_number` were already extracted in §2 and are in ambient
+context. `comment_id` is deferred to §6.2 where the publish call uses
+it.)
 
 Guard: if `promote_count == 0` (all skip/stop), there's nothing to
 re-render or re-publish. Skip steps 6.1 and 6.2; proceed to step 6.5
@@ -677,8 +716,8 @@ patches stand; the user can manually re-render.
 
 #### 6.2. Re-publish the main review comment (PR mode only)
 
-`mode` and `pr_number` were already extracted in §6 (before the guard).
-Extract `comment_id` here — it's only used by the publish call:
+`mode` and `pr_number` were already extracted in §2. Extract
+`comment_id` here — it's only used by the publish call:
 
 ```bash
 comment_id=$(jq -r '.comment_id // empty' "$artifact_path")
@@ -781,7 +820,32 @@ f_file=$(jq -r '.file' <<<"$finding_json")
 f_line_start=$(jq -r '.line_range[0]' <<<"$finding_json")
 f_line_end=$(jq -r '.line_range[1]' <<<"$finding_json")
 f_claim=$(jq -r '.claim' <<<"$finding_json")
+f_hc=$(jq -c '.human_confirmation // null' <<<"$finding_json")
 ```
+
+**Guard: skip findings already promoted off-menu.** The default flow
+never promotes a `pre_existing_report` finding (scope_full_ids excludes
+them per §3). But a user can direct Claude mid-run to promote a
+specific pre-existing finding as an explicit override. In that case
+the finding has `human_confirmation != null` now, even though
+`scope_preexisting_ids` (captured at §3 before the override) still
+lists its id. Filing a GitHub issue for a finding that's also queued
+for auto-fix double-processes it:
+
+```bash
+if [[ "$f_hc" != "null" ]]; then
+    {
+        printf '## walkthrough_issue_filing_skipped (%s)\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'finding=%s reason=already_promoted_off_menu\n\n' "$finding_id"
+    } >> "$trace_log_path"
+    # One-line chat update mirroring the §5.6 cadence:
+    #   "F026 skipped: already promoted earlier this run."
+    continue
+fi
+```
+
+Do NOT add an `issues_filed[]` entry for a skipped finding — the array
+records what was actually filed, not what was considered.
 
 **Dispatch a Sonnet drafting agent.** Model: `sonnet`. Budget: ~2-3k
 tokens. Prompt:
@@ -1005,19 +1069,24 @@ is non-empty. Other sections continue to follow the existing "emit
 only when non-empty" rule. Similarly, omit the `$unreviewed_count
 unreviewed` clause from the header sentence when `$unreviewed_count
 == 0` (i.e., every scoped finding was promoted, skipped, or stopped
-at).
+at). Omit the "Promoted findings will be picked up by the next
+`/adams-review-fix`…" sentence entirely when `$promote_count == 0`
+— with zero promotes it describes a non-event (and misleadingly
+hints that a fix run is pending when it isn't).
 
 #### 7.2. POST via `gh api`
 
 ```bash
 comment_body_path=$(mktemp -t adams-walkthrough-body.XXXXXX)
+err_tmp=$(mktemp -t adams-walkthrough-gh-err.XXXXXX)
 # ... write the rendered markdown to $comment_body_path ...
 
 decisions_comment_id=$(gh api \
     --method POST \
     "repos/{owner}/{repo}/issues/$pr_number/comments" \
     -F "body=@$comment_body_path" \
-    --jq '.id')
+    --jq '.id' 2>"$err_tmp")
+gh_rc=$?
 
 rm -f "$comment_body_path"
 ```
@@ -1029,13 +1098,18 @@ from `$repo_root` (the command file's $repo_root is already set at
 step 2; the gh process inherits working directory unless we explicitly
 cd).
 
-Capture `decisions_comment_id` into trace only (do NOT mutate the
-artifact's `comment_id`).
+Stderr is captured to `$err_tmp` (mirrors the §6.5.2 `gh issue create`
+pattern) so the "log to trace on failure" branch below has something
+to log. Without the `2>` redirect, stderr would print to the user's
+terminal and the trace entry would be blank.
 
-On `gh` failure: log stderr to `trace.md` with tag
-`walkthrough_decisions_comment_failed`. Include the rendered markdown
-in the trace so the reviewer can recover the content and manually
-post it.
+On success, `rm -f "$err_tmp"`. Capture `decisions_comment_id` into
+trace only (do NOT mutate the artifact's `comment_id`).
+
+On `gh` failure (`gh_rc != 0`), read `$err_tmp`, append a block under
+tag `walkthrough_decisions_comment_failed` to `trace.md` containing
+the captured stderr AND the rendered markdown (so the reviewer can
+recover the content and manually post it), then `rm -f "$err_tmp"`.
 
 ### 8. Append walkthrough block to `trace.md`
 
