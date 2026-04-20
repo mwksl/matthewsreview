@@ -123,10 +123,10 @@ for (( i = 0; i < N; i++ )); do
     fi
 
     # Count lines at the reviewed ref. `git show REF:path` streams the
-    # blob; `wc -l` counts newline terminators. A file with no trailing
-    # newline undercounts by 1 — acceptable here because the bug we're
-    # catching is 5-to-10× overshoots, not off-by-one.
-    actual_lines=$(git show "$REVIEWED_SHA:$file" 2>/dev/null | wc -l | awk '{print $1}')
+    # blob; `awk 'END{print NR}'` counts records so files without a
+    # trailing newline don't undercount by 1 (which would cause false-
+    # positive drops for findings ranging to the last visible line).
+    actual_lines=$(git show "$REVIEWED_SHA:$file" 2>/dev/null | awk 'END{print NR}')
     if [[ -z "$actual_lines" ]]; then
         # Unreadable blob (shouldn't happen post cat-file success) —
         # let it through, same policy as malformed ranges above.

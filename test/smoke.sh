@@ -2198,6 +2198,27 @@ else
     fail "LR-3: expected 1 kept and empty stderr; got kept=$kept stderr=$(cat "$WORK/lr3.err")"
 fi
 
+# LR-5: a file without a trailing newline must NOT produce false-
+# positive drops at its last visible line. The helper counts records
+# via `awk 'END{print NR}'` (not `wc -l`, which counts newlines and
+# would undercount by 1 on no-EOL files).
+(
+    cd "$OC_DIR/repo"
+    printf 'line1\nline2\nline3' > file_no_nl.py   # 3 lines, NO trailing newline
+    git add file_no_nl.py
+    git commit --quiet -m "add no-trailing-newline fixture"
+)
+out=$(cd "$OC_DIR/repo" && "$TOOLS/line-range-check.sh" \
+    --reviewed-sha HEAD \
+    < <(echo '[{"sources":["L1-diff-local"],"file":"file_no_nl.py","line_range":[1,3]}]') \
+    2> "$WORK/lr5.err")
+kept=$(echo "$out" | jq 'length')
+if [[ "$kept" == "1" ]] && [[ ! -s "$WORK/lr5.err" ]]; then
+    pass "LR-5: no-trailing-newline file — range to last line passes through (awk NR counts records, not newlines)"
+else
+    fail "LR-5: expected 1 kept + empty stderr for no-EOL file range [1,3]; got kept=$kept stderr=$(cat "$WORK/lr5.err")"
+fi
+
 # LR-4: file missing at $reviewed_sha is dropped with the
 # lens_referenced_missing_file trace tag.
 out=$(cd "$OC_DIR/repo" && "$TOOLS/line-range-check.sh" \
