@@ -2213,6 +2213,64 @@ else
     fail "LR-4: expected 0 kept + missing-file trace; got kept=$kept stderr=$(cat "$WORK/lr4.err")"
 fi
 
+# ------------------------------------------------------------------ Stage 2.6.E
+# Polish / below-gate cluster renderer section. Dense runs of below_gate
+# findings in one area are hidden by default (Phase 3 parks them so the
+# report stays skimmable), but ≥3 within a 100-line window is its own
+# signal — surface them in a dedicated section with a cluster label so
+# a reviewer can spot what the pipeline filtered out.
+
+PC_DIR="$WORK/polish-clusters"
+mkdir -p "$PC_DIR"
+
+# Template for a below_gate finding; overrides via jq at call site.
+PC_TMPL='{"id":"F101","sources":["L5-ux"],"source_families":["ux-family"],"impact_type":"ux","origin":"introduced_by_pr","origin_confidence":"low","actionability":"manual","validation_lane":"light","current_state":"open","disposition":"below_gate","is_actionable":false,"reason":null,"confirmed_strength":null,"file":"src/cli/commands.ts","line_range":[920,920],"claim":"Net worth formatting mismatch","score_phase3":30,"score_phase4":null,"score_history":[{"phase":"phase_3","score":30}],"validation_result":null,"fix_attempts":[],"introduced_in_sha":null,"suggested_follow_up":null,"related_parent_finding_id":null}'
+
+jq '.findings = []' "$FIX/artifact-seed.json" > "$PC_DIR/base.json"
+
+# PC-1: 3 below_gate findings in one file, spanning 97 lines
+# (920, 960, 1017). ≤ 100 → cluster → section emitted.
+f1=$(echo "$PC_TMPL" | jq '.id="F101"|.line_range=[920,920]|.claim="nit-a"')
+f2=$(echo "$PC_TMPL" | jq '.id="F102"|.line_range=[960,960]|.claim="nit-b"')
+f3=$(echo "$PC_TMPL" | jq '.id="F103"|.line_range=[1017,1017]|.claim="nit-c"')
+jq --argjson a "$f1" --argjson b "$f2" --argjson c "$f3" \
+    '.findings=[$a,$b,$c]|.review_id="rev_pc1"' "$PC_DIR/base.json" > "$PC_DIR/pc1.json"
+"$TOOLS/artifact-render.py" --input "$PC_DIR/pc1.json" --output "$PC_DIR/pc1.md" >/dev/null
+if grep -q '## Polish — below threshold, clustered' "$PC_DIR/pc1.md" \
+    && grep -q '| F101 |' "$PC_DIR/pc1.md" \
+    && grep -q '| F102 |' "$PC_DIR/pc1.md" \
+    && grep -q '| F103 |' "$PC_DIR/pc1.md"; then
+    pass "PC-1 (§7): polish-cluster section emitted for 3+ below_gate in 100-line window"
+else
+    fail "PC-1: expected polish-cluster section with F101/F102/F103; got:\n$(cat "$PC_DIR/pc1.md")"
+fi
+
+# PC-2: 3 below_gate findings in same file but spanning > 100 lines.
+# No sliding window of size ≥3 fits → no cluster → no section.
+f1=$(echo "$PC_TMPL" | jq '.id="F201"|.line_range=[100,100]')
+f2=$(echo "$PC_TMPL" | jq '.id="F202"|.line_range=[250,250]')
+f3=$(echo "$PC_TMPL" | jq '.id="F203"|.line_range=[500,500]')
+jq --argjson a "$f1" --argjson b "$f2" --argjson c "$f3" \
+    '.findings=[$a,$b,$c]|.review_id="rev_pc2"' "$PC_DIR/base.json" > "$PC_DIR/pc2.json"
+"$TOOLS/artifact-render.py" --input "$PC_DIR/pc2.json" --output "$PC_DIR/pc2.md" >/dev/null
+if ! grep -q 'Polish — below threshold' "$PC_DIR/pc2.md"; then
+    pass "PC-2 (§7): polish-cluster section omitted when 3 findings span > 100 lines in same file"
+else
+    fail "PC-2: section should be absent; got:\n$(cat "$PC_DIR/pc2.md")"
+fi
+
+# PC-3: only 2 below_gate findings, densely clustered. < 3 → no section.
+f1=$(echo "$PC_TMPL" | jq '.id="F301"|.line_range=[100,100]')
+f2=$(echo "$PC_TMPL" | jq '.id="F302"|.line_range=[110,110]')
+jq --argjson a "$f1" --argjson b "$f2" \
+    '.findings=[$a,$b]|.review_id="rev_pc3"' "$PC_DIR/base.json" > "$PC_DIR/pc3.json"
+"$TOOLS/artifact-render.py" --input "$PC_DIR/pc3.json" --output "$PC_DIR/pc3.md" >/dev/null
+if ! grep -q 'Polish — below threshold' "$PC_DIR/pc3.md"; then
+    pass "PC-3 (§7): polish-cluster section omitted when fewer than 3 below_gate findings (even dense)"
+else
+    fail "PC-3: section should be absent; got:\n$(cat "$PC_DIR/pc3.md")"
+fi
+
 # ------------------------------------------------------------------ Phase 4 validator hardening
 # VR-* assertions cover the read-only preamble + fix-scope cross-check + post-wave
 # tree-cleanliness sweep added to 05-validation.md after the ray-finance 2026-04-19

@@ -434,6 +434,74 @@ def render_light_lane(buckets):
     return "\n".join(lines)
 
 
+def render_polish_clusters(buckets):
+    """Surface clustered below_gate findings in a dedicated section.
+
+    Phase 3 parks nits under `below_gate` so they don't flood the report,
+    and the existing section renderers drop them entirely. But a dense
+    run of nits in one area is its own signal — ultrareview-style "nit"
+    lists exist for exactly this case. Detection rule: per file, any
+    sliding window of ≥3 below_gate findings whose `line_range[0]` span
+    is ≤ 100 lines produces a cluster. Findings that fall into at least
+    one such window get rendered; files with only 1-2 below_gate
+    findings contribute nothing (keeps floodgates closed).
+    """
+    below = [f for f in buckets.get("below_gate", [])
+             if (f.get("line_range") or [0])[0]]
+    if len(below) < 3:
+        return ""
+
+    by_file = defaultdict(list)
+    for f in below:
+        by_file[f.get("file") or "?"].append(f)
+
+    clustered_by_file = {}
+    for file_path, ffs in by_file.items():
+        if len(ffs) < 3:
+            continue
+        sorted_ffs = sorted(ffs, key=lambda f: (f.get("line_range") or [0])[0])
+        in_cluster = set()
+        left = 0
+        for right in range(len(sorted_ffs)):
+            right_line = (sorted_ffs[right].get("line_range") or [0])[0]
+            while (right_line - (sorted_ffs[left].get("line_range") or [0])[0]) > 100:
+                left += 1
+            if right - left + 1 >= 3:
+                for i in range(left, right + 1):
+                    in_cluster.add(i)
+        if in_cluster:
+            clustered_by_file[file_path] = [sorted_ffs[i] for i in sorted(in_cluster)]
+
+    if not clustered_by_file:
+        return ""
+
+    def loc_cell(f):
+        lr = f.get("line_range") or []
+        if len(lr) == 2 and lr[0] == lr[1]:
+            return f"L{lr[0]}"
+        if len(lr) == 2:
+            return f"L{lr[0]}-{lr[1]}"
+        return ""
+
+    total = sum(len(v) for v in clustered_by_file.values())
+    lines = [f"## Polish — below threshold, clustered ({total})", ""]
+    lines.append(
+        "Below-gate findings (score < 45) that cluster in the same area — "
+        "not worth surfacing individually, but dense enough that a human pass "
+        "may catch something the pipeline filtered out."
+    )
+    lines.append("")
+    lines.append("| # | File | Rough location | Concern |")
+    lines.append("|---|------|----------------|---------|")
+    for file_path in sorted(clustered_by_file.keys()):
+        for f in clustered_by_file[file_path]:
+            lines.append(
+                f"| {f.get('id', '?')} | `{file_path}` | {loc_cell(f)} | "
+                f"{f.get('claim', '')} |"
+            )
+    return "\n".join(lines)
+
+
 def render_pre_existing(buckets):
     rows = buckets.get("pre_existing_report", [])
     if not rows:
@@ -561,6 +629,7 @@ def render(artifact):
         render_deep_other(buckets, "uncertain"),
         render_deep_other(buckets, "confirmed_report"),
         render_light_lane(buckets),
+        render_polish_clusters(buckets),
         render_pre_existing(buckets),
         render_fix_runs(artifact),
         "---",
