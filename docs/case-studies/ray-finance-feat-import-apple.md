@@ -36,7 +36,8 @@ and a concrete recommendation at the end.
   scoring gap policy change.
 - **Dates:** 2026-04-18 through 2026-04-19.
 - **Reviewer under test:** `/adams-review` (the pipeline described in
-  `docs/DESIGN.md`) vs. `/ultrareview` (Claude Code's built-in).
+  `CLAUDE.md`; the full spec is the frozen `docs/archive/DESIGN.md`) vs.
+  `/ultrareview` (Claude Code's built-in).
 
 ## TL;DR
 
@@ -647,6 +648,8 @@ systematic.
   `/Users/adammiller/Projects/ray/ray-finance-pre-recent-fixes/ultrareview_findings.md`
   (Case 2), and
   `~/tmp/ultrareview/ultrareview_report.md` (Case 3).
-- For the reviewer-pipeline design, see `docs/DESIGN.md` in this repo.
+- For the reviewer-pipeline shape, see `CLAUDE.md`. Deeper rationale is in
+  the frozen `docs/archive/DESIGN.md` — `§X.Y` citations throughout this
+  doc grep-resolve against that file.
 - The schema (`commands/_shared/schema-v1.json`) is the source of truth for
   the `disposition` / `source_families` / `sources` fields cited throughout.
