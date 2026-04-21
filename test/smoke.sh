@@ -2715,6 +2715,20 @@ else
     fail "L7-4: CLAUDE.md pipeline-shape block missing L7 / --ensemble update"
 fi
 
+# L7-5: artifact-patch.py --add-finding accepts source_families:
+# ["holistic-family"] (new source_family value). schema-v1.json has
+# source_families items as {type:string, minLength:1} with no enum,
+# so the addition should pass — but we verify rather than assume.
+L7_ART="$WORK/l7-schema.json"
+"$TOOLS/artifact-patch.py" --init "@$FIX/artifact-seed.json" --path "$L7_ART" >/dev/null
+F_L7='{"id":"F901","sources":["L7-holistic"],"source_families":["holistic-family"],"impact_type":"correctness","origin":"introduced_by_pr","origin_confidence":"high","actionability":"auto_fixable","validation_lane":"deep","current_state":"open","disposition":"confirmed_auto","is_actionable":true,"reason":"test","confirmed_strength":"moderate","file":"src/holistic/test.ts","line_range":[10,12],"claim":"L7 schema smoke","score_phase3":65,"score_phase4":70,"score_history":[{"phase":"phase_3","score":65},{"phase":"phase_4","score":70}],"validation_result":null,"fix_attempts":[],"introduced_in_sha":null,"suggested_follow_up":null,"related_parent_finding_id":null}'
+if "$TOOLS/artifact-patch.py" --path "$L7_ART" --add-finding "$F_L7" >/dev/null 2>&1 \
+    && "$TOOLS/artifact-validate.sh" --path "$L7_ART" >/dev/null 2>&1; then
+    pass "L7-5 (§2.9.D): holistic-family source_family passes schema validation"
+else
+    fail "L7-5: schema rejected L7-holistic finding or validator failed"
+fi
+
 # UXT-1 guards the L5-ux diagnostic-message-quality addition (Stage
 # 2.9.B). Content lives in lens-ux-reference.md which L5 inlines via
 # `!`cat`` preprocessor, so grep the reference file directly.
