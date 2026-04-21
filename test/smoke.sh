@@ -1545,6 +1545,87 @@ else
     fail "FX-AF-9: expected exit 1 + unknown outcome + suggestion; got code=$code stderr='$stderr'"
 fi
 
+# ------------------------------------------------------------------ Reconcile-on-overlap (plans/reconcile-on-overlap.md)
+#
+# Assertions FX-RECON-*: the 9.pre.offer + 9.pre.reconcile + FG-RECON
+# synthetic-group wiring in 10-post-fix-and-commit.md. Grep-level over the
+# fragment text for the structural contracts (options, preservation
+# snapshot, merge-agent prompt core, delete-leak ordering), plus one
+# fixture-level check that --apply-fix-outcomes still accepts the
+# ORIGINAL FG-N as fix_group_id on a reconciled run (FG-RECON is
+# in-memory only; schema-valid FG-N lands on disk).
+
+FRAG="$REPO/commands/_shared/10-post-fix-and-commit.md"
+
+# FX-RECON-1: fragment offers a three-way AskUserQuestion on overlap,
+# with Abort as the default (recommended) choice.
+if grep -q "9.pre.offer" "$FRAG" \
+   && grep -q "AskUserQuestion" "$FRAG" \
+   && grep -q "Abort (recommended)" "$FRAG" \
+   && grep -q "Reconcile — dispatch one merge agent" "$FRAG" \
+   && grep -q "Inspect — leave tree as-is" "$FRAG"; then
+    pass "FX-RECON-1: 9.pre.offer presents three-way AskUserQuestion with Abort as default"
+else
+    fail "FX-RECON-1: fragment missing one of {9.pre.offer, AskUserQuestion, Abort/Reconcile/Inspect options}"
+fi
+
+# FX-RECON-2: reconcile branch collapses fix_groups to a synthetic
+# FG-RECON entry AND snapshots the original per-finding fix_group_id
+# (original_fix_group_by_finding) for 9d schema compat.
+if grep -q 'id: "FG-RECON"' "$FRAG" \
+   && grep -q "original_fix_group_by_finding" "$FRAG" \
+   && grep -q "reconciled_flag=true" "$FRAG"; then
+    pass "FX-RECON-2: fragment collapses fix_groups to FG-RECON and snapshots original per-finding group"
+else
+    fail "FX-RECON-2: fragment missing FG-RECON collapse or original-group snapshot"
+fi
+
+# FX-RECON-3: merge-agent prompt carries the core contract (unresolved
+# conflicts escape hatch, delete/rename prohibition, per-group tracking).
+if grep -q "unresolved_conflicts" "$FRAG" \
+   && grep -q "DO NOT delete or rename files" "$FRAG" \
+   && grep -q "reconciled_from_groups" "$FRAG" \
+   && grep -q "Phase 9 reconciliation agent" "$FRAG"; then
+    pass "FX-RECON-3: merge-agent prompt carries core contract (unresolved_conflicts + delete prohibition + group tracking)"
+else
+    fail "FX-RECON-3: merge-agent prompt missing one of the core contract pieces"
+fi
+
+# FX-RECON-4: on a reconciled run, apply-fix-outcomes tuples MUST use
+# each finding's original FG-N (schema rejects FG-RECON). This is a
+# smoke-level guard that the schema still validates when the
+# reconciled run's fix_attempts preserve FG-1/FG-2 rather than
+# FG-RECON — i.e., that 9d's fix_group_id override actually prevents
+# the schema violation we'd otherwise hit.
+stderr=$("$TOOLS/artifact-patch.py" --init "@$FIX/fix-group-seed.json" --path "$WORK/recon-ok.json" 2>&1); code=$?
+[[ "$code" != "0" ]] && fail "FX-RECON-4 setup: --init failed (code=$code stderr=$stderr)"
+"$TOOLS/artifact-patch.py" --path "$WORK/recon-ok.json" --apply-fix-start \
+  '[{"id":"F001","run_id":"fixrun_rc"},{"id":"F002","run_id":"fixrun_rc"}]' >/dev/null 2>&1
+# F001 and F002 originally belonged to different groups (FG-1, FG-2);
+# on a reconciled run, both commit under a single commit_sha but each
+# preserves its ORIGINAL fix_group_id.
+"$TOOLS/artifact-patch.py" --path "$WORK/recon-ok.json" --apply-fix-outcomes \
+  '[{"id":"F001","run_id":"fixrun_rc","fix_group_id":"FG-1","input_sha":"aaaa111","output_sha":"cccc333","phase_9_outcome":"verified","timestamp":"2026-04-21T10:00:00Z"},
+    {"id":"F002","run_id":"fixrun_rc","fix_group_id":"FG-2","input_sha":"aaaa111","output_sha":"cccc333","phase_9_outcome":"verified","timestamp":"2026-04-21T10:00:00Z"}]' \
+  >/dev/null 2>&1
+recon_ids=$(jq -r '[.findings[] | select(.id=="F001" or .id=="F002") | .fix_attempts[-1].fix_group_id] | join(",")' "$WORK/recon-ok.json")
+if [[ "$recon_ids" == "FG-1,FG-2" ]]; then
+    pass "FX-RECON-4: reconciled run preserves original per-finding fix_group_id (schema-valid FG-N, not FG-RECON)"
+else
+    fail "FX-RECON-4: expected 'FG-1,FG-2', got '$recon_ids'"
+fi
+
+# FX-RECON-5: delete-leak path still short-circuits to abort WITHOUT
+# showing the offer. The fragment ordering must place the deleted_paths
+# branch above 9.pre.offer.
+deleted_line=$(grep -n 'deleted_paths=.*git status' "$FRAG" | head -1 | cut -d: -f1)
+offer_line=$(grep -n '^#### 9.pre.offer' "$FRAG" | head -1 | cut -d: -f1)
+if [[ -n "$deleted_line" && -n "$offer_line" && "$deleted_line" -lt "$offer_line" ]]; then
+    pass "FX-RECON-5: delete-leak detection precedes 9.pre.offer (delete-leak never sees the reconcile offer)"
+else
+    fail "FX-RECON-5: expected deleted_paths detection BEFORE 9.pre.offer (got deleted_line=$deleted_line offer_line=$offer_line)"
+fi
+
 # ------------------------------------------------------------------ Stage 3 — render fix_runs
 #
 # artifact-render.py gained a richer `## Fix runs` section plus the

@@ -10,7 +10,11 @@ artifact produced by the most recent `/adams-review` on this branch,
 dispatches fix-group agents, post-fix-reviews the working tree, and
 either commits a coherent set of surviving fixes (with per-group
 Phase-9 truth in the commit message) or leaves the tree exactly as it
-found it (overlap-abort, all-regression, revert-failure).
+found it (all-regression, revert-failure). When parallel fix groups
+collide on shared files, Phase 9.pre offers the reviewer a choice
+between abort (default), reconcile via one Opus merge agent (commits
+a single reconciled fix if Phase 9 then verifies it), or inspect
+(leave the tree for manual review).
 
 Arguments (optional):
 - First positional (integer 0–100) → `threshold` (default `60`). The
@@ -41,11 +45,13 @@ This matters because:
 - **`attempted` is the transient recovery anchor.** Between Phase 8
   completing and Phase 9e writing fix_attempts, findings sit in
   `current_state=attempted`. If the run is interrupted there — or if
-  Phase 9.pre detects a touched-file overlap and aborts — the next
-  `/adams-review-fix` invocation's Phase 7 step 4 hard abort catches
-  the leftover `attempted` state and gives the user a deterministic
-  recovery prompt. Never clean up `attempted` state silently; that's
-  the user's call.
+  Phase 9.pre detects a touched-file overlap and the reviewer chooses
+  abort (default) or inspect — the next `/adams-review-fix`
+  invocation's Phase 7 step 4 hard abort catches the leftover
+  `attempted` state and gives the user a deterministic recovery
+  prompt. Never clean up `attempted` state silently; that's the
+  user's call. (Reconcile does NOT leave findings at `attempted` —
+  it commits or reverts just like a non-reconciled run.)
 - **Artifact-records-commit-before-network (§24.4).** In Phase 9e,
   state transitions + fix_attempts append + schema validate + render
   all run BEFORE any `git push` or `artifact-publish.sh` call. Push or

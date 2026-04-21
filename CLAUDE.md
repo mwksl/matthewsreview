@@ -46,6 +46,10 @@ The original four are **built and in production use** as of 2026-04-19 (Stages 1
 └── Phase 9 — Post-fix Opus review pre-commit; aggregate outcomes per group;
               revert regression groups (checkout modified, rm created);
               commit surviving groups with outcome in message; push; append fix_attempts
+              (on 9.pre overlap: offer reconcile | abort | inspect — reconcile
+               dispatches one Opus merge agent, collapses fix_groups to FG-RECON
+               in memory, then runs Phase 9a/9b/9c unchanged; original
+               fix_group_id preserved per-finding in fix_attempts)
 
 /adams-review-add [<paste...>] [--file path --line N --claim "..."] [--impact <type>] [--no-dedup]
 └── Locate artifact (latest.txt) → leftover-attempted gate → build candidates
