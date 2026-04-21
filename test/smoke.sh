@@ -2662,6 +2662,17 @@ else
     fail "PFD-6: expected 64/1; got missing=$rc_missing badref=$rc_badref"
 fi
 
+# UXT-1 guards the L5-ux diagnostic-message-quality addition (Stage
+# 2.9.B). Content lives in lens-ux-reference.md which L5 inlines via
+# `!`cat`` preprocessor, so grep the reference file directly.
+if grep -qF 'Diagnostic message quality' "$REPO/commands/_shared/lens-ux-reference.md" \
+    && grep -qF 'parseDate' "$REPO/commands/_shared/lens-ux-reference.md" \
+    && grep -qF 'empty-buffer' "$REPO/commands/_shared/lens-ux-reference.md"; then
+    pass "UXT-1 (§2.9.B): lens-ux-reference.md includes diagnostic-message-quality section"
+else
+    fail "UXT-1: diagnostic-message-quality content missing from lens-ux-reference.md"
+fi
+
 # LT-1..LT-3 guard the L2 prompt tune (Stage 2.9.A). Stage-2.9 closes
 # several P1/P2 misses by adding named prompt sections; silent removal
 # would regress detection without failing any helper-level test.

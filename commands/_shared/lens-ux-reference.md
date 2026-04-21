@@ -29,6 +29,29 @@ order; ARIA labels for icon-only controls; sufficient color contrast.
 Errors say what happened AND what the user can do. Button labels are verbs
 describing the action, not generic "OK"/"Yes".
 
+**Diagnostic message quality.** When the diff adds or modifies a warning,
+error, or toast — especially ones triggered by parsing, validation, or
+input rejection — check whether the message helps the user diagnose and
+fix the problem:
+
+- Does the message reveal the expected format when input is rejected?
+  A `parseDate` that only accepts `MM/DD/YYYY` should say so in the
+  warning, not "Invalid date."
+- Does the message name the specific value that failed? "Invalid amount"
+  is weaker than `"'abc' is not a valid amount — expected a number like
+  42.50."`
+- When upstream context is available (file path, row number, column name,
+  field name, source system), is it in the message? A parser error that
+  buries line number in debug logs while showing the user "Something went
+  wrong" is a diagnostic-quality gap.
+- For batch / buffered operations (flush-after-N-errors, debounced save),
+  does an empty-buffer or mid-flush failure produce a generic message
+  when a specific one is cheap? "Save failed" on an empty buffer suggests
+  data loss the user didn't actually experience.
+
+Flag as `impact_type: "ux"`. Fix proposals should include concrete message-
+text suggestions.
+
 **Visual consistency.** Uses the project's existing design tokens, CSS
 variables, or utility classes rather than ad-hoc values. CLAUDE.md and the
 existing codebase take precedence over generic examples above.
