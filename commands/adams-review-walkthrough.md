@@ -305,7 +305,7 @@ preview=$(jq -r --arg ids "$scope_full_ids" --arg preids "$scope_preexisting_ids
         lane: .validation_lane,
         impact: .impact_type,
         disposition,
-        score: (.score_phase4 // "—"),
+        score: (.score_phase4 // .score_phase3 // "—"),
         file: .file,
         claim_first_line: (.claim | split("\n") | .[0])
       }]
@@ -412,7 +412,7 @@ f_file=$(jq -r '.file' <<<"$finding_json")
 f_line_start=$(jq -r '.line_range[0]' <<<"$finding_json")
 f_line_end=$(jq -r '.line_range[1]' <<<"$finding_json")
 f_disp=$(jq -r '.disposition' <<<"$finding_json")
-f_score=$(jq -r '.score_phase4 // "null"' <<<"$finding_json")
+f_score=$(jq -r '.score_phase4 // .score_phase3 // "null"' <<<"$finding_json")
 f_impact=$(jq -r '.impact_type' <<<"$finding_json")
 f_claim=$(jq -r '.claim' <<<"$finding_json")
 ```

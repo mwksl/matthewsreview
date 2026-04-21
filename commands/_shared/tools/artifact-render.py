@@ -491,13 +491,18 @@ def render_polish_clusters(buckets):
         "may catch something the pipeline filtered out."
     )
     lines.append("")
-    lines.append("| # | File | Rough location | Concern |")
-    lines.append("|---|------|----------------|---------|")
+    lines.append("| # | Score | File | Rough location | Concern |")
+    lines.append("|---|-------|------|----------------|---------|")
     for file_path in sorted(clustered_by_file.keys()):
         for f in clustered_by_file[file_path]:
+            # Explicit null-check rather than `or`: score_phase3 == 0 is a
+            # real below_gate value (ray-finance case study) and would
+            # render blank under truthiness fallback.
+            score = f.get("score_phase3")
+            score_cell = str(score) if score is not None else ""
             lines.append(
-                f"| {f.get('id', '?')} | `{file_path}` | {loc_cell(f)} | "
-                f"{f.get('claim', '')} |"
+                f"| {f.get('id', '?')} | {score_cell} | `{file_path}` | "
+                f"{loc_cell(f)} | {f.get('claim', '')} |"
             )
     return "\n".join(lines)
 
