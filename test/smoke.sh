@@ -2443,6 +2443,60 @@ else
     fail "VR-3: tree-cleanliness sweep missing from $VALIDATION_MD"
 fi
 
+# ------------------------------------------------------------------ Phase 9a post-fix hardening
+# PF-* assertions cover the premise audit + convention-drift sweep added to
+# 10-post-fix-and-commit.md after the ray-finance feat/import-apple 2026-04-20
+# ultrareview surfaced two bugs Phase 9a missed: a wrong COALESCE direction
+# justified by a false inline comment (bug_007, F021) and a new scoring loop
+# whose bound drifted from every sibling scoring path in the codebase
+# (bug_001, F023).
+POSTFIX_MD="$REPO/commands/_shared/10-post-fix-and-commit.md"
+
+# PF-1: Phase 9a prompt step 5a — adjacent-regression sweep kept as the local
+# ±20-lines same-file check. Split from the old combined step 5 so step 5b can
+# own the cross-file convention drift case.
+if grep -qF 'Adjacent-regression sweep (local)' "$POSTFIX_MD"; then
+    pass "PF-1 (§19.9): Phase 9a prompt retains adjacent-regression sweep as step 5a"
+else
+    fail "PF-1: adjacent-regression sweep missing from $POSTFIX_MD"
+fi
+
+# PF-2: Phase 9a prompt step 5b(i) — validator-identified parallels cross-check.
+# Uses blast_radius.parallel_paths and explicitly names the COALESCE-direction
+# example from bug_007 so the check surface stays narrow and scannable.
+if grep -qF 'Convention-drift sweep (cross-file)' "$POSTFIX_MD" \
+    && grep -qF 'blast_radius.parallel_paths' "$POSTFIX_MD" \
+    && grep -qF 'COALESCE(a, b)' "$POSTFIX_MD"; then
+    pass "PF-2 (§19.9): Phase 9a prompt step 5b(i) cross-checks blast_radius.parallel_paths"
+else
+    fail "PF-2: convention-drift sweep (validator parallels) missing from $POSTFIX_MD"
+fi
+
+# PF-3: Phase 9a prompt step 5b(ii) — fix-introduced-siblings instruction.
+# The *bug*/*fix* distinction is load-bearing: Phase 4 computes parallel_paths
+# on the bug pattern, so new code the fix introduces needs independent sibling
+# search. This closes the gap that let bug_001 (cleanupDerivedAfterRemove loop
+# bound drifted from calculateDailyScore callers) past Phase 9a.
+if grep -qF 'parallel_paths` was computed on the *bug*' "$POSTFIX_MD" \
+    && grep -qF 'new parallels the validator didn' "$POSTFIX_MD"; then
+    pass "PF-3 (§19.9): Phase 9a prompt step 5b(ii) flags fix-introduced new siblings"
+else
+    fail "PF-3: fix-introduced-siblings instruction missing from $POSTFIX_MD"
+fi
+
+# PF-4: Phase 9a prompt step 6 — premise audit of added inline comments.
+# A wrong comment is worse than no comment because it propagates to future
+# readers. Scoped to comments in the same hunk as a logic change so pre-existing
+# comments are out of scope. This is what catches bug_007's false
+# `// fresh INSERT leaves label NULL` justification.
+if grep -qF 'Premise audit of added inline comments' "$POSTFIX_MD" \
+    && grep -qF 'falsifiable claim' "$POSTFIX_MD" \
+    && grep -qF 'same hunk as a logic change' "$POSTFIX_MD"; then
+    pass "PF-4 (§19.9): Phase 9a prompt step 6 audits added inline-comment premises"
+else
+    fail "PF-4: premise audit missing from $POSTFIX_MD"
+fi
+
 echo
 echo "smoke: PASS ($N assertions)"
 exit 0

@@ -198,9 +198,38 @@ For each attempted finding, decide (per DESIGN §19.9):
 4. Did project verification_commands pass (if run)? Failure → `partial`
    or `regression` depending on nature.
 
-5. Does any code adjacent to the fix (same file, changed hunk ±20
-   lines) now contain a new issue that wasn't there before the fix? If
-   so → `regression`, describe concretely.
+5a. Adjacent-regression sweep (local). Does any code adjacent to the
+    fix (same file, changed hunk ±20 lines) now contain a new issue
+    that wasn't there before the fix? If so → `regression`, describe
+    concretely.
+
+5b. Convention-drift sweep (cross-file).
+    (i) For each entry in `blast_radius.parallel_paths` on the finding,
+        diff the fix against that path for boundary conditions (loop
+        bounds, error handling, null semantics, ordering, direction of
+        operation — e.g., `COALESCE(a, b)` vs. `COALESCE(b, a)`). Any
+        divergence from the cross-parallel convention → `regression`,
+        name the divergent boundary.
+    (ii) If the fix introduces a new function, class/method, or
+         substantial block (new loop over a domain, new query over a
+         table): grep/Glob the repo for existing code doing similar
+         work (matching verbs on the same domain noun — e.g., a new
+         `cleanup…` function → grep for other functions that iterate
+         the same tables; a new loop over a date range → grep for
+         other date-range loops). Diff boundary conditions.
+         `parallel_paths` was computed on the *bug*, not the *fix* —
+         the fix can introduce new parallels the validator didn't
+         anticipate. Divergence → `regression`.
+
+6. Premise audit of added inline comments. Every comment the fix added
+   in the same hunk as a logic change that asserts a fact about
+   surrounding code (e.g., `// X because Y`, `// always Z`) is a
+   falsifiable claim. Locate the referenced code via Read/grep and
+   verify. False premise → `regression` with `phase_9_finding` naming
+   the false premise and the contradicting code location. Wrong
+   inline justifications propagate to future readers and are worse
+   than no comment. Pre-existing comments (context lines in the diff,
+   not `+` lines) are out of scope.
 
 Classification priority: regression > partial > verified. If in doubt
 between verified and partial, choose partial.
