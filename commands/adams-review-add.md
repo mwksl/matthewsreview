@@ -131,10 +131,9 @@ Capture:
 Determine `mode_input`:
 
 - All three of `cli_file`, `cli_line`, `cli_claim` present → `structured`.
-- `paste_body` non-empty AND none of `cli_file`/`cli_line`/`cli_claim`
-  set → `paste`.
-- `paste_body` non-empty AND `cli_impact` set (no `cli_file` etc.) →
-  `paste` (the impact override applies inside paste mode).
+- `paste_body` non-empty AND `cli_file`/`cli_line`/`cli_claim` all
+  empty → `paste` (the `--impact` flag, if explicitly passed, applies
+  as an overlay inside paste mode — see step 4b).
 - Anything else (e.g. only `cli_file` set, or all empty) → error-as-prompt:
 
   > ERROR: no input. Provide either:
@@ -257,8 +256,8 @@ jq fails loudly — surface as error-as-prompt.)
 
 #### 4b. Paste mode
 
-Dispatch the paste normalizer sub-agent (see §6 below for the prompt).
-After it returns:
+Dispatch the paste normalizer sub-agent (the prompt is at the bottom
+of this file under "Sub-agent prompts"). After it returns:
 
 - Repair missing location info, mirroring Phase 1.5 §1.5.5: `file: null
   → "(unknown)"`, `line_range: null → [1, 1]`. The §13.10/§13.13
@@ -314,13 +313,16 @@ existing_compact=$(~/.claude/commands/_shared/tools/artifact-read.sh \
     --filter '[.findings[] | {id, file, line_range, claim}]')
 ```
 
-Dispatch the dedup sub-agent (see §7 below for the prompt). It returns
-one verdict per new candidate: `{new_index: N, matches: "F0NN" | null}`.
+Dispatch the dedup sub-agent (the prompt is at the bottom of this
+file under "Sub-agent prompts"). Capture the agent's response into
+`verdicts_json` — its shape is
+`{verdicts: [{new_index: N, matches: "F0NN" | null}, ...]}` with
+exactly one verdict per new candidate.
 
-Iterate the verdicts. For each verdict whose `matches` is non-null,
-read the matched finding's existing `sources[]` and union the new
-candidate's source string into it via one `--set-json sources=@…`
-patch:
+Iterate `verdicts_json.verdicts[]`. For each verdict whose `matches`
+is non-null, read the matched finding's existing `sources[]` and
+union the new candidate's source string into it via one
+`--set-json sources=@…` patch:
 
 ```bash
 # Run once per matched verdict; $match_id and $candidate are bound
@@ -628,12 +630,17 @@ fi
 
 #### 7.6 Build the decision tuple array and apply
 
-Compose one tuple per validator response. For light-lane responses
-(which don't carry a `validation_result` envelope), pass
-`validation_result: null` — the helper writes it only when the derived
-disposition lands in the confirmed band, and never persists it for
-light-lane confirmed findings (the schema permits, but Phase 4's
-default behavior matches the original validator's reduced output).
+Compose one tuple per validator response. For deep-lane responses,
+pass `validation_result` extracted from the sub-agent's outer envelope
+(it'll be the populated nested object when the validator returned
+`decision: confirmed`, else `null`). For light-lane responses (whose
+prompt doesn't include a `validation_result` envelope), pass
+`validation_result: null`. The helper persists `validation_result`
+only when the tuple supplies a non-null value AND the derived
+disposition lands in the confirmed band — so deep-lane confirmed
+findings get the full validator output stored, light-lane confirmed
+findings get nothing (matching Phase 4.4's behavior in the original
+review path).
 
 ```bash
 scratch="/tmp/adams-review-add-$review_id"
