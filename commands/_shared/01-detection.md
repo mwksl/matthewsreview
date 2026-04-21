@@ -794,7 +794,7 @@ ided=$(printf '%s' "$sanitized" \
 ```
 
 `assign-finding-ids.sh` sorts by source priority (L1, L2, L3, L4, L5,
-L6, external-pr, codex, coderabbit — stable within source = input
+L6, L7, external-pr, codex, coderabbit — stable within source = input
 order preserved) and assigns `F001…F0NN`. See the helper's header for
 the full priority table.
 

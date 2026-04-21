@@ -592,9 +592,7 @@ fi
 
 # U. reviewer_sources Phase-6.3a regex correctly classifies lens tags.
 # Simulates the jq expression in 07-finalize.md step 6.3a against a
-# synthetic sources[] union. Includes L7-holistic to guard the post-
-# Stage-2.9 forward-compat regex (^L[0-9]+-) — a drift back to
-# ^L[1-6]- would drop L7 silently from reviewer_sources.
+# synthetic sources[] union.
 U_OUT=$(echo '["L1-diff-local","L3-claude-md","L7-holistic","codex","external-pr:greptile-apps[bot]","random-tag"]' \
     | jq -c 'map(
         if test("^L[0-9]+-") then "internal"
@@ -606,6 +604,25 @@ if [[ "$U_OUT" == '["codex","external-pr:greptile-apps[bot]","internal"]' ]]; th
     pass "U: reviewer_sources regex classifies L1..L7 lens tags, codex, external-pr: correctly"
 else
     fail "U: reviewer_sources output = $U_OUT"
+fi
+
+# Ubis. Strict L7-only variant — guards the post-Stage-2.9 forward-
+# compat regex specifically. With the old buggy regex ^L[1-6]- and only
+# L7 tags in sources[], the union would collapse to [] (L7 classified as
+# `empty`, dropped). With the fixed ^L[0-9]+-, the union is ["internal"].
+# U alone doesn't distinguish the two regexes when L1..L6 are also present
+# — this test does.
+U_OUT_STRICT=$(echo '["L7-holistic"]' \
+    | jq -c 'map(
+        if test("^L[0-9]+-") then "internal"
+        elif . == "codex" or . == "coderabbit" then .
+        elif startswith("external-pr:") then .
+        else empty end
+      ) | unique')
+if [[ "$U_OUT_STRICT" == '["internal"]' ]]; then
+    pass "Ubis: L7-holistic alone classifies as 'internal' (forward-compat regex guard)"
+else
+    fail "Ubis: expected [\"internal\"]; got $U_OUT_STRICT"
 fi
 
 # Vbis. review_id fallback format matches ^rev_[A-Za-z0-9]+$.
