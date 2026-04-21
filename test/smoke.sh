@@ -2497,6 +2497,212 @@ else
     fail "PF-4: premise audit missing from $POSTFIX_MD"
 fi
 
+# ------------------------------------------------------------------ Stage 2.9
+# prior-fix-diff.sh (§13.11b) — deterministic prior-fix suspect scan that
+# feeds L2's prompt. Construct scratch repos, exercise every branch.
+# Prefix is PFD-* (not PF-*) to avoid collision with the Post-Fix block
+# above.
+
+PFD_DIR="$WORK/prior-fix-diff"
+
+# PFD-1: Empty prior-fix history. feat branch changes a line; no prior
+# commit has fix-intent wording. Expect: empty output array.
+mkdir -p "$PFD_DIR/r1"
+(
+    cd "$PFD_DIR/r1"
+    git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+    git symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+    git config user.email smoke@example.com
+    git config user.name smoke
+    printf 'a\nb\nc\nd\n' > f.txt
+    git add f.txt && git commit --quiet -m "initial"
+    git checkout --quiet -b feat
+    printf 'a\nb\nCHANGED\nd\n' > f.txt
+    git add f.txt && git commit --quiet -m "change line 3"
+)
+out=$(cd "$PFD_DIR/r1" && "$TOOLS/prior-fix-diff.sh" \
+    --comparison-ref main --reviewed-files f.txt 2>/dev/null)
+len=$(echo "$out" | jq 'length')
+if [[ "$len" == "0" ]]; then
+    pass "PFD-1 (§13.11b): no fix-intent commits in history → empty suspects array"
+else
+    fail "PFD-1: expected empty array; got length=$len out=$out"
+fi
+
+# PFD-2: Prior commit touches same lines but lacks fix-intent keywords.
+mkdir -p "$PFD_DIR/r2"
+(
+    cd "$PFD_DIR/r2"
+    git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+    git symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+    git config user.email smoke@example.com
+    git config user.name smoke
+    printf 'a\nb\nc\nd\n' > f.txt
+    git add f.txt && git commit --quiet -m "initial"
+    printf 'a\nb\nc-refactored\nd\n' > f.txt
+    git add f.txt && git commit --quiet -m "refactor: tidy up phrasing"
+    git checkout --quiet -b feat
+    printf 'a\nb\nc-broadened\nd\n' > f.txt
+    git add f.txt && git commit --quiet -m "broaden line 3"
+)
+out=$(cd "$PFD_DIR/r2" && "$TOOLS/prior-fix-diff.sh" \
+    --comparison-ref main --reviewed-files f.txt 2>/dev/null)
+len=$(echo "$out" | jq 'length')
+if [[ "$len" == "0" ]]; then
+    pass "PFD-2 (§13.11b): prior commit with non-fix-intent message filtered out"
+else
+    fail "PFD-2: expected empty array; got length=$len out=$out"
+fi
+
+# PFD-3: The P1.1 pattern — prior "Fix ..." commit at overlapping lines,
+# current diff reverts the narrow fix. Expect one suspect naming the fix.
+mkdir -p "$PFD_DIR/r3"
+(
+    cd "$PFD_DIR/r3"
+    git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+    git symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+    git config user.email smoke@example.com
+    git config user.name smoke
+    printf 'a\nb\nc\nd\n' > f.txt
+    git add f.txt && git commit --quiet -m "initial"
+    printf 'a\nb\nc // narrowly scoped\nd\n' > f.txt
+    git add f.txt && git commit --quiet -m "Fix manual-accounts label regression"
+    printf 'a\nb\nc // narrowly scoped\nd\n# trailing\n' > f.txt
+    git add f.txt && git commit --quiet -m "add trailing note"
+    git checkout --quiet -b feat
+    printf 'a\nb\nc\nd\n# trailing\n' > f.txt
+    git add f.txt && git commit --quiet -m "SQL refactor"
+)
+out=$(cd "$PFD_DIR/r3" && "$TOOLS/prior-fix-diff.sh" \
+    --comparison-ref main --reviewed-files f.txt 2>/dev/null)
+len=$(echo "$out" | jq 'length')
+subject=$(echo "$out" | jq -r '.[0].prior_fix_commit_message_subject // ""')
+if [[ "$len" == "1" ]] && [[ "$subject" == "Fix manual-accounts label regression" ]]; then
+    pass "PFD-3 (§13.11b): overlapping fix-intent commit surfaces as one suspect"
+else
+    fail "PFD-3: expected one suspect naming the Fix commit; got length=$len subject='$subject' out=$out"
+fi
+
+# PFD-4: Fix-intent commit exists but touches different lines than the PR.
+# git log -L should not select it; expect empty.
+mkdir -p "$PFD_DIR/r4"
+(
+    cd "$PFD_DIR/r4"
+    git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+    git symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+    git config user.email smoke@example.com
+    git config user.name smoke
+    printf 'line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n' > f.txt
+    git add f.txt && git commit --quiet -m "initial"
+    # Fix at line 2 — different from where feat will change.
+    sed -i.bak 's/line2/line2-fixed/' f.txt && rm -f f.txt.bak
+    git add f.txt && git commit --quiet -m "Fix bug at line 2"
+    git checkout --quiet -b feat
+    # feat change at line 8 (no overlap with the fix at line 2).
+    sed -i.bak 's/line8/line8-changed/' f.txt && rm -f f.txt.bak
+    git add f.txt && git commit --quiet -m "change line 8"
+)
+out=$(cd "$PFD_DIR/r4" && "$TOOLS/prior-fix-diff.sh" \
+    --comparison-ref main --reviewed-files f.txt 2>/dev/null)
+len=$(echo "$out" | jq 'length')
+if [[ "$len" == "0" ]]; then
+    pass "PFD-4 (§13.11b): fix-intent commit with no line overlap filtered out"
+else
+    fail "PFD-4: expected empty array; got length=$len out=$out"
+fi
+
+# PFD-5: PR-internal fix commits filtered by --is-ancestor check.
+# feat branch has its own "Fix" commit that must NOT be surfaced as a
+# suspect (it isn't reachable from main).
+mkdir -p "$PFD_DIR/r5"
+(
+    cd "$PFD_DIR/r5"
+    git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+    git symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+    git config user.email smoke@example.com
+    git config user.name smoke
+    printf 'a\nb\nc\nd\n' > f.txt
+    git add f.txt && git commit --quiet -m "initial"
+    git checkout --quiet -b feat
+    # Feat commit 1: intentionally introduce a bug at line 3
+    printf 'a\nb\nBROKEN\nd\n' > f.txt
+    git add f.txt && git commit --quiet -m "feat work (introduces bug)"
+    # Feat commit 2: self-fix at line 3 ("Fix...") — PR-INTERNAL
+    printf 'a\nb\nFIXED\nd\n' > f.txt
+    git add f.txt && git commit --quiet -m "Fix bug introduced above"
+    # Feat commit 3: further change at line 3
+    printf 'a\nb\nFINAL\nd\n' > f.txt
+    git add f.txt && git commit --quiet -m "finalize line 3"
+)
+out=$(cd "$PFD_DIR/r5" && "$TOOLS/prior-fix-diff.sh" \
+    --comparison-ref main --reviewed-files f.txt 2>/dev/null)
+len=$(echo "$out" | jq 'length')
+if [[ "$len" == "0" ]]; then
+    pass "PFD-5 (§13.11b): PR-internal fix commits filtered by --is-ancestor"
+else
+    fail "PFD-5: expected empty array (feat's own fixes excluded); got length=$len out=$out"
+fi
+
+# PFD-6: Usage errors — missing --comparison-ref → exit 64; unknown
+# ref → exit 1 with error-as-prompt suggestions.
+mkdir -p "$PFD_DIR/r6"
+(
+    cd "$PFD_DIR/r6"
+    git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+    git symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+    git config user.email smoke@example.com
+    git config user.name smoke
+    printf 'a\n' > f.txt && git add f.txt && git commit --quiet -m "seed"
+)
+rc_missing=$(cd "$PFD_DIR/r6" && ("$TOOLS/prior-fix-diff.sh" --reviewed-files f.txt >/dev/null 2>&1); echo $?)
+rc_badref=$(cd "$PFD_DIR/r6" && ("$TOOLS/prior-fix-diff.sh" --comparison-ref no-such-ref --reviewed-files f.txt >/dev/null 2>&1); echo $?)
+if [[ "$rc_missing" == "64" && "$rc_badref" == "1" ]]; then
+    pass "PFD-6 (§13.11b): usage errors surface correct exit codes (64 missing / 1 bad-ref)"
+else
+    fail "PFD-6: expected 64/1; got missing=$rc_missing badref=$rc_badref"
+fi
+
+# PFD-7: Lookback cap — prior fix committed before the --lookback-days
+# window is filtered out of git log --since output, so no suspect.
+mkdir -p "$PFD_DIR/r7"
+(
+    cd "$PFD_DIR/r7"
+    git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+    git symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+    git config user.email smoke@example.com
+    git config user.name smoke
+    printf 'a\nb\nc\nd\n' > f.txt
+    GIT_AUTHOR_DATE="2022-01-01T00:00:00Z" GIT_COMMITTER_DATE="2022-01-01T00:00:00Z" \
+        git add f.txt && \
+        GIT_AUTHOR_DATE="2022-01-01T00:00:00Z" GIT_COMMITTER_DATE="2022-01-01T00:00:00Z" \
+        git commit --quiet -m "initial (2022)"
+    # Fix committed ~3 years ago.
+    sed -i.bak 's/c$/c-fixed/' f.txt && rm -f f.txt.bak
+    GIT_AUTHOR_DATE="2022-06-01T00:00:00Z" GIT_COMMITTER_DATE="2022-06-01T00:00:00Z" \
+        git add f.txt && \
+        GIT_AUTHOR_DATE="2022-06-01T00:00:00Z" GIT_COMMITTER_DATE="2022-06-01T00:00:00Z" \
+        git commit --quiet -m "Fix stale-c regression"
+    # Tail commit with fresh date so main has recent activity.
+    echo "# tail" >> f.txt
+    git add f.txt && git commit --quiet -m "tail"
+    git checkout --quiet -b feat
+    sed -i.bak 's/c-fixed/c/' f.txt && rm -f f.txt.bak
+    git add f.txt && git commit --quiet -m "revert c-fixed"
+)
+# With default lookback (365 days), the 2022 fix is outside the window.
+out=$(cd "$PFD_DIR/r7" && "$TOOLS/prior-fix-diff.sh" \
+    --comparison-ref main --reviewed-files f.txt 2>/dev/null)
+len=$(echo "$out" | jq 'length')
+# With a wide lookback (2000 days ≈ 5.5 years), the fix should appear.
+out_wide=$(cd "$PFD_DIR/r7" && "$TOOLS/prior-fix-diff.sh" \
+    --comparison-ref main --reviewed-files f.txt --lookback-days 2000 2>/dev/null)
+len_wide=$(echo "$out_wide" | jq 'length')
+if [[ "$len" == "0" && "$len_wide" == "1" ]]; then
+    pass "PFD-7 (§13.11b): --lookback-days bounds git-log --since window"
+else
+    fail "PFD-7: expected default=0 / wide=1; got default=$len wide=$len_wide"
+fi
+
 echo
 echo "smoke: PASS ($N assertions)"
 exit 0
