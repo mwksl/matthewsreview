@@ -265,6 +265,40 @@ Prompt essence:
 >   should receive a matching change?
 > - What invariants does the surrounding code assume? Does the diff
 >   preserve them?
+> - **Consumer-surface value trace.** For every column, field, API
+>   response, template variable, LLM tool output, report line, or
+>   other value the diff introduces or whose writer it modifies, walk
+>   the full path from writer through storage to user-visible output.
+>   If a writer can produce NULL, zero, empty string, or a default
+>   value, trace what each consumer does with it: does a SQL reader
+>   COALESCE it to a sentinel (e.g. `COALESCE(rate, 0)`), and is the
+>   sentinel distinguishable from a legitimate zero; does a render
+>   layer display the sentinel as a real value (`"0% APR"`, `"$0.00"`,
+>   `"Manual account"`); does an LLM tool schema, prompt helper, or
+>   insight generator feed the sentinel into an AI-generated
+>   recommendation (dangerous — the pipeline may be storage-layer
+>   correct but present-layer misleading; the model acts on `0%` as
+>   if it were a real rate); does a downstream filter / ORDER BY /
+>   conditional branch change behavior because the value is the
+>   default rather than the original. Flag when the writer's NULL /
+>   default can propagate to a user-facing output that reads as
+>   honest (real 0%, real $0, real "Manual") but actually represents
+>   missing data. This is the "semantic-layer correctness" cousin of
+>   the mechanical "does the INSERT happen?" check — both matter.
+> - **Cross-provider / domain-scope check.** When the diff changes a
+>   function that runs inside a specific data-path (`ray import-apple`,
+>   `syncPlaid`, a payroll upload, a user-initiated flow), identify
+>   which data entities the function's reads and writes touch. If the
+>   function's query surface is broader than the data-path's intent —
+>   e.g. a recategorization pass triggered by Apple-import that
+>   re-evaluates *all* transactions, not just the newly-imported Apple
+>   ones — flag it. The failure mode is subtle: the function is correct
+>   in isolation, but its scope crosses a provider / domain boundary
+>   the user did not consent to. Check whether the function filters by
+>   source / provider / import-batch / user-initiated-id before reading
+>   or writing; whether side effects stay scoped to the command's
+>   intent; whether a shared helper called by multiple paths scopes its
+>   work at the caller or the callee.
 >
 > **Inner pass — small-radius careful read.** For each file the diff
 > touches, also run this checklist against the changed hunks and their
@@ -305,7 +339,23 @@ Prompt essence:
 >    UNIQUE constraints that permit multiple types per key — each one
 >    is a candidate bug.
 >
-> 5. **Same-block adjacency.** Once you've found one bug in a block,
+> 5. **SQL JOIN join-key vs. target-table UNIQUE-constraint
+>    cardinality.** For any SQL JOIN the diff adds, modifies, or reads
+>    from, identify the JOIN's join-key column(s), then find the target
+>    table's UNIQUE / PRIMARY KEY constraint in the schema (grep
+>    migrations / `CREATE TABLE` / `ALTER TABLE`). If the JOIN's join-
+>    key is NOT the uniqueness key, the JOIN can fan out when the
+>    target table legitimately holds multiple rows per join-key value —
+>    especially likely when an UPSERT on the target uses
+>    `ON CONFLICT(a, b)` (multiple rows per `a` permitted, one per `b`)
+>    while the JOIN only keys on `a`. Example: if `liabilities` has
+>    `UNIQUE(account_id, type)` and a query `JOIN liabilities ON
+>    a.account_id = l.account_id`, a single account with both
+>    `credit_card` and `mortgage` types produces two rows — and any
+>    downstream `SUM` / `COUNT` / `ORDER BY` silently double-counts.
+>    Flag.
+>
+> 6. **Same-block adjacency.** Once you've found one bug in a block,
 >    reread the ±10 lines around it before moving on. List any other
 >    candidate bugs in that neighborhood as separate entries — even
 >    half-confident ones. Phase 3 filters weak candidates; a bug

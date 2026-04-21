@@ -2662,6 +2662,36 @@ else
     fail "PFD-6: expected 64/1; got missing=$rc_missing badref=$rc_badref"
 fi
 
+# LT-1..LT-3 guard the L2 prompt tune (Stage 2.9.A). Stage-2.9 closes
+# several P1/P2 misses by adding named prompt sections; silent removal
+# would regress detection without failing any helper-level test.
+
+# LT-1: Outer-pass contains the consumer-surface value trace bullet.
+if grep -qF 'Consumer-surface value trace' "$REPO/commands/_shared/01-detection.md" \
+    && grep -qF '"0% APR"' "$REPO/commands/_shared/01-detection.md"; then
+    pass "LT-1 (§2.9.A): L2 outer pass includes consumer-surface value trace"
+else
+    fail "LT-1: consumer-surface bullet missing from L2 prompt"
+fi
+
+# LT-2: Outer-pass contains the cross-provider / domain-scope bullet.
+if grep -qF 'Cross-provider / domain-scope check' "$REPO/commands/_shared/01-detection.md" \
+    && grep -qF 'recategorization pass triggered by Apple-import' "$REPO/commands/_shared/01-detection.md"; then
+    pass "LT-2 (§2.9.A): L2 outer pass includes cross-provider / domain-scope check"
+else
+    fail "LT-2: cross-provider bullet missing from L2 prompt"
+fi
+
+# LT-3: Inner-pass item 5 is SQL-JOIN-vs-UNIQUE and item 6 is Same-
+# block adjacency (renumbered). Both anchors must be present in the
+# expected order.
+if grep -qF '5. **SQL JOIN join-key vs. target-table UNIQUE-constraint' "$REPO/commands/_shared/01-detection.md" \
+    && grep -qF '6. **Same-block adjacency.**' "$REPO/commands/_shared/01-detection.md"; then
+    pass "LT-3 (§2.9.A): inner-pass item 5=SQL-JOIN-vs-UNIQUE, item 6=Same-block adjacency"
+else
+    fail "LT-3: inner-pass renumbering / JOIN item missing"
+fi
+
 # PFD-8: 01-detection.md contains the step 1.2b wiring block. Guards
 # against silent removal — smoke passes for the helper even if the
 # wiring is deleted, so add an explicit presence check.
