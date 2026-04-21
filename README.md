@@ -74,9 +74,9 @@ The install script does two things:
 
    The `_shared/` symlink propagates every helper, fragment, and schema automatically — only new top-level command files need their own symlink.
 
-2. **Substitutes the tools-path prefix** in four command files' `allowed-tools:` YAML. Claude Code's permission model requires absolute paths in `allowed-tools` grants (no `$HOME`/`~` expansion), and the committed form is the maintainer's `/Users/adammiller/...`. The install script rewrites it to your `$HOME` so grants resolve on your machine.
+2. **Substitutes the tools-path prefix** in the five command files' `allowed-tools:` YAML. Claude Code's permission model requires absolute paths in `allowed-tools` grants (no `$HOME`/`~` expansion), and the committed form is the maintainer's `/Users/adammiller/...`. The install script rewrites it to your `$HOME` so grants resolve on your machine.
 
-   If you are not the maintainer, this leaves the four command files (`commands/adams-review*.md`) showing as modified in `git status`. That is expected and reversible. **To submit a PR, run `bash scripts/uninstall.sh` first** to revert the substitution; make your edits; then reinstall.
+   If you are not the maintainer, this leaves the five command files (`commands/adams-review*.md`) showing as modified in `git status`. That is expected and reversible. **To submit a PR, run `bash scripts/uninstall.sh` first** to revert the substitution; make your edits; then reinstall.
 
 #### Verify manually
 
@@ -90,7 +90,7 @@ uv --version                                            # 0.7+
 <summary>Manual setup (if the script doesn't fit your environment)</summary>
 
 ```bash
-# 1. Rewrite /Users/adammiller/ → $HOME/ in the four command files (portable sed).
+# 1. Rewrite /Users/adammiller/ → $HOME/ in the five command files (portable sed).
 for f in commands/adams-review*.md; do
   sed "s|/Users/adammiller/|$HOME/|g" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
 done
