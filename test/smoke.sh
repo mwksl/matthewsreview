@@ -2628,6 +2628,27 @@ else
     fail "RA-9: install or uninstall script missing adams-review-add entry"
 fi
 
+# RA-10: allowed-tools front-matter grants every Bash binary the command
+# actually invokes. Catches the permissions-vs-usage drift class — e.g.
+# a step using mktemp without a Bash(mktemp:*) grant would prompt the
+# user mid-run instead of running cleanly. The check below pins the
+# subset of binaries this command literally invokes; common shell
+# builtins (echo, paste) are deliberately omitted to match the
+# established pattern of relying on the user's global allowlist for
+# those (see promote/walkthrough).
+front=$(awk '/^---$/{c++; next} c==1{print}' "$ADD_MD")
+missing=()
+for tool in mktemp jq git awk grep mkdir rm tr cat printf date; do
+    if ! echo "$front" | grep -qF "Bash($tool:"; then
+        missing+=("$tool")
+    fi
+done
+if [[ ${#missing[@]} -eq 0 ]]; then
+    pass "RA-10: allowed-tools grants every Bash binary the command invokes"
+else
+    fail "RA-10: missing Bash grants for: ${missing[*]}"
+fi
+
 echo
 echo "smoke: PASS ($N assertions)"
 exit 0
