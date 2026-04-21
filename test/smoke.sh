@@ -2649,6 +2649,48 @@ else
     fail "RA-10: missing Bash grants for: ${missing[*]}"
 fi
 
+# RA-11: step 6's finding builder honors trivial_mode when deriving
+# validation_lane, matching Phase 1's detection builder
+# (01-detection.md §1.10). Without this, new findings added to a
+# trivial-mode artifact would be stored as validation_lane=deep for
+# correctness/security while the rest of the artifact is all-light,
+# and artifact-render.py's lane-section filter would misplace them.
+if grep -qF 'trivial_mode=$(jq -r ' "$ADD_MD" \
+    && grep -qF -e '--argjson trivial "$trivial_mode"' "$ADD_MD" \
+    && grep -qF 'if $trivial then "light"' "$ADD_MD"; then
+    pass "RA-11: step 6 validation_lane honors trivial_mode (Phase 1 parity)"
+else
+    fail "RA-11: step 6 validation_lane missing trivial_mode branch in $ADD_MD"
+fi
+
+# RA-12: step 7.5 tree-cleanliness sweep is GATED on pre_validator_clean
+# so the sweep does not clobber the user's own uncommitted work.
+# /adams-review-add has no clean-tree gate (§3.8 design decision) — if
+# the user had dirty state going in, the sweep would revert it. The
+# gate + skip-branch + distinct trace tag together prove the guard is
+# wired correctly.
+if grep -qF 'pre_validator_clean=true' "$ADD_MD" \
+    && grep -qF 'pre_validator_clean=false' "$ADD_MD" \
+    && grep -qF '"$pre_validator_clean" == "true"' "$ADD_MD" \
+    && grep -qF 'add_tree_dirty_sweep_skipped' "$ADD_MD"; then
+    pass "RA-12: step 7.5 sweep is gated on pre_validator_clean (preserves user work)"
+else
+    fail "RA-12: step 7.5 sweep guard missing or malformed in $ADD_MD"
+fi
+
+# RA-13: step 5 dedup guards against the sub-agent hallucinating a
+# match_id that doesn't exist. The existing_ids_csv extraction + the
+# hallucinated-trace-tag + the count/drop jq's membership check
+# (.matches | IN($known[])) prevent a crash in the sources-merge
+# pipeline when match_id is unknown.
+if grep -qF 'existing_ids_csv=' "$ADD_MD" \
+    && grep -qF 'add_dedup_hallucinated' "$ADD_MD" \
+    && grep -qF '.matches | IN($known[])' "$ADD_MD"; then
+    pass "RA-13: step 5 dedup has hallucinated-match_id guard"
+else
+    fail "RA-13: step 5 dedup hallucination guard missing from $ADD_MD"
+fi
+
 echo
 echo "smoke: PASS ($N assertions)"
 exit 0

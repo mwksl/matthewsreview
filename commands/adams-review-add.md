@@ -305,12 +305,19 @@ for the step-10 trace block. In structured mode, set
 
 Skip this step entirely when `no_dedup == true`.
 
-Read the existing findings in compact form:
+Read the existing findings in compact form, plus a flat list of the
+existing ids (used below to guard against a hallucinated `match_id`
+from the sub-agent — a rare but catastrophic failure mode: without
+the guard, a nonexistent `match_id` makes the sources-merge jq pipe
+error on empty stdin and leaves the artifact partially mutated):
 
 ```bash
 existing_compact=$(~/.claude/commands/_shared/tools/artifact-read.sh \
     --path "$artifact_path" \
     --filter '[.findings[] | {id, file, line_range, claim}]')
+existing_ids_csv=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+    --path "$artifact_path" \
+    --filter '[.findings[].id] | join(",")')
 ```
 
 Dispatch the dedup sub-agent (the prompt is at the bottom of this
@@ -320,9 +327,14 @@ file under "Sub-agent prompts"). Capture the agent's response into
 exactly one verdict per new candidate.
 
 Iterate `verdicts_json.verdicts[]`. For each verdict whose `matches`
-is non-null, read the matched finding's existing `sources[]` and
-union the new candidate's source string into it via one
-`--set-json sources=@…` patch:
+is non-null, first confirm `$match_id` is in `$existing_ids_csv` (a
+CSV membership check is enough — ids are `F[0-9]+`, no escaping
+concerns). If the sub-agent hallucinated an id that doesn't exist,
+log `add_dedup_hallucinated: new#$N → $match_id (unknown id; treating as no match)`
+to `trace.md` and treat the verdict as `matches: null` — the candidate
+proceeds to Phase 4 as a fresh finding. Otherwise, read the matched
+finding's existing `sources[]` and union the new candidate's source
+string into it via one `--set-json sources=@…` patch:
 
 ```bash
 # Run once per matched verdict; $match_id and $candidate are bound
@@ -346,15 +358,23 @@ rm -f "$src_tmp"
 Append a trace line per merge: `add_dedup_merged: new#$N → $match_id (source=$new_source)`.
 
 After processing every verdict, rebuild `new_candidates` to drop the
-matched ones (keep only candidates whose `new_index` was paired with
-`matches: null`), and capture the count of merges as
-`dedup_matched_count`:
+**real** matches (verdicts whose `matches` is non-null AND whose id
+exists in `$existing_ids_csv`), and capture the count of merges as
+`dedup_matched_count`. Hallucinated matches are filtered out here too
+— their candidates flow to Phase 4 just like `matches: null` ones:
 
 ```bash
 dedup_matched_count=$(echo "$verdicts_json" \
-    | jq '[.verdicts[] | select(.matches != null)] | length')
+    | jq --arg ids "$existing_ids_csv" '
+        ($ids | split(",")) as $known
+        | [.verdicts[] | select(.matches != null and (.matches | IN($known[])))]
+        | length')
 matched_indices=$(echo "$verdicts_json" \
-    | jq -c '[.verdicts[] | select(.matches != null) | .new_index]')
+    | jq -c --arg ids "$existing_ids_csv" '
+        ($ids | split(",")) as $known
+        | [.verdicts[]
+            | select(.matches != null and (.matches | IN($known[])))
+            | .new_index]')
 new_candidates=$(echo "$new_candidates" \
     | jq -c --argjson drop "$matched_indices" '
         [ to_entries[] | select((.key as $k | $drop | index($k)) | not) | .value ]')
@@ -395,11 +415,27 @@ ids_assigned=$(echo "$new_candidates" \
     | ~/.claude/commands/_shared/tools/assign-finding-ids.sh --start-from "$next_id")
 ```
 
+Read `trivial_mode` from the artifact so the `validation_lane`
+derivation below matches Phase 1's builder (`01-detection.md` §1.10,
+per DESIGN §13.9 / §19.6). Under `trivial_mode`, every candidate lands
+in the light lane regardless of `impact_type` — Phase 4b handles the
+whole pool and light-lane-under-trivial refuses `auto_fixable`. If we
+skipped this branch here, new findings would ship with
+`validation_lane="deep"` while the rest of the trivial-mode artifact
+has `validation_lane="light"`, and the renderer's lane-section filters
+(`artifact-render.py` — `.validation_lane == "deep"`/`"light"`) would
+misplace them:
+
+```bash
+trivial_mode=$(jq -r '.trivial_mode' "$artifact_path")
+```
+
 Build full schema-valid finding objects (mirrors the Wave 2 builder in
 `05-validation.md` §4.5 step 1):
 
 ```bash
-findings_to_add=$(echo "$ids_assigned" | jq -c '
+findings_to_add=$(echo "$ids_assigned" \
+    | jq -c --argjson trivial "$trivial_mode" '
   [ .[] | {
       id,
       sources,
@@ -409,7 +445,8 @@ findings_to_add=$(echo "$ids_assigned" | jq -c '
       origin_confidence,
       actionability: "auto_fixable",   # placeholder; Phase 4 sets the truth
       validation_lane: (
-        if (.impact_type == "correctness" or .impact_type == "security") then "deep"
+        if $trivial then "light"
+        elif (.impact_type == "correctness" or .impact_type == "security") then "deep"
         else "light" end
       ),
       current_state: "open",
@@ -433,10 +470,11 @@ findings_to_add=$(echo "$ids_assigned" | jq -c '
 
 Note: `actionability` is set to `auto_fixable` as a placeholder so the
 schema requirement is satisfied; Phase 4's `--apply-decisions` will
-overwrite it with the validator's truth. `validation_lane` is derived
-from `impact_type` per the same rule Phase 1 uses. `disposition:
-"pending_validation"` is the standard "awaiting Phase 4 verdict"
-parking state.
+overwrite it with the validator's truth. `validation_lane` mirrors
+Phase 1's rule: `light` under `trivial_mode`, else `deep` for
+correctness/security and `light` for ux/policy/architecture.
+`disposition: "pending_validation"` is the standard "awaiting Phase 4
+verdict" parking state.
 
 Loop and add each finding:
 
@@ -467,6 +505,21 @@ intentionally NOT included (the user is adding a bounded set; following
 unpredictably).
 
 Capture `phase_4_start_epoch=$(date +%s)`.
+
+Snapshot the working tree's cleanliness before dispatch. Step 7.5's
+belt-and-braces sweep reverts any dirty state detected after
+validators run — but only when the tree was clean going in. Unlike
+`/adams-review` Phase 0, `/adams-review-add` has no clean-tree gate
+(§3.8 design decision: validators are read-only by contract). If the
+user has their own uncommitted work when they invoke this command, a
+blind sweep would clobber it.
+
+```bash
+pre_validator_clean=true
+if [[ -n "$(git -C "$repo_root" status --porcelain 2>/dev/null)" ]]; then
+    pre_validator_clean=false
+fi
+```
 
 #### 7.1 Read CLAUDE.md paths from the artifact
 
@@ -612,19 +665,33 @@ agent_role `validator`, finding-id, model `sonnet`).
 #### 7.5 Tree-cleanliness sweep (belt-and-braces)
 
 After every validator dispatch returns, run a `git status --porcelain`
-sweep. Validators have no legitimate reason to touch the working tree
-— the §7.3/§7.4 prompts already forbid it. This catches a
-prompt-override and restores the tree.
+sweep **only when the tree was clean at step 7 entry**
+(`pre_validator_clean == "true"`). Validators have no legitimate reason
+to touch the working tree — the §7.3/§7.4 prompts already forbid it —
+so any new dirt against a clean baseline is a prompt-override we can
+safely revert.
+
+When `pre_validator_clean == "false"` (the user had their own
+uncommitted work going in), skip the sweep. Without a clean baseline
+we can't distinguish user state from validator writes, and a blind
+revert would clobber user work. `/adams-review-add` has no Phase-0
+dirty-tree gate (§3.8), so this is the only safeguard against that
+data-loss class.
 
 ```bash
-dirty=$(git -C "$repo_root" status --porcelain 2>/dev/null)
-if [[ -n "$dirty" ]]; then
-    printf 'add_tree_dirty_reverted: %s\n' \
-        "$(printf '%s\n' "$dirty" | awk '{print $2}' | paste -sd, -)" \
+if [[ "$pre_validator_clean" == "true" ]]; then
+    dirty=$(git -C "$repo_root" status --porcelain 2>/dev/null)
+    if [[ -n "$dirty" ]]; then
+        printf 'add_tree_dirty_reverted: %s\n' \
+            "$(printf '%s\n' "$dirty" | awk '{print $2}' | paste -sd, -)" \
+            >> "$trace_log_path"
+        git -C "$repo_root" checkout -- . 2>/dev/null || true
+        printf '%s\n' "$dirty" | awk '/^\?\?/ {print $2}' \
+            | while IFS= read -r p; do rm -f "$repo_root/$p"; done
+    fi
+else
+    printf 'add_tree_dirty_sweep_skipped: pre-existing dirty tree (user work preserved)\n' \
         >> "$trace_log_path"
-    git -C "$repo_root" checkout -- . 2>/dev/null || true
-    printf '%s\n' "$dirty" | awk '/^\?\?/ {print $2}' \
-        | while IFS= read -r p; do rm -f "$repo_root/$p"; done
 fi
 ```
 
