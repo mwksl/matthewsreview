@@ -268,18 +268,24 @@ After the agent returns:
      `git status --porcelain` produces no output. The agent returned
      valid JSON but made zero actual edits, a silent no-op.
 
-   On any trigger, log the specific reason and set the fallback flag
-   so 9e surfaces the fallback-specific message:
+   On any trigger, set `reconcile_fallback_reason` to one of
+   `parse_failure` | `unresolved_conflicts` | `missing_findings` |
+   `overlapping_files_arrays` | `empty_diff`, log it, and set the
+   fallback flag so 9e surfaces the fallback-specific message:
 
    ```bash
-   printf 'reconcile_fallback reason=%s\n' "<reason>" >> "$trace_log_path"
+   reconcile_fallback_reason="<pick one of: parse_failure |
+     unresolved_conflicts | missing_findings |
+     overlapping_files_arrays | empty_diff>"
+   printf 'reconcile_fallback reason=%s\n' "$reconcile_fallback_reason" \
+       >> "$trace_log_path"
    reconcile_fallback=true
    ```
 
    Then drop into §9.pre.abort — the attempted findings are still
    `current_state=attempted` on disk, so the abort tuples apply
    cleanly. The user sees a reconcile_fallback user-visible message
-   from 9e step 7.
+   from 9e step 7 that names `$reconcile_fallback_reason`.
 
 4. **On success** (no fallback trigger fired above), replace
    `fix_groups` with a synthetic single entry and clear overlap so
@@ -551,13 +557,16 @@ original abort logic unchanged from prior revisions.
    >      (ids listed in `trace.md`)
    >   4. Re-run /adams-review-fix.
 
-   For `reconcile_fallback`, swap the first line for:
+   For `reconcile_fallback`, swap the first line for the variant
+   below, interpolating `$reconcile_fallback_reason` (set in
+   §9.pre.reconcile step 3):
 
    > ERROR: /adams-review-fix — reconcile attempt failed, aborted
-   > before commit. Reason: `<parse_failure | unresolved_conflicts |
-   > invalid_result>`. The working tree is in the same post-Phase-8
-   > state the original overlap occurred in; recovery steps 1–4 above
-   > apply unchanged. See `$trace_log_path` for the merge agent's raw
+   > before commit. Reason: `$reconcile_fallback_reason`. The working
+   > tree still holds the Phase-8 agent edits plus any partial edits
+   > the merge agent made before failing; recovery steps 1–4 above
+   > apply unchanged (`git restore .` + `git clean -fd` discards
+   > everything). See `$trace_log_path` for the merge agent's raw
    > output.
 
 **If `overlap_files` is empty**: proceed to 9a.
