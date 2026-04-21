@@ -592,16 +592,18 @@ fi
 
 # U. reviewer_sources Phase-6.3a regex correctly classifies lens tags.
 # Simulates the jq expression in 07-finalize.md step 6.3a against a
-# synthetic sources[] union.
-U_OUT=$(echo '["L1-diff-local","L3-claude-md","codex","external-pr:greptile-apps[bot]","random-tag"]' \
+# synthetic sources[] union. Includes L7-holistic to guard the post-
+# Stage-2.9 forward-compat regex (^L[0-9]+-) — a drift back to
+# ^L[1-6]- would drop L7 silently from reviewer_sources.
+U_OUT=$(echo '["L1-diff-local","L3-claude-md","L7-holistic","codex","external-pr:greptile-apps[bot]","random-tag"]' \
     | jq -c 'map(
-        if test("^L[1-6]-") then "internal"
+        if test("^L[0-9]+-") then "internal"
         elif . == "codex" or . == "coderabbit" then .
         elif startswith("external-pr:") then .
         else empty end
       ) | unique')
 if [[ "$U_OUT" == '["codex","external-pr:greptile-apps[bot]","internal"]' ]]; then
-    pass "U: reviewer_sources regex classifies L-tags, codex, external-pr: correctly"
+    pass "U: reviewer_sources regex classifies L1..L7 lens tags, codex, external-pr: correctly"
 else
     fail "U: reviewer_sources output = $U_OUT"
 fi

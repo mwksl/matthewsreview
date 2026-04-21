@@ -1,10 +1,11 @@
 ## Phase 1 — Detection
 
-Six internal lenses run in parallel to produce candidate findings. Each lens
-returns a list of candidates tagged with routing fields (`impact_type`,
-`origin`, `origin_confidence`, `source_family`). The orchestrator merges
-all lens outputs into `artifact.findings[]` as one call per candidate to
-`artifact-patch.py --add-finding`.
+Six internal lenses run in parallel to produce candidate findings; a
+seventh (L7 holistic) joins the fan-out when `--ensemble` is set. Each
+lens returns a list of candidates tagged with routing fields
+(`impact_type`, `origin`, `origin_confidence`, `source_family`). The
+orchestrator merges all lens outputs into `artifact.findings[]` as one
+call per candidate to `artifact-patch.py --add-finding`.
 
 **Dispatch parallelism.** To get actual wall-clock parallelism across lenses,
 send every applicable lens's `Agent` tool-use block inside a single
@@ -46,7 +47,8 @@ git diff "$comparison_ref..HEAD"
 ```
 
 All lenses see this full diff. L1, L3, L4, L5, L6 operate primarily on the
-diff; L2 additionally reads surrounding files.
+diff; L2 (and L7 under `--ensemble`) additionally read surrounding files
+and use git blame / git log.
 
 For lenses that receive CLAUDE.md content (L3, L4, L5, L6), pass
 `claude_md_paths` (the list captured in Phase 0, step 0.7). Each lens
@@ -162,20 +164,11 @@ downstream filtering picks up the rest.
 PROMPT
 ```
 
-**Finally, capture `phase_1_5_start_epoch`** — AFTER the
-`AskUserQuestion` may have run (so user-response wait time isn't
-billed into Phase 1.5's elapsed), immediately before handing off to
-step 1.3's dispatch turn:
-
-```bash
-phase_1_5_start_epoch=$(date +%s)
-```
-
-This epoch is what 02-ensemble-adapter.md step 1.5.7 subtracts to
-compute `phase_1_5_elapsed`. Placing it here mirrors Phase 1's
-`phase_1_start_epoch` capture at the top of step 1.3 — both clocks
-start at the same turn boundary, so under §13.12 parallel dispatch
-the two `elapsed_sec` values naturally overlap in `phases.jsonl`.
+`phase_1_5_start_epoch` is captured at the END of step 1.2b (after the
+deterministic prior-fix scan completes) — see the tail of 1.2b below.
+That placement keeps both Phase 1 and Phase 1.5 clocks aligned with
+the step 1.3 dispatch-turn boundary, so neither phase's `elapsed_sec`
+over-reports Phase 0-style work done beforehand.
 
 ### 1.2b. Prior-fix suspect scan (§13.11b)
 
@@ -213,6 +206,21 @@ dispatch at step 1.4 step 2a.
 `$prior_fix_suspects` is held in orchestrator working context and
 consumed once at step 1.3 (L2's prompt). No artifact write here —
 suspects are prompt input, not findings.
+
+**Finally, capture `phase_1_5_start_epoch`** — AFTER the readiness-gate
+`AskUserQuestion` (from step 1.2a) may have run AND after the prior-fix
+helper completes, so neither user-response wait time nor helper runtime
+is billed into Phase 1.5's elapsed:
+
+```bash
+phase_1_5_start_epoch=$(date +%s)
+```
+
+This epoch is what 02-ensemble-adapter.md step 1.5.7 subtracts to
+compute `phase_1_5_elapsed`. Placing it here mirrors Phase 1's
+`phase_1_start_epoch` capture at the top of step 1.3 — both clocks
+start at the same turn boundary, so under §13.12 parallel dispatch
+the two `elapsed_sec` values naturally overlap in `phases.jsonl`.
 
 ### 1.3. Dispatch the lenses (one turn, one Agent call per applicable lens)
 
