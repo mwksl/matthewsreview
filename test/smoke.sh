@@ -1550,7 +1550,9 @@ fi
 # artifact-render.py gained a richer `## Fix runs` section plus the
 # retry-eligible partial/regression sections. These assertions pin the
 # header shape, the outcome labels (including the overlap-abort label
-# for phase_9_outcome=null), and the newest-first ordering invariant.
+# for phase_9_outcome=null), and the oldest-first ordering invariant
+# (runs flow top-to-bottom chronologically, matching how GitHub renders
+# the enclosing PR comment).
 # expected.md already exercises the single-verified-run case at
 # assertion 9 above; these tests focus on the edge cases not covered
 # there.
@@ -1621,8 +1623,10 @@ else
 $(grep -A3 'Fix runs' "$WORK/rf-oa.md")"
 fi
 
-# Assertion FX-RF-6: newest-first ordering. Two runs on the same artifact,
-# different timestamps; expect the newer run's ### header to appear first.
+# Assertion FX-RF-6: oldest-first ordering. Two runs on the same artifact,
+# different timestamps; expect the older run's ### header to appear first
+# so the Fix runs section flows chronologically top-to-bottom like the
+# enclosing PR comment thread.
 "$TOOLS/artifact-patch.py" --init "@$FIX/fix-group-seed.json" --path "$WORK/rf-two.json" >/dev/null
 # Run A at 13:00
 "$TOOLS/artifact-patch.py" --path "$WORK/rf-two.json" --apply-fix-start '[{"id":"F007","run_id":"fixrun_old"}]' >/dev/null 2>&1
@@ -1635,13 +1639,13 @@ fi
   '[{"id":"F005","run_id":"fixrun_new","fix_group_id":"FG-1","input_sha":"bbbb222","output_sha":"dddd444","phase_9_outcome":"verified","timestamp":"2026-04-18T16:00:00Z"}]' >/dev/null 2>&1
 
 "$TOOLS/artifact-render.py" --input "$WORK/rf-two.json" --output "$WORK/rf-two.md" >/dev/null
-# Extract line numbers of the two ### Run sub-headers; newer (fixrun_new) must come first.
+# Extract line numbers of the two ### Run sub-headers; older (fixrun_old) must come first.
 line_new=$(grep -n '^### Run `fixrun_new`' "$WORK/rf-two.md" | cut -d: -f1)
 line_old=$(grep -n '^### Run `fixrun_old`' "$WORK/rf-two.md" | cut -d: -f1)
-if [[ -n "$line_new" && -n "$line_old" && "$line_new" -lt "$line_old" ]]; then
-    pass "FX-RF-6 (§7): Fix runs ordered newest-first (line $line_new before $line_old)"
+if [[ -n "$line_new" && -n "$line_old" && "$line_old" -lt "$line_new" ]]; then
+    pass "FX-RF-6 (§7): Fix runs ordered oldest-first (line $line_old before $line_new)"
 else
-    fail "FX-RF-6: expected fixrun_new before fixrun_old, got new=$line_new old=$line_old"
+    fail "FX-RF-6: expected fixrun_old before fixrun_new, got old=$line_old new=$line_new"
 fi
 
 # ------------------------------------------------------------------ Stage 2.8

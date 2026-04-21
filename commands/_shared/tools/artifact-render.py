@@ -543,8 +543,8 @@ def render_fix_runs(artifact):
     DESIGN §7: "A `## Fix runs` section is appended showing each run's
     summary." Each run produces a header line (run_id, timestamp,
     committed SHAs, outcome counts) and a table of per-finding outcomes.
-    Runs are ordered newest-first — the freshest outcome is usually the
-    most relevant to the reader.
+    Runs are ordered oldest-first so the section flows chronologically
+    top-to-bottom, matching how GitHub renders the enclosing PR comment.
     """
     runs = defaultdict(list)  # run_id -> list of (finding_id, attempt)
     for f in artifact.get("findings", []):
@@ -553,17 +553,17 @@ def render_fix_runs(artifact):
     if not runs:
         return ""
 
-    # Newest-first. Use the min timestamp within the run as its stable
-    # anchor (attempts within a run should share a timestamp but don't
-    # strictly have to — the overlap-abort batch does share one, the
-    # committed branch might ts-stamp all findings at 9d within the
-    # same second, but ordering is driven by the earliest attempt-ts).
+    # Use the min timestamp within the run as its stable anchor (attempts
+    # within a run should share a timestamp but don't strictly have to —
+    # the overlap-abort batch does share one, the committed branch might
+    # ts-stamp all findings at 9d within the same second, but ordering
+    # is driven by the earliest attempt-ts).
     def run_ts(entries):
         tss = [att.get("timestamp") or "" for _, att in entries]
         return min(tss) if tss else ""
 
     lines = ["## Fix runs", ""]
-    for run_id, entries in sorted(runs.items(), key=lambda kv: run_ts(kv[1]), reverse=True):
+    for run_id, entries in sorted(runs.items(), key=lambda kv: run_ts(kv[1])):
         ts = run_ts(entries)
         outcomes = defaultdict(int)
         shas = set()
