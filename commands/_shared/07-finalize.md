@@ -50,7 +50,7 @@ providers that produced at least one candidate. Compute it from
 `findings[].sources[]`:
 
 - `internal` — present when any lens produced a candidate (any
-  `sources[]` entry matches `L[1-6]-.*`).
+  `sources[]` entry matches `L[0-9]+-.*` — L1–L7 today, forward-compat for future lenses).
 - adapter names (`codex`, `coderabbit`) — present when any entry
   matches exactly.
 - `external-pr:<bot-login>` — present when any entry starts with
@@ -60,9 +60,12 @@ providers that produced at least one candidate. Compute it from
 reviewer_sources=$(jq -c '
   [.findings[] | .sources[]]
   | map(
-      # Internal lens tags: L1..L6. If we add an L7 lens in the future,
-      # update this regex or the entry falls through to `empty`.
-      if test("^L[1-6]-") then "internal"
+      # Internal lens tags: L1..L7 today (L7 is the ensemble-gated
+      # holistic lens, Stage 2.9.D). Regex is [0-9]+ for forward-
+      # compatibility — new L-N lenses slot in without this needing
+      # an update. Any entry that doesn't match falls through to
+      # `empty` and gets dropped from the union.
+      if test("^L[0-9]+-") then "internal"
       elif . == "codex" or . == "coderabbit" then .
       elif startswith("external-pr:") then .
       else empty end

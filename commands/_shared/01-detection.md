@@ -1,10 +1,11 @@
 ## Phase 1 — Detection
 
-Six internal lenses run in parallel to produce candidate findings. Each lens
-returns a list of candidates tagged with routing fields (`impact_type`,
-`origin`, `origin_confidence`, `source_family`). The orchestrator merges
-all lens outputs into `artifact.findings[]` as one call per candidate to
-`artifact-patch.py --add-finding`.
+Six internal lenses run in parallel to produce candidate findings; a
+seventh (L7 holistic) joins the fan-out when `--ensemble` is set. Each
+lens returns a list of candidates tagged with routing fields
+(`impact_type`, `origin`, `origin_confidence`, `source_family`). The
+orchestrator merges all lens outputs into `artifact.findings[]` as one
+call per candidate to `artifact-patch.py --add-finding`.
 
 **Dispatch parallelism.** To get actual wall-clock parallelism across lenses,
 send every applicable lens's `Agent` tool-use block inside a single
@@ -23,10 +24,12 @@ Based on the Phase 0 variables:
 | L4 — comment compliance | `sonnet` | always |
 | L5 — UX | `sonnet` | `user_facing == true AND trivial_mode != true` |
 | L6 — lightweight security | `sonnet` | `trivial_mode != true` |
+| L7 — holistic review | `opus` | `ensemble_mode == true AND trivial_mode != true` |
 
 Skipped lenses get a one-line note in `trace.md`:
 ```
-Phase 1: L2/L5/L6 skipped (trivial_mode=true)
+Phase 1: L7 skipped (ensemble_mode=false)
+Phase 1: L2/L5/L6/L7 skipped (trivial_mode=true)
 ```
 
 Log them via `log-phase.sh --summary` at step 1.6 as part of the Phase 1
@@ -44,7 +47,8 @@ git diff "$comparison_ref..HEAD"
 ```
 
 All lenses see this full diff. L1, L3, L4, L5, L6 operate primarily on the
-diff; L2 additionally reads surrounding files.
+diff; L2 (and L7 under `--ensemble`) additionally read surrounding files
+and use git blame / git log.
 
 For lenses that receive CLAUDE.md content (L3, L4, L5, L6), pass
 `claude_md_paths` (the list captured in Phase 0, step 0.7). Each lens
@@ -160,10 +164,53 @@ downstream filtering picks up the rest.
 PROMPT
 ```
 
-**Finally, capture `phase_1_5_start_epoch`** — AFTER the
-`AskUserQuestion` may have run (so user-response wait time isn't
-billed into Phase 1.5's elapsed), immediately before handing off to
-step 1.3's dispatch turn:
+`phase_1_5_start_epoch` is captured at the END of step 1.2b (after the
+deterministic prior-fix scan completes) — see the tail of 1.2b below.
+That placement keeps both Phase 1 and Phase 1.5 clocks aligned with
+the step 1.3 dispatch-turn boundary, so neither phase's `elapsed_sec`
+over-reports Phase 0-style work done beforehand.
+
+### 1.2b. Prior-fix suspect scan (§13.11b)
+
+Before dispatching lenses, scan git history for prior "fix" commits
+whose changes overlap the PR's diff. The output feeds L2's prompt so
+L2 can judge whether the current change undoes any suspect fix — the
+deterministic half of prior-fix-reversion detection; L2 is the judge.
+
+Skipped when `$trivial_mode` is true (L2 is skipped too, so the
+suspects have no consumer):
+
+```bash
+if [[ "$trivial_mode" != "true" ]]; then
+    reviewed_files_csv=$(printf '%s\n' "$reviewed_files_all" \
+      | awk 'NF' | paste -sd, -)
+
+    prior_fix_suspects=$(
+        ~/.claude/commands/_shared/tools/prior-fix-diff.sh \
+          --comparison-ref "$comparison_ref" \
+          --reviewed-files "$reviewed_files_csv" \
+          2> >(tee -a "$trace_log_path" >&2)
+    ) || prior_fix_suspects="[]"
+else
+    prior_fix_suspects="[]"
+fi
+```
+
+On helper non-zero exit, fall back to `[]` — L2's prior-fix section
+becomes a no-op, which is the right degraded behavior (the rest of
+L2's prompt still runs normally). Per-file audit lines
+(`prior_fix_diff: file=... hunks=... suspects=...`) flow into
+`trace.md` via the `tee -a` pattern — mirrors `origin-crosscheck.sh`
+dispatch at step 1.4 step 2a.
+
+`$prior_fix_suspects` is held in orchestrator working context and
+consumed once at step 1.3 (L2's prompt). No artifact write here —
+suspects are prompt input, not findings.
+
+**Finally, capture `phase_1_5_start_epoch`** — AFTER the readiness-gate
+`AskUserQuestion` (from step 1.2a) may have run AND after the prior-fix
+helper completes, so neither user-response wait time nor helper runtime
+is billed into Phase 1.5's elapsed:
 
 ```bash
 phase_1_5_start_epoch=$(date +%s)
@@ -228,6 +275,40 @@ Prompt essence:
 >   should receive a matching change?
 > - What invariants does the surrounding code assume? Does the diff
 >   preserve them?
+> - **Consumer-surface value trace.** For every column, field, API
+>   response, template variable, LLM tool output, report line, or
+>   other value the diff introduces or whose writer it modifies, walk
+>   the full path from writer through storage to user-visible output.
+>   If a writer can produce NULL, zero, empty string, or a default
+>   value, trace what each consumer does with it: does a SQL reader
+>   COALESCE it to a sentinel (e.g. `COALESCE(rate, 0)`), and is the
+>   sentinel distinguishable from a legitimate zero; does a render
+>   layer display the sentinel as a real value (`"0% APR"`, `"$0.00"`,
+>   `"Manual account"`); does an LLM tool schema, prompt helper, or
+>   insight generator feed the sentinel into an AI-generated
+>   recommendation (dangerous — the pipeline may be storage-layer
+>   correct but present-layer misleading; the model acts on `0%` as
+>   if it were a real rate); does a downstream filter / ORDER BY /
+>   conditional branch change behavior because the value is the
+>   default rather than the original. Flag when the writer's NULL /
+>   default can propagate to a user-facing output that reads as
+>   honest (real 0%, real $0, real "Manual") but actually represents
+>   missing data. This is the "semantic-layer correctness" cousin of
+>   the mechanical "does the INSERT happen?" check — both matter.
+> - **Cross-provider / domain-scope check.** When the diff changes a
+>   function that runs inside a specific data-path (`ray import-apple`,
+>   `syncPlaid`, a payroll upload, a user-initiated flow), identify
+>   which data entities the function's reads and writes touch. If the
+>   function's query surface is broader than the data-path's intent —
+>   e.g. a recategorization pass triggered by Apple-import that
+>   re-evaluates *all* transactions, not just the newly-imported Apple
+>   ones — flag it. The failure mode is subtle: the function is correct
+>   in isolation, but its scope crosses a provider / domain boundary
+>   the user did not consent to. Check whether the function filters by
+>   source / provider / import-batch / user-initiated-id before reading
+>   or writing; whether side effects stay scoped to the command's
+>   intent; whether a shared helper called by multiple paths scopes its
+>   work at the caller or the callee.
 >
 > **Inner pass — small-radius careful read.** For each file the diff
 > touches, also run this checklist against the changed hunks and their
@@ -268,12 +349,51 @@ Prompt essence:
 >    UNIQUE constraints that permit multiple types per key — each one
 >    is a candidate bug.
 >
-> 5. **Same-block adjacency.** Once you've found one bug in a block,
+> 5. **SQL JOIN join-key vs. target-table UNIQUE-constraint
+>    cardinality.** For any SQL JOIN the diff adds, modifies, or reads
+>    from, identify the JOIN's join-key column(s), then find the target
+>    table's UNIQUE / PRIMARY KEY constraint in the schema (grep
+>    migrations / `CREATE TABLE` / `ALTER TABLE`). If the JOIN's join-
+>    key is NOT the uniqueness key, the JOIN can fan out when the
+>    target table legitimately holds multiple rows per join-key value —
+>    especially likely when an UPSERT on the target uses
+>    `ON CONFLICT(a, b)` (multiple rows per `a` permitted, one per `b`)
+>    while the JOIN only keys on `a`. Example: if `liabilities` has
+>    `UNIQUE(account_id, type)` and a query `JOIN liabilities ON
+>    a.account_id = l.account_id`, a single account with both
+>    `credit_card` and `mortgage` types produces two rows — and any
+>    downstream `SUM` / `COUNT` / `ORDER BY` silently double-counts.
+>    Flag.
+>
+> 6. **Same-block adjacency.** Once you've found one bug in a block,
 >    reread the ±10 lines around it before moving on. List any other
 >    candidate bugs in that neighborhood as separate entries — even
 >    half-confident ones. Phase 3 filters weak candidates; a bug
 >    co-located with a known bug usually shares a fix and is cheapest
 >    to surface now.
+>
+> **Prior-fix reversion check (§13.11b).** The following prior commits
+> (subject matches fix-intent patterns, reachable from the comparison
+> ref — PR-internal commits already filtered out) touched lines that
+> this PR also modifies:
+>
+> ```
+> $prior_fix_suspects
+> ```
+>
+> (Empty array → nothing to check; skip this section.)
+>
+> For each suspect, compare the current diff's changes at the overlapping
+> lines against what the prior fix commit did. Flag as a candidate when
+> the current diff appears to undo the prior fix — either by reverting
+> to the pre-fix line content, by introducing a parallel code path that
+> behaves like the pre-fix code, or by broadening a narrow condition the
+> prior fix specifically narrowed. Include the prior fix commit's short
+> SHA and subject in your `claim` so a reviewer can trace the history.
+>
+> `impact_type` for a regression-of-prior-fix: `correctness`.
+> `source_family`: `structural-family` (L2's default — this is still a
+> structural observation, just with history awareness).
 >
 > Read function BODIES, not just signatures. Flag contract changes,
 > nullability shifts, return-shape changes, concurrent-write assumption
@@ -370,6 +490,95 @@ Prompt essence:
 > Return the same candidate shape as L1 with `impact_type: "security"`,
 > `source_family: "security-family"`.
 
+#### L7 — holistic review (Opus; `ensemble_mode` only; skipped if `trivial_mode`)
+
+Launch one `Agent` tool-use with `model: opus`, `subagent_type: general-purpose`.
+Inherits the parent command's Read + Bash(git:*) + Bash(grep:*) grants — same
+permissions as L2.
+
+L7 exists as a recall-oriented safety net: focused lenses have narrower
+prompts tuned to specific bug classes; L7 reads the diff like a skeptical
+senior reviewer with no checklist. Ensemble-gated because it costs roughly
+1.5–2x an L2 pass. Phase 2 dedup merges overlaps with focused-lens
+findings (unioning `source_families`) so duplicates become a strengthening
+signal via Phase 3's ≥2-families auto-graduate rule, not noise.
+
+Prompt essence:
+
+> Review this PR as a skeptical, careful senior engineer who was just
+> handed it and asked to find bugs the test suite and linter will miss.
+> Read the diff between `$comparison_ref` and HEAD, plus any surrounding
+> code you need to understand it. Use `git blame` / `git log` freely.
+>
+> **No checklist — scan for anything wrong.** Other agents are running
+> in parallel with narrower prompts (L1 diff-local, L2 structural, L3
+> CLAUDE.md, L4 comments, L5 UX, L6 security). Your job is to catch
+> things those miss: semantic correctness across layer boundaries,
+> misleading state visible to users or AI consumers, latent bugs a
+> careful human reader would notice, regressions of prior behavior,
+> multi-failure-mode issues at the same call site.
+>
+> Places to look especially hard:
+>
+> - **Cross-layer semantic value.** When a field can be NULL / default /
+>   missing, follow every consumer and check whether the user-visible
+>   or AI-visible output is honest. A NULL rate rendered as `"0% APR"`
+>   in an LLM tool output is a real bug even when the SQL is correct.
+>
+> - **Regression of prior behavior.** When the diff changes behavior in
+>   an area that had a named fix commit, check whether the fix is being
+>   undone. Use `git log -L <range>:<file>` filtered to "fix"/"bug"/
+>   "regression" message patterns. A broadened SQL predicate or a
+>   consolidated branch that re-introduces the pre-fix behavior is the
+>   characteristic pattern.
+>
+> - **Cross-provider / domain scope.** When a function runs inside a
+>   path named for one data source (Apple import, Plaid sync, payroll),
+>   check whether its queries and writes stay scoped to that source, or
+>   whether it silently re-evaluates unrelated data.
+>
+> - **Multi-failure-mode at the same call site.** When the diff
+>   addresses one failure mode (e.g. wraps a throwing call in
+>   try/catch), enumerate other ways the same call can go wrong:
+>   inconsistent state, partial writes, stale cache, out-of-order side
+>   effects. A "fix" that addresses one mode while leaving another live
+>   is a partial fix worth flagging.
+>
+> - **Misleading user / AI interfaces.** Outputs that look correct but
+>   mislead — `"0% APR"` for a missing rate, `"Manual"` for a non-manual
+>   account, silent failures rendered as successes, partial updates
+>   reported as complete, generic error messages when specific context
+>   was available.
+>
+> - **Parallel paths whose invariants have diverged.** Two similar
+>   functions/queries where only one got updated; one strict parser and
+>   one lenient; a write-side that now allows NULL and a read-side that
+>   assumes non-null.
+>
+> - **Assumptions that don't hold.** Invariants the code assumes but
+>   the diff breaks; ordering assumptions; concurrency; JOIN cardinality
+>   against target-table UNIQUE constraints.
+>
+> Over-flag; Phase 3 filters. Err toward sharing a half-confident bug.
+>
+> Return a JSON array of candidates. Each candidate:
+>
+> ```
+> {
+>   "file": "src/path/to/file.ts",
+>   "line_range": [start, end],
+>   "claim": "one-sentence description of the issue",
+>   "evidence_snippet": "exact code lines (or multi-file trace if cross-layer)",
+>   "impact_type": "correctness" | "security" | "ux" | "policy" | "architecture",
+>   "origin": "introduced_by_pr" | "pre_existing" | "unknown",
+>   "origin_confidence": "high" | "medium" | "low",
+>   "source_family": "holistic-family"
+> }
+> ```
+>
+> Default `origin: "introduced_by_pr"`, `origin_confidence: "high"` unless
+> the implicated code is clearly unchanged by this diff.
+
 #### Ensemble fan-out (same turn, when `ensemble_mode == true`)
 
 Per DESIGN §13.12, the dispatch turn also launches the external
@@ -382,10 +591,10 @@ Total tool-use blocks in the dispatch turn:
 
 | Condition | Blocks |
 |---|---|
-| `ensemble_mode=false` | applicable lenses (6 max) |
-| `ensemble_mode=true`, both CLIs available, `mode=pr` | lenses + 2 background Bash + 1 foreground Bash |
-| `ensemble_mode=true`, both CLIs available, `mode=local` | lenses + 2 background Bash |
-| `ensemble_mode=true`, one CLI unavailable | lenses + 1 background Bash + (1 foreground Bash if PR mode) |
+| `ensemble_mode=false` | applicable lenses (6 max — L1..L6; L7 is ensemble-gated) |
+| `ensemble_mode=true`, both CLIs available, `mode=pr` | lenses (up to 7, including L7) + 2 background Bash + 1 foreground Bash |
+| `ensemble_mode=true`, both CLIs available, `mode=local` | lenses (up to 7) + 2 background Bash |
+| `ensemble_mode=true`, one CLI unavailable | lenses (up to 7) + 1 background Bash + (1 foreground Bash if PR mode) |
 
 The ensemble launch specs live in `02-ensemble-adapter.md`:
 
@@ -438,10 +647,11 @@ For each sub-agent result, in the order it returns:
    ```
 
    `<lens-name>` is one of `lens_1_diff_local`, `lens_2_structural`,
-   `lens_3_claude_md`, `lens_4_comments`, `lens_5_ux`, `lens_6_security`.
-   The paired per-finding `sources[]` entry — used in the jq builder at
-   step 1.5 — is the shorter lens tag: `L1-diff-local`, `L2-structural`,
-   `L3-claude-md`, `L4-comments`, `L5-ux`, `L6-security` (DESIGN §6).
+   `lens_3_claude_md`, `lens_4_comments`, `lens_5_ux`, `lens_6_security`,
+   `lens_7_holistic`. The paired per-finding `sources[]` entry — used in
+   the jq builder at step 1.5 — is the shorter lens tag: `L1-diff-local`,
+   `L2-structural`, `L3-claude-md`, `L4-comments`, `L5-ux`, `L6-security`,
+   `L7-holistic` (DESIGN §6).
 
 2. **Light JSON repair** if the output isn't a parseable array — strip code
    fences, extract the JSON block. If still unparseable, retry once with
@@ -584,7 +794,7 @@ ided=$(printf '%s' "$sanitized" \
 ```
 
 `assign-finding-ids.sh` sorts by source priority (L1, L2, L3, L4, L5,
-L6, external-pr, codex, coderabbit — stable within source = input
+L6, L7, external-pr, codex, coderabbit — stable within source = input
 order preserved) and assigns `F001…F0NN`. See the helper's header for
 the full priority table.
 

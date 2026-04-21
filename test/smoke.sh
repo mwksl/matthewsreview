@@ -593,17 +593,36 @@ fi
 # U. reviewer_sources Phase-6.3a regex correctly classifies lens tags.
 # Simulates the jq expression in 07-finalize.md step 6.3a against a
 # synthetic sources[] union.
-U_OUT=$(echo '["L1-diff-local","L3-claude-md","codex","external-pr:greptile-apps[bot]","random-tag"]' \
+U_OUT=$(echo '["L1-diff-local","L3-claude-md","L7-holistic","codex","external-pr:greptile-apps[bot]","random-tag"]' \
     | jq -c 'map(
-        if test("^L[1-6]-") then "internal"
+        if test("^L[0-9]+-") then "internal"
         elif . == "codex" or . == "coderabbit" then .
         elif startswith("external-pr:") then .
         else empty end
       ) | unique')
 if [[ "$U_OUT" == '["codex","external-pr:greptile-apps[bot]","internal"]' ]]; then
-    pass "U: reviewer_sources regex classifies L-tags, codex, external-pr: correctly"
+    pass "U: reviewer_sources regex classifies L1..L7 lens tags, codex, external-pr: correctly"
 else
     fail "U: reviewer_sources output = $U_OUT"
+fi
+
+# Ubis. Strict L7-only variant — guards the post-Stage-2.9 forward-
+# compat regex specifically. With the old buggy regex ^L[1-6]- and only
+# L7 tags in sources[], the union would collapse to [] (L7 classified as
+# `empty`, dropped). With the fixed ^L[0-9]+-, the union is ["internal"].
+# U alone doesn't distinguish the two regexes when L1..L6 are also present
+# — this test does.
+U_OUT_STRICT=$(echo '["L7-holistic"]' \
+    | jq -c 'map(
+        if test("^L[0-9]+-") then "internal"
+        elif . == "codex" or . == "coderabbit" then .
+        elif startswith("external-pr:") then .
+        else empty end
+      ) | unique')
+if [[ "$U_OUT_STRICT" == '["internal"]' ]]; then
+    pass "Ubis: L7-holistic alone classifies as 'internal' (forward-compat regex guard)"
+else
+    fail "Ubis: expected [\"internal\"]; got $U_OUT_STRICT"
 fi
 
 # Vbis. review_id fallback format matches ^rev_[A-Za-z0-9]+$.
@@ -2689,6 +2708,341 @@ if grep -qF 'existing_ids_csv=' "$ADD_MD" \
     pass "RA-13: step 5 dedup has hallucinated-match_id guard"
 else
     fail "RA-13: step 5 dedup hallucination guard missing from $ADD_MD"
+fi
+
+# ------------------------------------------------------------------ Stage 2.9
+# prior-fix-diff.sh (§13.11b) — deterministic prior-fix suspect scan that
+# feeds L2's prompt. Construct scratch repos, exercise every branch.
+# Prefix is PFD-* (not PF-*) to avoid collision with the Post-Fix block
+# above.
+
+PFD_DIR="$WORK/prior-fix-diff"
+
+# PFD-1: Empty prior-fix history. feat branch changes a line; no prior
+# commit has fix-intent wording. Expect: empty output array.
+mkdir -p "$PFD_DIR/r1"
+(
+    cd "$PFD_DIR/r1"
+    git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+    git symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+    git config user.email smoke@example.com
+    git config user.name smoke
+    printf 'a\nb\nc\nd\n' > f.txt
+    git add f.txt && git commit --quiet -m "initial"
+    git checkout --quiet -b feat
+    printf 'a\nb\nCHANGED\nd\n' > f.txt
+    git add f.txt && git commit --quiet -m "change line 3"
+)
+out=$(cd "$PFD_DIR/r1" && "$TOOLS/prior-fix-diff.sh" \
+    --comparison-ref main --reviewed-files f.txt 2>/dev/null)
+len=$(echo "$out" | jq 'length')
+if [[ "$len" == "0" ]]; then
+    pass "PFD-1 (§13.11b): no fix-intent commits in history → empty suspects array"
+else
+    fail "PFD-1: expected empty array; got length=$len out=$out"
+fi
+
+# PFD-2: Prior commit touches same lines but lacks fix-intent keywords.
+mkdir -p "$PFD_DIR/r2"
+(
+    cd "$PFD_DIR/r2"
+    git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+    git symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+    git config user.email smoke@example.com
+    git config user.name smoke
+    printf 'a\nb\nc\nd\n' > f.txt
+    git add f.txt && git commit --quiet -m "initial"
+    printf 'a\nb\nc-refactored\nd\n' > f.txt
+    git add f.txt && git commit --quiet -m "refactor: tidy up phrasing"
+    git checkout --quiet -b feat
+    printf 'a\nb\nc-broadened\nd\n' > f.txt
+    git add f.txt && git commit --quiet -m "broaden line 3"
+)
+out=$(cd "$PFD_DIR/r2" && "$TOOLS/prior-fix-diff.sh" \
+    --comparison-ref main --reviewed-files f.txt 2>/dev/null)
+len=$(echo "$out" | jq 'length')
+if [[ "$len" == "0" ]]; then
+    pass "PFD-2 (§13.11b): prior commit with non-fix-intent message filtered out"
+else
+    fail "PFD-2: expected empty array; got length=$len out=$out"
+fi
+
+# PFD-3: The P1.1 pattern — prior "Fix ..." commit at overlapping lines,
+# current diff reverts the narrow fix. Expect one suspect naming the fix.
+mkdir -p "$PFD_DIR/r3"
+(
+    cd "$PFD_DIR/r3"
+    git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+    git symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+    git config user.email smoke@example.com
+    git config user.name smoke
+    printf 'a\nb\nc\nd\n' > f.txt
+    git add f.txt && git commit --quiet -m "initial"
+    printf 'a\nb\nc // narrowly scoped\nd\n' > f.txt
+    git add f.txt && git commit --quiet -m "Fix manual-accounts label regression"
+    printf 'a\nb\nc // narrowly scoped\nd\n# trailing\n' > f.txt
+    git add f.txt && git commit --quiet -m "add trailing note"
+    git checkout --quiet -b feat
+    printf 'a\nb\nc\nd\n# trailing\n' > f.txt
+    git add f.txt && git commit --quiet -m "SQL refactor"
+)
+out=$(cd "$PFD_DIR/r3" && "$TOOLS/prior-fix-diff.sh" \
+    --comparison-ref main --reviewed-files f.txt 2>/dev/null)
+len=$(echo "$out" | jq 'length')
+subject=$(echo "$out" | jq -r '.[0].prior_fix_commit_message_subject // ""')
+if [[ "$len" == "1" ]] && [[ "$subject" == "Fix manual-accounts label regression" ]]; then
+    pass "PFD-3 (§13.11b): overlapping fix-intent commit surfaces as one suspect"
+else
+    fail "PFD-3: expected one suspect naming the Fix commit; got length=$len subject='$subject' out=$out"
+fi
+
+# PFD-4: Fix-intent commit exists but touches different lines than the PR.
+# git log -L should not select it; expect empty.
+mkdir -p "$PFD_DIR/r4"
+(
+    cd "$PFD_DIR/r4"
+    git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+    git symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+    git config user.email smoke@example.com
+    git config user.name smoke
+    printf 'line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n' > f.txt
+    git add f.txt && git commit --quiet -m "initial"
+    # Fix at line 2 — different from where feat will change.
+    sed -i.bak 's/line2/line2-fixed/' f.txt && rm -f f.txt.bak
+    git add f.txt && git commit --quiet -m "Fix bug at line 2"
+    git checkout --quiet -b feat
+    # feat change at line 8 (no overlap with the fix at line 2).
+    sed -i.bak 's/line8/line8-changed/' f.txt && rm -f f.txt.bak
+    git add f.txt && git commit --quiet -m "change line 8"
+)
+out=$(cd "$PFD_DIR/r4" && "$TOOLS/prior-fix-diff.sh" \
+    --comparison-ref main --reviewed-files f.txt 2>/dev/null)
+len=$(echo "$out" | jq 'length')
+if [[ "$len" == "0" ]]; then
+    pass "PFD-4 (§13.11b): fix-intent commit with no line overlap filtered out"
+else
+    fail "PFD-4: expected empty array; got length=$len out=$out"
+fi
+
+# PFD-5: PR-internal fix commits filtered by --is-ancestor check.
+# feat branch has its own "Fix" commit that must NOT be surfaced as a
+# suspect (it isn't reachable from main).
+mkdir -p "$PFD_DIR/r5"
+(
+    cd "$PFD_DIR/r5"
+    git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+    git symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+    git config user.email smoke@example.com
+    git config user.name smoke
+    printf 'a\nb\nc\nd\n' > f.txt
+    git add f.txt && git commit --quiet -m "initial"
+    git checkout --quiet -b feat
+    # Feat commit 1: intentionally introduce a bug at line 3
+    printf 'a\nb\nBROKEN\nd\n' > f.txt
+    git add f.txt && git commit --quiet -m "feat work (introduces bug)"
+    # Feat commit 2: self-fix at line 3 ("Fix...") — PR-INTERNAL
+    printf 'a\nb\nFIXED\nd\n' > f.txt
+    git add f.txt && git commit --quiet -m "Fix bug introduced above"
+    # Feat commit 3: further change at line 3
+    printf 'a\nb\nFINAL\nd\n' > f.txt
+    git add f.txt && git commit --quiet -m "finalize line 3"
+)
+out=$(cd "$PFD_DIR/r5" && "$TOOLS/prior-fix-diff.sh" \
+    --comparison-ref main --reviewed-files f.txt 2>/dev/null)
+len=$(echo "$out" | jq 'length')
+if [[ "$len" == "0" ]]; then
+    pass "PFD-5 (§13.11b): PR-internal fix commits filtered by --is-ancestor"
+else
+    fail "PFD-5: expected empty array (feat's own fixes excluded); got length=$len out=$out"
+fi
+
+# PFD-6: Usage errors — missing --comparison-ref → exit 64; unknown
+# ref → exit 1 with error-as-prompt suggestions.
+mkdir -p "$PFD_DIR/r6"
+(
+    cd "$PFD_DIR/r6"
+    git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+    git symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+    git config user.email smoke@example.com
+    git config user.name smoke
+    printf 'a\n' > f.txt && git add f.txt && git commit --quiet -m "seed"
+)
+rc_missing=$(cd "$PFD_DIR/r6" && ("$TOOLS/prior-fix-diff.sh" --reviewed-files f.txt >/dev/null 2>&1); echo $?)
+rc_badref=$(cd "$PFD_DIR/r6" && ("$TOOLS/prior-fix-diff.sh" --comparison-ref no-such-ref --reviewed-files f.txt >/dev/null 2>&1); echo $?)
+if [[ "$rc_missing" == "64" && "$rc_badref" == "1" ]]; then
+    pass "PFD-6 (§13.11b): usage errors surface correct exit codes (64 missing / 1 bad-ref)"
+else
+    fail "PFD-6: expected 64/1; got missing=$rc_missing badref=$rc_badref"
+fi
+
+# L7-1..L7-4 guard the holistic-lens plumbing (Stage 2.9.D). L7 runs
+# only under --ensemble; these tests exercise the wiring that happens
+# on every run (source-priority slot, origin-crosscheck, fragment
+# presence) without the LLM dispatch itself.
+
+# L7-1: fragment presence — 01-detection.md step 1.1 table has L7 row,
+# step 1.3 has a dispatch block with the L7 header, and step 1.4's
+# lens-tag list names L7-holistic.
+if grep -qE '^\| L7 — holistic review' "$REPO/commands/_shared/01-detection.md" \
+    && grep -qF '#### L7 — holistic review (Opus' "$REPO/commands/_shared/01-detection.md" \
+    && grep -qF 'L7-holistic' "$REPO/commands/_shared/01-detection.md"; then
+    pass "L7-1 (§2.9.D): 01-detection.md fragment has L7 table row, dispatch block, and lens-tag"
+else
+    fail "L7-1: L7 fragment wiring incomplete"
+fi
+
+# L7-2: assign-finding-ids.sh slots L7-holistic between L6-security and
+# external-pr. Synthetic pool of one L6 + one L7 + one external-pr.
+in='[{"sources":["L7-holistic"],"file":"h.ts"},{"sources":["external-pr:bot"],"file":"e.ts"},{"sources":["L6-security"],"file":"s.ts"}]'
+out=$(echo "$in" | "$TOOLS/assign-finding-ids.sh")
+line=$(echo "$out" | jq -r '[.[] | "\(.id):\(.sources[0])"] | join(",")')
+expected="F001:L6-security,F002:L7-holistic,F003:external-pr:bot"
+if [[ "$line" == "$expected" ]]; then
+    pass "L7-2 (§2.9.D): assign-finding-ids.sh slots L7-holistic between L6 and external-pr"
+else
+    fail "L7-2: expected '$expected'; got '$line'"
+fi
+
+# L7-3: origin-crosscheck on a synthetic L7 candidate whose line range
+# is entirely ancestor of $comparison_ref gets overridden to
+# pre_existing/high — same behavior as L1..L6 (source-family-agnostic).
+# Reuse the OC scratch repo if it still exists from OC-*.
+out=$(cd "$OC_DIR/repo" && "$TOOLS/origin-crosscheck.sh" \
+    --comparison-ref main \
+    --candidates '[{"id":"L7C1","sources":["L7-holistic"],"source_family":"holistic-family","file":"file_a.py","line_range":[1,2],"origin":"introduced_by_pr","origin_confidence":"high"}]' 2>/dev/null)
+origin=$(echo "$out" | jq -r '.[0].origin')
+conf=$(echo "$out" | jq -r '.[0].origin_confidence')
+if [[ "$origin" == "pre_existing" && "$conf" == "high" ]]; then
+    pass "L7-3 (§2.9.D): origin-crosscheck flips L7-holistic candidate (ancestor range) to pre_existing/high"
+else
+    fail "L7-3: expected pre_existing/high on ancestor L7 range; got origin=$origin conf=$conf"
+fi
+
+# L7-4: CLAUDE.md pipeline-shape narrative reflects the 6-vs-7 lens
+# count. A sanity guard so this meta-doc doesn't silently drift from
+# the fragment.
+if grep -qF '7 under --ensemble' "$REPO/CLAUDE.md" \
+    && grep -qF 'holistic Opus safety net' "$REPO/CLAUDE.md"; then
+    pass "L7-4 (§2.9.D): CLAUDE.md pipeline-shape narrative mentions L7 under --ensemble"
+else
+    fail "L7-4: CLAUDE.md pipeline-shape block missing L7 / --ensemble update"
+fi
+
+# L7-5: artifact-patch.py --add-finding accepts source_families:
+# ["holistic-family"] (new source_family value). schema-v1.json has
+# source_families items as {type:string, minLength:1} with no enum,
+# so the addition should pass — but we verify rather than assume.
+L7_ART="$WORK/l7-schema.json"
+"$TOOLS/artifact-patch.py" --init "@$FIX/artifact-seed.json" --path "$L7_ART" >/dev/null
+F_L7='{"id":"F901","sources":["L7-holistic"],"source_families":["holistic-family"],"impact_type":"correctness","origin":"introduced_by_pr","origin_confidence":"high","actionability":"auto_fixable","validation_lane":"deep","current_state":"open","disposition":"confirmed_auto","is_actionable":true,"reason":"test","confirmed_strength":"moderate","file":"src/holistic/test.ts","line_range":[10,12],"claim":"L7 schema smoke","score_phase3":65,"score_phase4":70,"score_history":[{"phase":"phase_3","score":65},{"phase":"phase_4","score":70}],"validation_result":null,"fix_attempts":[],"introduced_in_sha":null,"suggested_follow_up":null,"related_parent_finding_id":null}'
+if "$TOOLS/artifact-patch.py" --path "$L7_ART" --add-finding "$F_L7" >/dev/null 2>&1 \
+    && "$TOOLS/artifact-validate.sh" --path "$L7_ART" >/dev/null 2>&1; then
+    pass "L7-5 (§2.9.D): holistic-family source_family passes schema validation"
+else
+    fail "L7-5: schema rejected L7-holistic finding or validator failed"
+fi
+
+# UXT-1 guards the L5-ux diagnostic-message-quality addition (Stage
+# 2.9.B). Content lives in lens-ux-reference.md which L5 inlines via
+# `!`cat`` preprocessor, so grep the reference file directly.
+if grep -qF 'Diagnostic message quality' "$REPO/commands/_shared/lens-ux-reference.md" \
+    && grep -qF 'parseDate' "$REPO/commands/_shared/lens-ux-reference.md" \
+    && grep -qF 'empty-buffer' "$REPO/commands/_shared/lens-ux-reference.md"; then
+    pass "UXT-1 (§2.9.B): lens-ux-reference.md includes diagnostic-message-quality section"
+else
+    fail "UXT-1: diagnostic-message-quality content missing from lens-ux-reference.md"
+fi
+
+# LT-1..LT-3 guard the L2 prompt tune (Stage 2.9.A). Stage-2.9 closes
+# several P1/P2 misses by adding named prompt sections; silent removal
+# would regress detection without failing any helper-level test.
+
+# LT-1: Outer-pass contains the consumer-surface value trace bullet.
+if grep -qF 'Consumer-surface value trace' "$REPO/commands/_shared/01-detection.md" \
+    && grep -qF '"0% APR"' "$REPO/commands/_shared/01-detection.md"; then
+    pass "LT-1 (§2.9.A): L2 outer pass includes consumer-surface value trace"
+else
+    fail "LT-1: consumer-surface bullet missing from L2 prompt"
+fi
+
+# LT-2: Outer-pass contains the cross-provider / domain-scope bullet.
+if grep -qF 'Cross-provider / domain-scope check' "$REPO/commands/_shared/01-detection.md" \
+    && grep -qF 'recategorization pass triggered by Apple-import' "$REPO/commands/_shared/01-detection.md"; then
+    pass "LT-2 (§2.9.A): L2 outer pass includes cross-provider / domain-scope check"
+else
+    fail "LT-2: cross-provider bullet missing from L2 prompt"
+fi
+
+# LT-3: Inner-pass item 5 is SQL-JOIN-vs-UNIQUE and item 6 is Same-
+# block adjacency (renumbered). Both anchors must be present in the
+# expected order.
+if grep -qF '5. **SQL JOIN join-key vs. target-table UNIQUE-constraint' "$REPO/commands/_shared/01-detection.md" \
+    && grep -qF '6. **Same-block adjacency.**' "$REPO/commands/_shared/01-detection.md"; then
+    pass "LT-3 (§2.9.A): inner-pass item 5=SQL-JOIN-vs-UNIQUE, item 6=Same-block adjacency"
+else
+    fail "LT-3: inner-pass renumbering / JOIN item missing"
+fi
+
+# PFD-8: 01-detection.md contains the step 1.2b wiring block. Guards
+# against silent removal — smoke passes for the helper even if the
+# wiring is deleted, so add an explicit presence check.
+DETECTION_MD="$REPO/commands/_shared/01-detection.md"
+if grep -qF '### 1.2b. Prior-fix suspect scan' "$DETECTION_MD" \
+    && grep -qF 'prior-fix-diff.sh' "$DETECTION_MD" \
+    && grep -qF 'prior_fix_suspects=' "$DETECTION_MD"; then
+    pass "PFD-8 (§13.11b): 01-detection.md step 1.2b wires prior-fix-diff.sh"
+else
+    fail "PFD-8: step 1.2b wiring missing from $DETECTION_MD"
+fi
+
+# PFD-9: L2 prompt contains the prior-fix reversion addendum. Guards
+# against the wiring existing but L2's prompt never consuming it.
+if grep -qF 'Prior-fix reversion check' "$DETECTION_MD" \
+    && grep -qF '$prior_fix_suspects' "$DETECTION_MD"; then
+    pass "PFD-9 (§13.11b): L2 prompt consumes \$prior_fix_suspects"
+else
+    fail "PFD-9: L2 prior-fix addendum missing from $DETECTION_MD"
+fi
+
+# PFD-7: Lookback cap — prior fix committed before the --lookback-days
+# window is filtered out of git log --since output, so no suspect.
+mkdir -p "$PFD_DIR/r7"
+(
+    cd "$PFD_DIR/r7"
+    git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+    git symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+    git config user.email smoke@example.com
+    git config user.name smoke
+    printf 'a\nb\nc\nd\n' > f.txt
+    GIT_AUTHOR_DATE="2022-01-01T00:00:00Z" GIT_COMMITTER_DATE="2022-01-01T00:00:00Z" \
+        git add f.txt && \
+        GIT_AUTHOR_DATE="2022-01-01T00:00:00Z" GIT_COMMITTER_DATE="2022-01-01T00:00:00Z" \
+        git commit --quiet -m "initial (2022)"
+    # Fix committed ~3 years ago.
+    sed -i.bak 's/c$/c-fixed/' f.txt && rm -f f.txt.bak
+    GIT_AUTHOR_DATE="2022-06-01T00:00:00Z" GIT_COMMITTER_DATE="2022-06-01T00:00:00Z" \
+        git add f.txt && \
+        GIT_AUTHOR_DATE="2022-06-01T00:00:00Z" GIT_COMMITTER_DATE="2022-06-01T00:00:00Z" \
+        git commit --quiet -m "Fix stale-c regression"
+    # Tail commit with fresh date so main has recent activity.
+    echo "# tail" >> f.txt
+    git add f.txt && git commit --quiet -m "tail"
+    git checkout --quiet -b feat
+    sed -i.bak 's/c-fixed/c/' f.txt && rm -f f.txt.bak
+    git add f.txt && git commit --quiet -m "revert c-fixed"
+)
+# With default lookback (365 days), the 2022 fix is outside the window.
+out=$(cd "$PFD_DIR/r7" && "$TOOLS/prior-fix-diff.sh" \
+    --comparison-ref main --reviewed-files f.txt 2>/dev/null)
+len=$(echo "$out" | jq 'length')
+# With a wide lookback (2000 days ≈ 5.5 years), the fix should appear.
+out_wide=$(cd "$PFD_DIR/r7" && "$TOOLS/prior-fix-diff.sh" \
+    --comparison-ref main --reviewed-files f.txt --lookback-days 2000 2>/dev/null)
+len_wide=$(echo "$out_wide" | jq 'length')
+if [[ "$len" == "0" && "$len_wide" == "1" ]]; then
+    pass "PFD-7 (§13.11b): --lookback-days bounds git-log --since window"
+else
+    fail "PFD-7: expected default=0 / wide=1; got default=$len wide=$len_wide"
 fi
 
 echo

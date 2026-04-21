@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-read.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-patch.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-validate.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-render.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-publish.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/claude-md-paths.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/staleness.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/external-scrape.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/comment-freshness.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/log-phase.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/log-tokens.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/repo-slug.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(coderabbit:*), Bash(node:*), Bash(find:*), Bash(uv:*), AskUserQuestion, Agent, Read, BashOutput, KillShell
+allowed-tools: Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-read.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-patch.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-validate.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-render.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-publish.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/claude-md-paths.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/staleness.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/external-scrape.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/comment-freshness.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/prior-fix-diff.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/log-phase.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/log-tokens.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/repo-slug.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(coderabbit:*), Bash(node:*), Bash(find:*), Bash(uv:*), AskUserQuestion, Agent, Read, BashOutput, KillShell
 argument-hint: "[--ensemble] [--full]"
 description: Deep code review producing artifact.json, artifact.md, and (PR mode) a review comment on the PR.
 disable-model-invocation: false
@@ -34,9 +34,10 @@ This matters because:
   the full working-set table — reproduced in summary at the end of
   00-preflight.md). Losing track of a variable (e.g. `reviewed_files_all`,
   `claude_md_paths`, `review_id`, `artifact_path`) breaks later phases.
-- **Parallel fan-outs are expensive.** Phase 1's six internal lenses and
-  Phase 3/4's per-candidate agents all dispatch in single-turn parallel
-  batches. Re-running a phase because you lost your place costs real
+- **Parallel fan-outs are expensive.** Phase 1's six internal lenses (or
+  seven under `--ensemble`, including the holistic L7) and Phase 3/4's
+  per-candidate agents all dispatch in single-turn parallel batches.
+  Re-running a phase because you lost your place costs real
   tokens. Under `--ensemble`, Phase 1 and Phase 1.5 also dispatch as a
   joint fan-out in one orchestrator turn (DESIGN §13.12). The TaskList
   can still carry two tasks — mark both `in_progress` when you fire the
@@ -94,9 +95,10 @@ retry ONCE. Only escalate to the user if the second retry also fails.
 Sub-agents dispatched from this command inherit the parent session's
 effort level. There is no per-sub-agent `effort` override in current
 Claude Code — the Agent tool exposes `model` but not `effort`. Every
-sub-agent the pipeline spawns (Haiku L1, Opus L2, Sonnet L3-L6, Phase 2
-dedup Sonnet, Phase 3 scorers, Phase 4a Opus validators, Phase 4b
-Sonnet validators, Phase 5 Opus cross-cutting, ensemble normalizer)
+sub-agent the pipeline spawns (Haiku L1, Opus L2, Sonnet L3-L6, Opus
+L7 under `--ensemble`, Phase 2 dedup Sonnet, Phase 3 scorers, Phase 4a
+Opus validators, Phase 4b Sonnet validators, Phase 5 Opus cross-
+cutting, ensemble normalizer)
 runs at whatever effort the parent session is set to. Expect cost to
 scale linearly with session effort. `medium` or `high` is the usual
 baseline; reserve `xhigh`/`max` for deliberate high-stakes runs.

@@ -43,10 +43,13 @@ under `phase_1_5`.
 
 ### 1.5.1. Readiness — already done in the Phase 1 fragment (§13.12)
 
-Under §13.12, the readiness check, scratch-dir creation, Codex prompt
-file write, and `phase_1_5_start_epoch` capture all moved into
-`01-detection.md` step 1.2a — they run BEFORE any dispatch so
-missing-CLI prompts surface ahead of token spend.
+Under §13.12, the readiness check, scratch-dir creation, and Codex
+prompt file write all live in `01-detection.md` step 1.2a — they run
+BEFORE any dispatch so missing-CLI prompts surface ahead of token
+spend. `phase_1_5_start_epoch` is captured at the tail of step 1.2b
+(§13.11b) — after the prior-fix suspect scan — so neither the
+readiness-gate user wait nor the helper runtime is billed into Phase
+1.5's elapsed.
 
 By the time execution reaches this fragment, the following are already
 in your working context:
@@ -55,7 +58,7 @@ in your working context:
 - `codex_available` (bool) and, if false, `codex_reason`
 - `CODEX_COMPANION` (path, if Codex available)
 - `scratch_dir` (`/tmp/adams-review-$review_id`)
-- `phase_1_5_start_epoch` (captured at gate, not at this fragment)
+- `phase_1_5_start_epoch` (captured at end of 1.2b, not at this fragment)
 - Codex prompt file at `/tmp/adams-review-codex-$review_id.md` (if
   Codex available)
 
@@ -72,7 +75,9 @@ continue with step 1.5.2.
 ### 1.5.2. Launch CLI reviewers (background Bash; dispatched from 01 step 1.3)
 
 These launches are tool-use blocks in the **01-detection.md step 1.3
-dispatch turn** — alongside the 6 lens `Agent` blocks (§13.12). This
+dispatch turn** — alongside the lens `Agent` blocks (§13.12). Under
+`--ensemble` the lens count is 7 (L1–L7 including the ensemble-gated
+holistic lens); non-ensemble runs never reach this fragment. This
 section is the authoritative spec for the commands themselves; refer
 back from step 1.3 to find the command strings.
 
