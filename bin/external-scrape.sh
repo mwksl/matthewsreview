@@ -212,7 +212,7 @@ else
         done
         # Try to pull a reset time for the common rate-limit case.
         if grep -qi "rate limit" "$ISSUE_ERR" "$REVIEW_ERR" "$RVCMT_ERR" 2>/dev/null; then
-            echo "Action: wait for the rate limit to reset (see 'X-RateLimit-Reset' headers above), or re-run /adams-review without --ensemble." >&2
+            echo "Action: wait for the rate limit to reset (see 'X-RateLimit-Reset' headers above), or re-run /adamsreview:review without --ensemble." >&2
         else
             echo "Action: run 'gh auth status'; check network; retry." >&2
         fi

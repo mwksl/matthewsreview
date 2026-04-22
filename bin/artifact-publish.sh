@@ -27,9 +27,9 @@
 #   2. No --comment-id → POST new comment → emit {"comment_id": N}.
 #
 # The helper never auto-discovers a prior comment via marker search.
-# Continuation intent is the caller's responsibility: fresh /adams-review:review
-# calls without --comment-id (→ new comment); /adams-review:fix and
-# /adams-review:promote carry the prior comment_id forward from the
+# Continuation intent is the caller's responsibility: fresh /adamsreview:review
+# calls without --comment-id (→ new comment); /adamsreview:fix and
+# /adamsreview:promote carry the prior comment_id forward from the
 # artifact and pass it explicitly (→ edit in place). See DESIGN §13.4.
 #
 # --dry-run: exits 0 after arg validation + md-path resolution; prints the
@@ -144,14 +144,14 @@ resolve_md_path() {
         if [[ ! -f "$latest_file" ]]; then
             echo "ERROR: latest.txt not found at $latest_file" >&2
             echo "Context: expected for --repo-slug=$REPO_SLUG --branch=$BRANCH" >&2
-            echo "Action: run /adams-review against this branch first, or pass --md-path explicitly." >&2
+            echo "Action: run /adamsreview:review against this branch first, or pass --md-path explicitly." >&2
             exit 1
         fi
         local resolved_id
         resolved_id=$(tr -d '[:space:]' < "$latest_file")
         if [[ -z "$resolved_id" ]]; then
             echo "ERROR: latest.txt at $latest_file is empty" >&2
-            echo "Action: rerun /adams-review to repopulate, or pass --md-path explicitly." >&2
+            echo "Action: rerun /adamsreview:review to repopulate, or pass --md-path explicitly." >&2
             exit 1
         fi
         if [[ "$resolved_id" != "$REVIEW_ID" ]]; then
@@ -237,8 +237,8 @@ post_comment() {
     emit_comment_id "$new_id"
 }
 
-# Step 1: --comment-id → PATCH directly. Caller (e.g. /adams-review:fix,
-# /adams-review:promote, or Phase 0 step 0.14's opt-in recovery path)
+# Step 1: --comment-id → PATCH directly. Caller (e.g. /adamsreview:fix,
+# /adamsreview:promote, or Phase 0 step 0.14's opt-in recovery path)
 # carried the id forward from the artifact.
 if [[ -n "$COMMENT_ID" ]]; then
     if patch_comment "$COMMENT_ID"; then
@@ -252,7 +252,7 @@ if [[ -n "$COMMENT_ID" ]]; then
     exit 1
 fi
 
-# Step 2: no --comment-id → create a new comment. Fresh /adams-review
+# Step 2: no --comment-id → create a new comment. Fresh /adamsreview:review
 # runs land here (each invocation is a new review event; prior comments
 # on the PR are left untouched). See DESIGN §13.4.
 if post_comment; then

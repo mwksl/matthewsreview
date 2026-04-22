@@ -1,9 +1,9 @@
 {
-  "name": "adams-review",
+  "name": "adamsreview",
   "owner": { "name": "Adam Miller" },
   "plugins": [
     {
-      "name": "adams-review",
+      "name": "adamsreview",
       "source": "./",
       "description": "Multi-lens code review pipeline for Claude Code."
     }

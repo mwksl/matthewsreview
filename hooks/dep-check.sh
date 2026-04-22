@@ -9,14 +9,14 @@ for tool in uv jq gh git; do
 done
 
 if [ "${#missing[@]}" -gt 0 ]; then
-  echo "[adams-review] WARNING: missing required tool(s): ${missing[*]}"
+  echo "[adamsreview] WARNING: missing required tool(s): ${missing[*]}"
   case "$(uname -s)" in
     Darwin)
-      echo "[adams-review]   macOS:   brew install ${missing[*]}" ;;
+      echo "[adamsreview]   macOS:   brew install ${missing[*]}" ;;
     Linux)
-      echo "[adams-review]   Linux:   apt install ${missing[*]}  # or distro equivalent" ;;
+      echo "[adamsreview]   Linux:   apt install ${missing[*]}  # or distro equivalent" ;;
     MINGW*|MSYS*|CYGWIN*)
-      echo "[adams-review]   Windows: choco install ${missing[*]}  # or scoop install ${missing[*]}" ;;
+      echo "[adamsreview]   Windows: choco install ${missing[*]}  # or scoop install ${missing[*]}" ;;
   esac
 fi
 

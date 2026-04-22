@@ -1,12 +1,12 @@
-# adams-review
+# adamsreview
 
-Five personal Claude Code slash commands packaged as a plugin (`adams-review`) distributable via `/plugin marketplace add`:
+Five personal Claude Code slash commands packaged as a plugin (`adamsreview`) distributable via `/plugin marketplace add`:
 
-- **`/adams-review:review`** — multi-lens code review of a branch or PR (phases 0–6).
-- **`/adams-review:add`** — inject externally-sourced findings (Claude Code cloud `/ultrareview` paste, an Opus once-over, a teammate's note) into the most recent review's existing artifact. Free-form paste mode dispatches a Sonnet normalizer; structured `--file/--line/--claim` mode skips it. One Sonnet dedup pass against existing findings; Phase 4 validation lane-aware (no Wave 2); re-renders + re-publishes to the existing PR comment.
-- **`/adams-review:walkthrough`** — interactive driver for findings `/adams-review:fix` would skip; per-finding briefing + options + recommendation, batched re-render/re-publish, decisions-log PR comment (see DESIGN §28).
-- **`/adams-review:fix`** — automated fix loop for auto-fixable findings surfaced by `/adams-review:review` (phases 7–9).
-- **`/adams-review:promote`** — human override that promotes a single finding to auto-fixable (bypasses the Phase 8 impact_type lane filter and score threshold; see DESIGN §27).
+- **`/adamsreview:review`** — multi-lens code review of a branch or PR (phases 0–6).
+- **`/adamsreview:add`** — inject externally-sourced findings (Claude Code cloud `/ultrareview` paste, an Opus once-over, a teammate's note) into the most recent review's existing artifact. Free-form paste mode dispatches a Sonnet normalizer; structured `--file/--line/--claim` mode skips it. One Sonnet dedup pass against existing findings; Phase 4 validation lane-aware (no Wave 2); re-renders + re-publishes to the existing PR comment.
+- **`/adamsreview:walkthrough`** — interactive driver for findings `/adamsreview:fix` would skip; per-finding briefing + options + recommendation, batched re-render/re-publish, decisions-log PR comment (see DESIGN §28).
+- **`/adamsreview:fix`** — automated fix loop for auto-fixable findings surfaced by `/adamsreview:review` (phases 7–9).
+- **`/adamsreview:promote`** — human override that promotes a single finding to auto-fixable (bypasses the Phase 8 impact_type lane filter and score threshold; see DESIGN §27).
 
 Command files live at bare-stem paths under `commands/` (`review.md`, `add.md`, `walkthrough.md`, `fix.md`, `promote.md`); shared phase fragments and the prompt references live under `fragments/`; helper scripts and the artifact schema live under `bin/`. The plugin runtime auto-adds `bin/` to `$PATH` on load — no symlinks, no install script.
 
@@ -14,16 +14,16 @@ Command files live at bare-stem paths under `commands/` (`review.md`, `add.md`, 
 
 Not required — each command is independent — but they work best in this order on a non-trivial PR:
 
-1. **Review.** `/adams-review:review` — or `/adams-review:review --ensemble` if you have the CodeRabbit + Codex CLIs installed and want a multi-source review at higher token cost.
-2. **Add.** *(optional)* `/adams-review:add <paste...>` — if you ran a parallel review (cloud `/ultrareview`, Opus once-over, manual scan, etc.) that surfaced bugs the original review missed, paste the result here. The findings are validated by Phase 4 and land in the same artifact, deduped against what's already there. Auto-eligible additions feed step 4; non-eligible ones surface in step 3.
-3. **Walkthrough.** *(optional)* `/adams-review:walkthrough` — step through every finding the fix command would skip at the default threshold (deep-manual, deep-report, deep-below-gate, and the entire light lane including light `confirmed_auto`). Each finding gets a briefing + options + recommendation; promote the ones you want auto-fixed with tailored fix-hints, skip the rest. Posts a decisions log to the PR for audit.
-4. **Fix.** `/adams-review:fix` — applies every auto-eligible finding (including whatever was added in step 2 and promoted in step 3). Default: one combined commit for all surviving fixes; pass `--granular-commits` for one commit per fix group. Per-group Phase-9 outcome lands in the commit message either way.
+1. **Review.** `/adamsreview:review` — or `/adamsreview:review --ensemble` if you have the CodeRabbit + Codex CLIs installed and want a multi-source review at higher token cost.
+2. **Add.** *(optional)* `/adamsreview:add <paste...>` — if you ran a parallel review (cloud `/ultrareview`, Opus once-over, manual scan, etc.) that surfaced bugs the original review missed, paste the result here. The findings are validated by Phase 4 and land in the same artifact, deduped against what's already there. Auto-eligible additions feed step 4; non-eligible ones surface in step 3.
+3. **Walkthrough.** *(optional)* `/adamsreview:walkthrough` — step through every finding the fix command would skip at the default threshold (deep-manual, deep-report, deep-below-gate, and the entire light lane including light `confirmed_auto`). Each finding gets a briefing + options + recommendation; promote the ones you want auto-fixed with tailored fix-hints, skip the rest. Posts a decisions log to the PR for audit.
+4. **Fix.** `/adamsreview:fix` — applies every auto-eligible finding (including whatever was added in step 2 and promoted in step 3). Default: one combined commit for all surviving fixes; pass `--granular-commits` for one commit per fix group. Per-group Phase-9 outcome lands in the commit message either way.
 
 Steps 2 and 3 are optional. You can go straight from review to fix if you only care about the auto-eligible findings the original review surfaced.
 
 Steps 2–4 can land days or weeks after step 1 — the review artifact persists under `~/.adams-reviews/<slug>/<branch>/`.
 
-`/adams-review:promote <id>` remains useful for one-off manual promotions outside the walkthrough flow (e.g. promoting a `disproven` finding with `--force`, or conceptually looping over a set of IDs — `F003`, `F037`, `F039` — with `--defer-publish` on each so only the final invocation re-publishes to the PR).
+`/adamsreview:promote <id>` remains useful for one-off manual promotions outside the walkthrough flow (e.g. promoting a `disproven` finding with `--force`, or conceptually looping over a set of IDs — `F003`, `F037`, `F039` — with `--defer-publish` on each so only the final invocation re-publishes to the PR).
 
 ## Documents
 
@@ -50,23 +50,23 @@ Steps 2–4 can land days or weeks after step 1 — the review artifact persists
 
 1. Install deps: `brew install uv jq gh bash git` (macOS) or the distro equivalent. Bash 4+ is required — macOS's default `/bin/bash` is 3.2.
 2. In a Claude Code session: `/plugin marketplace add adamjgmiller/adams-review`
-3. In the same session: `/plugin install adams-review@adams-review`
+3. In the same session: `/plugin install adamsreview@adamsreview`
 
 ### Windows (native)
 
 1. Install [Git for Windows](https://git-scm.com/downloads/win) — provides Git Bash (bash 5+) and `git`, which Claude Code uses internally. Claude Code auto-routes `#!/usr/bin/env bash` helpers through Git Bash; set `CLAUDE_CODE_GIT_BASH_PATH` if Git Bash lives in a non-default location (see *Troubleshooting*).
 2. Install [uv](https://docs.astral.sh/uv/), [jq](https://jqlang.github.io/jq/download/), and the [GitHub CLI](https://cli.github.com/).
-3. In a Claude Code session: `/plugin marketplace add adamjgmiller/adams-review` and `/plugin install adams-review@adams-review`.
+3. In a Claude Code session: `/plugin marketplace add adamjgmiller/adams-review` and `/plugin install adamsreview@adamsreview`.
 
 ### Commands (post-install)
 
 All invocations are plugin-namespaced:
 
-- `/adams-review:review [--ensemble] [--full]`
-- `/adams-review:add [<paste...>] [--file <path> --line <N> --claim "..."]`
-- `/adams-review:walkthrough [threshold]`
-- `/adams-review:fix [threshold]`
-- `/adams-review:promote <finding_id> [--reason "..."] [--fix-hint "..."]`
+- `/adamsreview:review [--ensemble] [--full]`
+- `/adamsreview:add [<paste...>] [--file <path> --line <N> --claim "..."]`
+- `/adamsreview:walkthrough [threshold]`
+- `/adamsreview:fix [threshold]`
+- `/adamsreview:promote <finding_id> [--reason "..."] [--fix-hint "..."]`
 
 No separate Python dep install. First invocation of any `*.py` helper triggers `uv` to resolve `jsonschema` (or any other declared dep) and cache it — this can take a few seconds on a fresh machine (see *Troubleshooting*). Subsequent runs are fast.
 
@@ -76,7 +76,7 @@ If you're hacking on the plugin itself (not just using it), `scripts/dev-run.sh`
 
 ### Review state location
 
-`/adams-review:review` writes per-run state (artifact, trace, phase logs, token logs) under `~/.adams-reviews/<repo-slug>/<branch>/<review_id>/`. Override with `export ADAMS_REVIEW_REVIEWS_ROOT=/some/other/path` if you want state elsewhere.
+`/adamsreview:review` writes per-run state (artifact, trace, phase logs, token logs) under `~/.adams-reviews/<repo-slug>/<branch>/<review_id>/`. Override with `export ADAMS_REVIEW_REVIEWS_ROOT=/some/other/path` if you want state elsewhere.
 
 **Why not `~/.claude/reviews/`?** Claude Code hardcodes a sensitive-file permission prompt for writes to `~/.claude/...` that survives even `bypassPermissions` mode, and `~/.claude/reviews` is not on the short list of exempt subdirs (`.claude/commands`, `.claude/agents`, `.claude/skills`). Keeping review state outside `~/.claude/` avoids dozens of permission prompts per run.
 
@@ -114,11 +114,11 @@ PEP 668 (Python 3.12+ with Homebrew) marks system and user site-packages as exte
 ## Layout
 
 ```
-adams-review/                          ← this repo (plugin root)
+adamsreview/                           ← this repo (plugin root)
 ├── CLAUDE.md                          ← operational guide (read first)
 ├── README.md                          ← this file
 ├── .claude-plugin/
-│   ├── plugin.json                    ← plugin manifest (name: adams-review)
+│   ├── plugin.json                    ← plugin manifest (name: adamsreview)
 │   └── marketplace.json               ← single-plugin marketplace
 ├── .gitattributes                     ← LF enforcement
 ├── docs/
@@ -129,11 +129,11 @@ adams-review/                          ← this repo (plugin root)
 ├── plans/                             ← per-stage plans (incl. plugin-conversion)
 ├── test/                              ← smoke harness + fixtures
 ├── commands/                          ← bare-stem command files (plugin namespacing)
-│   ├── review.md                      ← /adams-review:review
-│   ├── add.md                         ← /adams-review:add
-│   ├── walkthrough.md                 ← /adams-review:walkthrough
-│   ├── fix.md                         ← /adams-review:fix
-│   └── promote.md                     ← /adams-review:promote
+│   ├── review.md                      ← /adamsreview:review
+│   ├── add.md                         ← /adamsreview:add
+│   ├── walkthrough.md                 ← /adamsreview:walkthrough
+│   ├── fix.md                         ← /adamsreview:fix
+│   └── promote.md                     ← /adamsreview:promote
 ├── fragments/                         ← shared phase fragments + prompt references
 │   ├── promote-core.md                ← shared precondition + patch (promote + walkthrough)
 │   ├── 00-preflight.md … 10-post-fix-and-commit.md
@@ -162,7 +162,7 @@ adams-review/                          ← this repo (plugin root)
     └── dev-run.sh                     ← `claude --plugin-dir` wrapper (plugin-author iteration)
 ```
 
-No symlinks, no install script. The plugin runtime discovers `commands/`, `fragments/`, `bin/`, and `hooks/` by convention once the plugin is installed via `/plugin install adams-review@adams-review`.
+No symlinks, no install script. The plugin runtime discovers `commands/`, `fragments/`, `bin/`, and `hooks/` by convention once the plugin is installed via `/plugin install adamsreview@adamsreview`.
 
 ## Troubleshooting
 
@@ -172,7 +172,7 @@ The Python helpers (`artifact-patch.py`, `artifact-render.py`) use a PEP 723 inl
 
 ### `--ensemble` mode requirements
 
-`/adams-review:review --ensemble` additionally requires the `codex` and `coderabbit` CLIs installed as Claude Code plugins (not standalone CLIs on `$PATH`). Phase 1.5 dispatches `codex:codex-rescue` and `coderabbit:code-reviewer` through the ensemble adapter; without both plugins present, the run errors at the adapter step. The default (non-ensemble) mode has no such requirement.
+`/adamsreview:review --ensemble` additionally requires the `codex` and `coderabbit` CLIs installed as Claude Code plugins (not standalone CLIs on `$PATH`). Phase 1.5 dispatches `codex:codex-rescue` and `coderabbit:code-reviewer` through the ensemble adapter; without both plugins present, the run errors at the adapter step. The default (non-ensemble) mode has no such requirement.
 
 ### Windows: Git Bash not found
 
@@ -186,4 +186,4 @@ or the `$env:CLAUDE_CODE_GIT_BASH_PATH = ...` equivalent in PowerShell.
 
 ## Status
 
-`/adams-review:review`, `/adams-review:add`, `/adams-review:walkthrough`, `/adams-review:fix`, and `/adams-review:promote` are all built and in use. Stages 1, 2, 2.5, 2.6, 2.7, 2.8, and 3 closed between 2026-04-17 and 2026-04-18 (see `docs/archive/BUILD.md` for the full history); walkthrough merged 2026-04-19 from branch `walkthrough-mode`; `/adams-review:add` was added 2026-04-20 on branch `review-add` (plan: `plans/review-add.md`); plugin conversion (repackaging as a Claude Code plugin, `/adams-review-<stem>` → `/adams-review:<stem>` namespacing) landed on branch `plugin-conversion` (plan: `plans/plugin-conversion-execution.md`). The only unexecuted scope from the original roadmap is Stage 4 (fragment shrink — `plans/stage-4-fragment-shrink.md`), still pending plan approval.
+`/adamsreview:review`, `/adamsreview:add`, `/adamsreview:walkthrough`, `/adamsreview:fix`, and `/adamsreview:promote` are all built and in use. Stages 1, 2, 2.5, 2.6, 2.7, 2.8, and 3 closed between 2026-04-17 and 2026-04-18 (see `docs/archive/BUILD.md` for the full history); walkthrough merged 2026-04-19 from branch `walkthrough-mode`; `/adamsreview:add` was added 2026-04-20 on branch `review-add` (plan: `plans/review-add.md`); plugin conversion (repackaging as a Claude Code plugin, `/adams-review-<stem>` → `/adamsreview:<stem>` namespacing) landed on branch `plugin-conversion` (plan: `plans/plugin-conversion-execution.md`). The only unexecuted scope from the original roadmap is Stage 4 (fragment shrink — `plans/stage-4-fragment-shrink.md`), still pending plan approval.

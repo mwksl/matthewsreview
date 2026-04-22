@@ -1,4 +1,4 @@
-# CLAUDE.md — operational guide for adams-review
+# CLAUDE.md — operational guide for adamsreview
 
 Read this first on a fresh session. It's procedural (how to work in the repo) plus a compact reference for the pipeline shape, finding state model, score gates, and helper inventory — enough to work without opening the archive.
 
@@ -6,22 +6,22 @@ Read this first on a fresh session. It's procedural (how to work in the repo) pl
 
 ## What this repo is
 
-Build repo for five personal Claude Code slash commands, packaged as a plugin (`adams-review`) distributable via `/plugin marketplace add`:
+Build repo for five personal Claude Code slash commands, packaged as a plugin (`adamsreview`) distributable via `/plugin marketplace add`:
 
-- **`/adams-review:review`** — multi-lens code review of a branch or PR (Phases 0–6).
-- **`/adams-review:add`** — inject externally-sourced findings (cloud `/ultrareview` paste, Opus once-over, manual finds, etc.) into the most recent review's existing artifact. Free-form paste mode dispatches a Sonnet normalizer; structured `--file/--line/--claim` mode skips the normalizer; one Sonnet dedup pass against existing findings; Phase 4 validation lane-aware (Opus deep / Sonnet light) without Wave 2; re-renders + re-publishes to the existing PR comment.
-- **`/adams-review:walkthrough`** — interactive driver that walks the reviewer through findings `/adams-review:fix` would skip. Preflight offers a two-tier scope choice (default **Qualifying** — excludes Phase-3-demoted `below_gate`; **Full skip set** adds them back). `pre_existing_report` findings are always excluded from both walk tiers and routed exclusively to the end-of-run issue-filing phase (one-by-one draft/confirm/edit flow that calls `gh issue create`). Per-finding Sonnet briefing with an "Edit the fix hint" override path; for `confirmed_manual` / `confirmed_report` the briefer proposes best-effort hints. Closes the light-lane `confirmed_auto` gap where the default Phase 8 lane filter skips mechanically-fixable ux/policy findings.
-- **`/adams-review:fix`** — automated fix loop for auto-fixable findings (Phases 7–9).
-- **`/adams-review:promote`** — human override that promotes a single finding to auto-fixable, bypassing the Phase 8 impact_type lane filter and score threshold. Metadata-only; run `/adams-review:fix` afterwards to apply. Used internally by `/adams-review:walkthrough` via `fragments/promote-core.md` + `--defer-publish`.
+- **`/adamsreview:review`** — multi-lens code review of a branch or PR (Phases 0–6).
+- **`/adamsreview:add`** — inject externally-sourced findings (cloud `/ultrareview` paste, Opus once-over, manual finds, etc.) into the most recent review's existing artifact. Free-form paste mode dispatches a Sonnet normalizer; structured `--file/--line/--claim` mode skips the normalizer; one Sonnet dedup pass against existing findings; Phase 4 validation lane-aware (Opus deep / Sonnet light) without Wave 2; re-renders + re-publishes to the existing PR comment.
+- **`/adamsreview:walkthrough`** — interactive driver that walks the reviewer through findings `/adamsreview:fix` would skip. Preflight offers a two-tier scope choice (default **Qualifying** — excludes Phase-3-demoted `below_gate`; **Full skip set** adds them back). `pre_existing_report` findings are always excluded from both walk tiers and routed exclusively to the end-of-run issue-filing phase (one-by-one draft/confirm/edit flow that calls `gh issue create`). Per-finding Sonnet briefing with an "Edit the fix hint" override path; for `confirmed_manual` / `confirmed_report` the briefer proposes best-effort hints. Closes the light-lane `confirmed_auto` gap where the default Phase 8 lane filter skips mechanically-fixable ux/policy findings.
+- **`/adamsreview:fix`** — automated fix loop for auto-fixable findings (Phases 7–9).
+- **`/adamsreview:promote`** — human override that promotes a single finding to auto-fixable, bypassing the Phase 8 impact_type lane filter and score threshold. Metadata-only; run `/adamsreview:fix` afterwards to apply. Used internally by `/adamsreview:walkthrough` via `fragments/promote-core.md` + `--defer-publish`.
 
-The original four are **built and in production use** as of 2026-04-19 (Stages 1, 2, 2.5, 2.6, 2.7, 2.8, 3 closed; walkthrough closed on branch `walkthrough-mode`). `/adams-review:add` was added on branch `review-add` (plan: `plans/review-add.md`). Plugin conversion (repackaging as a Claude Code plugin, D18 namespacing from `/adams-review-<stem>` to `/adams-review:<stem>`) landed on branch `plugin-conversion` (plan: `plans/plugin-conversion-execution.md`). The only unexecuted original scope is Stage 4 (fragment shrink), scoped in `plans/stage-4-fragment-shrink.md`.
+The original four are **built and in production use** as of 2026-04-19 (Stages 1, 2, 2.5, 2.6, 2.7, 2.8, 3 closed; walkthrough closed on branch `walkthrough-mode`). `/adamsreview:add` was added on branch `review-add` (plan: `plans/review-add.md`). Plugin conversion (repackaging as a Claude Code plugin, D18 namespacing from `/adams-review-<stem>` to `/adamsreview:<stem>`) landed on branch `plugin-conversion` (plan: `plans/plugin-conversion-execution.md`). The only unexecuted original scope is Stage 4 (fragment shrink), scoped in `plans/stage-4-fragment-shrink.md`.
 
-**Recommended flow on a non-trivial PR:** `/adams-review:review` → (optional) `/adams-review:add` to inject parallel-review findings → `/adams-review:walkthrough` (optional) → `/adams-review:fix`. Each command is independent; `/adams-review:promote` remains useful for one-off manual promotions outside the walkthrough.
+**Recommended flow on a non-trivial PR:** `/adamsreview:review` → (optional) `/adamsreview:add` to inject parallel-review findings → `/adamsreview:walkthrough` (optional) → `/adamsreview:fix`. Each command is independent; `/adamsreview:promote` remains useful for one-off manual promotions outside the walkthrough.
 
 ## Pipeline shape
 
 ```
-/adams-review:review [--ensemble]
+/adamsreview:review [--ensemble]
 ├── Phase 0 — Pre-flight (branch/PR detect, base-branch freshness, dirty-tree,
 │              push, prior-artifact prompt, record review_started_at,
 │              trivial-diff detection, CLAUDE.md path lister)
@@ -41,7 +41,7 @@ The original four are **built and in production use** as of 2026-04-19 (Stages 1
                orchestrator-tokens.sh → orchestrator_tokens, artifact write,
                render, PR comment POST)
 
-/adams-review:fix [threshold]
+/adamsreview:fix [threshold]
 ├── Phase 7 — Load artifact; leftover-attempted abort; clean-tree gate; staleness check
 ├── Phase 8 — Per-fix-group agents edit working tree (no git ops);
 │              each group reports files_modified + files_created
@@ -54,7 +54,7 @@ The original four are **built and in production use** as of 2026-04-19 (Stages 1
                in memory, then runs Phase 9a/9b/9c unchanged; original
                fix_group_id preserved per-finding in fix_attempts)
 
-/adams-review:add [<paste...>] [--file path --line N --claim "..."] [--impact <type>] [--no-dedup]
+/adamsreview:add [<paste...>] [--file path --line N --claim "..."] [--impact <type>] [--no-dedup]
 └── Locate artifact (latest.txt) → leftover-attempted gate → build candidates
     (paste-normalizer Sonnet | structured one-shot | mixed) → dedup against
     existing findings (Sonnet, one-direction) → assign IDs continuing past
@@ -84,7 +84,7 @@ main-session turns). Four separate orchestrator counters — fresh
 input / output / cache-read / cache-creation — are preserved because
 their $/token pricing differs by roughly an order of magnitude.
 
-`/adams-review:walkthrough` re-tallies both before §6.1's re-publish;
+`/adamsreview:walkthrough` re-tallies both before §6.1's re-publish;
 issue-filer agents dispatched in §6.5 (and the orchestrator turns that
 dispatch them) land in the logs/transcript after the tally, so their
 cost surfaces on the next lifecycle command's tally.
@@ -114,7 +114,7 @@ attempted → resolved   (Phase 9 verified)
 attempted → open       (Phase 9 classified partial or regression)
 ```
 
-Any other transition is rejected. Leftover `attempted` on a fresh `/adams-review:fix` → **hard abort** with deterministic recovery message.
+Any other transition is rejected. Leftover `attempted` on a fresh `/adamsreview:fix` → **hard abort** with deterministic recovery message.
 
 **Disposition enum** (the primary routing key — filters and report selectors read this, not combinations of prose fields):
 
@@ -136,7 +136,7 @@ Any other transition is rejected. Leftover `attempted` on a fresh `/adams-review
 
 - `is_actionable` is derived: `true` iff `disposition ∈ {confirmed_auto, partial, regression}`. Never set it directly in conflict with `disposition`.
 - `current_state == resolved` ⇔ `disposition == resolved`.
-- `human_confirmation` is absent/null unless `/adams-review:promote` has run. Present-and-non-null is a Phase 8 bypass of both the lane filter and the threshold (see Score gates below). Promotion never mutates `score_phase4` — the validator's honest score is preserved for audit.
+- `human_confirmation` is absent/null unless `/adamsreview:promote` has run. Present-and-non-null is a Phase 8 bypass of both the lane filter and the threshold (see Score gates below). Promotion never mutates `score_phase4` — the validator's honest score is preserved for audit.
 
 ## Score gates (normative)
 
@@ -180,7 +180,7 @@ regression  → disposition: regression, current_state: open   (retry-eligible;
               fix group reverted; fix_attempts.output_sha = null)
 ```
 
-**Phase 8 fix gate** (the combination that governs what `/adams-review:fix` will touch):
+**Phase 8 fix gate** (the combination that governs what `/adamsreview:fix` will touch):
 
 ```
 current_state == open
@@ -194,27 +194,27 @@ current_state == open
   )
 ```
 
-**Threshold summary.** Validation gate (Phase 3) is constant 45. Confirmation decision (Phase 4) has breakpoints at 45, 60, 75. Fix gate (Phase 8) defaults to 60 and is user-tunable via `/adams-review:fix <N>`. `human_confirmation != null` bypasses both the lane filter and the threshold — promotion is additive metadata, not a state mutation.
+**Threshold summary.** Validation gate (Phase 3) is constant 45. Confirmation decision (Phase 4) has breakpoints at 45, 60, 75. Fix gate (Phase 8) defaults to 60 and is user-tunable via `/adamsreview:fix <N>`. `human_confirmation != null` bypasses both the lane filter and the threshold — promotion is additive metadata, not a state mutation.
 
 **Gate terminology.** "Gate" means three different things in this repo and the distinction matters when reading command output or debugging a scope filter:
 
 - **Phase 3 scoring gate (45)** — the threshold that decides which candidates enter Phase 4 validation. Candidates below it get `disposition=below_gate` and carry no `score_phase4`.
 - **Phase 4 confirmation gate (45/60/75)** — the thresholds that map `score_phase4` into `disproven` / `uncertain` / `confirmed_*` dispositions.
-- **Phase 8 fix gate (default 60)** — the composite gate governing `/adams-review:fix`: disposition ∈ {confirmed_auto, partial, regression} **AND** deep lane **AND** `score_phase4 ≥ threshold`, with `human_confirmation` as the human-override bypass.
+- **Phase 8 fix gate (default 60)** — the composite gate governing `/adamsreview:fix`: disposition ∈ {confirmed_auto, partial, regression} **AND** deep lane **AND** `score_phase4 ≥ threshold`, with `human_confirmation` as the human-override bypass.
 
-`below_gate` is a *disposition name* (Phase 3), not a threshold. `/adams-review:walkthrough` at its default **Qualifying** scope excludes `below_gate` findings because Phase 3 already judged them low-impact × low-confidence; the **Full skip set** scope includes them when a reviewer wants to sanity-check what Phase 3 demoted.
+`below_gate` is a *disposition name* (Phase 3), not a threshold. `/adamsreview:walkthrough` at its default **Qualifying** scope excludes `below_gate` findings because Phase 3 already judged them low-impact × low-confidence; the **Full skip set** scope includes them when a reviewer wants to sanity-check what Phase 3 demoted.
 
 ## Lanes
 
 - **Deep lane** (correctness, security): Phase 4a Opus per candidate with blast-radius tracing and a comprehensive fix proposal; passes through Phase 5 cross-cutting review. Phase 8 processes `confirmed_auto` findings here by default.
 - **Light lane** (ux, policy, architecture): Phase 4b Sonnet confirmation, report-first by default. Phase 8's lane filter excludes light-lane `confirmed_auto` unless `human_confirmation != null` (set by promote or walkthrough).
 
-That asymmetric default is what `/adams-review:walkthrough` exists to close — the walkthrough scope is every finding the Phase 8 filter would skip at the current threshold.
+That asymmetric default is what `/adamsreview:walkthrough` exists to close — the walkthrough scope is every finding the Phase 8 filter would skip at the current threshold.
 
 ## Layout
 
 ```
-adams-review/
+adamsreview/
 ├── CLAUDE.md                       ← this file
 ├── README.md                       ← setup + layout + recommended flow (user-facing)
 ├── .claude-plugin/
@@ -229,11 +229,11 @@ adams-review/
 ├── plans/                          ← per-stage plans (1–3 + 2.5/2.6/2.7/2.8 closed;
 │                                     plugin-conversion closed; stage-4-fragment-shrink live)
 ├── commands/                       ← bare-stem command files (D18 namespacing)
-│   ├── review.md                   ← /adams-review:review     (Phases 0–6)
-│   ├── add.md                      ← /adams-review:add        (inject external findings)
-│   ├── walkthrough.md              ← /adams-review:walkthrough (interactive)
-│   ├── fix.md                      ← /adams-review:fix        (Phases 7–9)
-│   └── promote.md                  ← /adams-review:promote    (metadata promote)
+│   ├── review.md                   ← /adamsreview:review     (Phases 0–6)
+│   ├── add.md                      ← /adamsreview:add        (inject external findings)
+│   ├── walkthrough.md              ← /adamsreview:walkthrough (interactive)
+│   ├── fix.md                      ← /adamsreview:fix        (Phases 7–9)
+│   └── promote.md                  ← /adamsreview:promote    (metadata promote)
 ├── fragments/                      ← shared phase fragments + prompt references
 │   ├── 00-preflight.md … 10-post-fix-and-commit.md   ← phase fragments
 │   ├── promote-core.md             ← shared precondition + patch (promote + walkthrough)
@@ -252,7 +252,7 @@ adams-review/
     └── fixtures/
 ```
 
-Plugin users install via `/plugin marketplace add adamjgmiller/adams-review` + `/plugin install adams-review@adams-review` in Claude Code — no symlinks, no install script. Plugin authors iterate with `scripts/dev-run.sh` (loads the working tree as a plugin via `claude --plugin-dir "$(pwd)"`). Adding a new top-level command means dropping `commands/<stem>.md` at bare-stem path (no `adams-review-` prefix — namespacing lives in the plugin name); post-install invocation is automatically `/adams-review:<stem>`. See README §Installation for the end-user flow.
+Plugin users install via `/plugin marketplace add adamjgmiller/adams-review` + `/plugin install adamsreview@adamsreview` in Claude Code — no symlinks, no install script. Plugin authors iterate with `scripts/dev-run.sh` (loads the working tree as a plugin via `claude --plugin-dir "$(pwd)"`). Adding a new top-level command means dropping `commands/<stem>.md` at bare-stem path (no `adamsreview-` prefix — namespacing lives in the plugin name); post-install invocation is automatically `/adamsreview:<stem>`. See README §Installation for the end-user flow.
 
 ## How to test
 
@@ -303,9 +303,9 @@ Enough to work without opening the archive. Each rule is a decision that was lea
 
 ## Working set (what each phase establishes)
 
-**`/adams-review:review`** Phase 0 establishes: `review_id` (ULID), `artifact_path` (absolute), `repo_root`, `repo_slug`, `base_branch`, `comparison_ref` (from §13.10 freshness reconciliation — use this, not `base_branch`, for every diff/blame/lens prompt), `reviewed_sha` (post-push), `review_started_at` (ISO-8601 UTC, captured before any push/stash so Phase 1.5's scrape window doesn't race), `mode` (`pr`/`local`), `pr_number`, `trivial_mode`, `reviewed_files_all` (staleness envelope — every file in the diff), `claude_md_paths`, and the three append-only log paths (`trace.md`, `phases.jsonl`, `tokens.jsonl`). `comment_id` is set by Phase 6+ on first POST and persisted into the artifact.
+**`/adamsreview:review`** Phase 0 establishes: `review_id` (ULID), `artifact_path` (absolute), `repo_root`, `repo_slug`, `base_branch`, `comparison_ref` (from §13.10 freshness reconciliation — use this, not `base_branch`, for every diff/blame/lens prompt), `reviewed_sha` (post-push), `review_started_at` (ISO-8601 UTC, captured before any push/stash so Phase 1.5's scrape window doesn't race), `mode` (`pr`/`local`), `pr_number`, `trivial_mode`, `reviewed_files_all` (staleness envelope — every file in the diff), `claude_md_paths`, and the three append-only log paths (`trace.md`, `phases.jsonl`, `tokens.jsonl`). `comment_id` is set by Phase 6+ on first POST and persisted into the artifact.
 
-**`/adams-review:fix`** Phase 7 loads the artifact (which carries all of the above) and adds: `run_id` (ULID, `fixrun_<ULID>`), `threshold` (default 60; command arg), `latest_known_sha` (most-recent `fix_attempt.output_sha` OR `reviewed_sha`), `stash_taken` (bool), `input_sha` (pre-edit), `eligible_finding_ids` (pre-filtered per Phase 8 gate), `fix_groups` (from `group-fixes.py`). Phase 9 adds `phase_9a_outcomes`, `overlap_files`, `reverted_groups`, `surviving_groups`, and finally `commit_sha`.
+**`/adamsreview:fix`** Phase 7 loads the artifact (which carries all of the above) and adds: `run_id` (ULID, `fixrun_<ULID>`), `threshold` (default 60; command arg), `latest_known_sha` (most-recent `fix_attempt.output_sha` OR `reviewed_sha`), `stash_taken` (bool), `input_sha` (pre-edit), `eligible_finding_ids` (pre-filtered per Phase 8 gate), `fix_groups` (from `group-fixes.py`). Phase 9 adds `phase_9a_outcomes`, `overlap_files`, `reverted_groups`, `surviving_groups`, and finally `commit_sha`.
 
 Every helper script receives absolute paths; fragments never assume a cwd. `trace.md` / `phases.jsonl` / `tokens.jsonl` are append-only and keyed off the Phase-0 paths — a logging fragment calls `log-phase.sh` against the known path, never opens its own file handle.
 

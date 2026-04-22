@@ -178,7 +178,7 @@ independently of the scrape succeeding.
 
 Poll each background shell via the `BashOutput` tool — it's the only
 non-blocking read-current-output mechanism granted in
-`adams-review.md`'s `allowed-tools` block. Do not wait serially — check
+`review.md`'s `allowed-tools` block. Do not wait serially — check
 both concurrently so one slow reviewer doesn't hold up the other.
 
 Apply a reasonable timeout (e.g., 10 minutes — ensemble reviewers can be
@@ -231,7 +231,7 @@ one unified candidate list. This follows §19.2a verbatim.
 
 Dispatch via `Agent` with `model: sonnet`. Prompt essence:
 
-> You are normalizing external-reviewer output into the adams-review
+> You are normalizing external-reviewer output into the adamsreview
 > candidate schema. You receive three inputs:
 >
 > **1. PR bot comments** (JSON array; may be empty):

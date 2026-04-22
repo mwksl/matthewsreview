@@ -10,6 +10,41 @@ discussion on the items that came from there).
 
 ---
 
+## 0. [HIGH PRIORITY] Simplify orchestrator-tokens display — drop cache lines
+
+Current rendered line (from a real run):
+
+> `53,046,666 cache-read / 566,990 output / 2,134,808 cache-creation / 484 fresh input across 324 turns`
+
+Two problems:
+
+1. **TMI.** Four counters in a status line is noise. The day-to-day signal
+   users care about is "how much did this cost" at a glance. Fresh input +
+   output are the user-facing levers (what the orchestrator sent, what it
+   produced); cache-read and cache-creation are implementation detail about
+   prompt-cache plumbing.
+2. **Cache-read number looks wrong.** 53M cache-read tokens across 324 turns
+   is ~164K tokens/turn of cache-read, which is plausible for a huge
+   context being re-read every turn — but worth sanity-checking. Possible
+   the summation in `bin/orchestrator-tokens.sh` is double-counting (e.g.,
+   including cache-read across BOTH the main session AND sub-session
+   transcripts under the same cwd, or re-counting cache hits that span
+   multiple `message.usage` entries).
+
+**Proposed fix:**
+
+- Keep the four-counter capture internally (useful for cost diagnostics).
+- Change the rendered string to just: `<output> output / <fresh_input> input across <N> turns`.
+- Before shipping: spot-check one run by summing `cache_read_input_tokens`
+  manually from the session transcript vs. the helper's output. If they
+  diverge, the helper has a bug; fix that first.
+
+Touchpoints: `bin/artifact-render.py` (rendered string) and `bin/orchestrator-tokens.sh` (the sanity-check). Schema keeps all four fields.
+
+*Trigger:* next session after plugin-conversion merges. Highest priority in this backlog — trivial edit, immediate UX win.
+
+---
+
 ## 1. Light-lane asymmetry (most substantive)
 
 The asymmetry: `confirmed_auto` has two meanings. Deep-lane (correctness,
@@ -117,8 +152,8 @@ hard-abort more than once in a quarter.
 
 ## 6. Single-command-with-subcommands shape
 
-`/adams-review review` / `/adams-review fix` instead of `/adams-review:review`
-/ `/adams-review:fix`. More conventional CLI. Loses Claude Code's native
+`/adamsreview review` / `/adamsreview fix` instead of `/adamsreview:review`
+/ `/adamsreview:fix`. More conventional CLI. Loses Claude Code's native
 five-command model (each with its own `allowed-tools` / `argument-hint` /
 `description` frontmatter).
 
@@ -156,7 +191,7 @@ does its job; adding a required flag is friction for a rare failure mode.
 
 # Post-first-production-review findings
 
-First real `/adams-review:review --ensemble` run under the plugin conversion landed 2026-04-22 against `ray-finance/feat/import-apple` PR #8, rev `rev_01KPVDH50WY7JSTEXFWYDNGQNH`. 38 findings, 8 `confirmed_auto`, full lens fan-out worked, comment published. Everything below is quality/robustness cleanup surfaced by the run — not conversion-blocking, but concrete and repeatable.
+First real `/adamsreview:review --ensemble` run under the plugin conversion landed 2026-04-22 against `ray-finance/feat/import-apple` PR #8, rev `rev_01KPVDH50WY7JSTEXFWYDNGQNH`. 38 findings, 8 `confirmed_auto`, full lens fan-out worked, comment published. Everything below is quality/robustness cleanup surfaced by the run — not conversion-blocking, but concrete and repeatable.
 
 The items split into (A) things the orchestrator flagged mid-run, and (B) orchestrator-side observations pulled from the trace afterward.
 
@@ -246,7 +281,7 @@ When Codex said "commands.ts:1492–1505 AND daily-sync.ts:323–337", the norma
 
 **Fix**: one-line user-facing note during §0.14: "Prior comment `<url>` will remain. Delete on GitHub if you want it gone." Purely informational.
 
-*Trigger:* now. Tiny edit, prevents a "wait, why are there 4 adams-review comments on this PR?" moment.
+*Trigger:* now. Tiny edit, prevents a "wait, why are there 4 adamsreview comments on this PR?" moment.
 
 ### 19. Codex progress goes to stderr; `.out` is empty until completion
 
@@ -311,15 +346,9 @@ The first real review surfaced 37 findings past Phase 2 dedup; 24 landed `below_
 
 *Trigger:* when the warning gets noisy enough to care, or when adding a second plugin to the marketplace makes the top-level description actually meaningful.
 
-### 26. LICENSE mismatch
-
-`.claude-plugin/plugin.json` says `"license": "LicenseRef-Proprietary"` to match the on-disk `LICENSE` file. The original conversion plan assumed MIT. If public distribution is ever intended, relicense `LICENSE` first, then update `plugin.json`.
-
-*Trigger:* any decision to publish the plugin marketplace-wide.
-
 ### 27. Walkthrough's spurious first-iteration continue/stop prompt
 
-After the user answers the first per-finding AskUserQuestion in `/adams-review:walkthrough`, the orchestrator sometimes dispatches a spurious "continue or stop the walkthrough?" prompt before moving on. Not in the fragment spec — the per-finding AUQ at step 5.4 already includes "Stop the walkthrough" as a menu option, and step 5.6 ("Between iterations") is just meant to print a terse running-feedback line.
+After the user answers the first per-finding AskUserQuestion in `/adamsreview:walkthrough`, the orchestrator sometimes dispatches a spurious "continue or stop the walkthrough?" prompt before moving on. Not in the fragment spec — the per-finding AUQ at step 5.4 already includes "Stop the walkthrough" as a menu option, and step 5.6 ("Between iterations") is just meant to print a terse running-feedback line.
 
 Root cause: emergent safety-hesitation from the orchestrator model. After the first state mutation (artifact patch), the model wants to confirm the flow is working before continuing through N more iterations. Once it has one successful iteration in context, it stops second-guessing. Matches the observed pattern of "always seems irrelevant" and "happens only once."
 
