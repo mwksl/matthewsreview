@@ -786,7 +786,7 @@ phase_4_elapsed=$(( $(date +%s) - phase_4_start_epoch ))
   --summary "deep=$deep_count light=$light_count new_ids=$new_ids"
 ```
 
-### 8. Re-tally `subagent_tokens` + re-render `artifact.md`
+### 8. Re-tally `subagent_tokens` + `orchestrator_tokens`, then re-render `artifact.md`
 
 Re-tally first so the rendered report (and the downstream PR comment
 update in step 9) reflects this run's new sub-agent + orchestrator
@@ -812,10 +812,11 @@ main-session turn. Both helpers are pure readbacks:
     --output "$review_dir/artifact.md"
 ```
 
-Tally failure is non-fatal (observability, not correctness); a stale
-`subagent_tokens.total` doesn't block the re-publish. Render non-zero:
-log stderr to `trace.md` with tag `add_render_failed`, continue to
-step 9 (the artifact patches stand; the user can manually re-render).
+Tally failures are non-fatal (observability, not correctness); stale
+`subagent_tokens.total` or `orchestrator_tokens.turn_count` doesn't
+block the re-publish. Render non-zero: log stderr to `trace.md` with
+tag `add_render_failed`, continue to step 9 (the artifact patches
+stand; the user can manually re-render).
 
 ### 9. Re-publish to the PR (PR mode only)
 

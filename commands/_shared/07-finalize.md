@@ -1,11 +1,11 @@
 ## Phase 6 — Finalize
 
-Close out the review: validate the artifact, tally `subagent_tokens`,
-populate `metrics`, record the final `phases.jsonl` entry, render
-`artifact.md`, update `latest.txt` (already done in Phase 0 — re-
-asserted here for atomic safety), publish to the PR (PR mode) or
-no-op (local mode), mirror the report to chat, and pop any stash
-taken at Phase 0's dirty-tree gate.
+Close out the review: validate the artifact, tally `subagent_tokens`
+and `orchestrator_tokens`, populate `metrics`, record the final
+`phases.jsonl` entry, render `artifact.md`, update `latest.txt`
+(already done in Phase 0 — re-asserted here for atomic safety),
+publish to the PR (PR mode) or no-op (local mode), mirror the report
+to chat, and pop any stash taken at Phase 0's dirty-tree gate.
 
 ### 6.1. Schema-validate the artifact
 
@@ -349,7 +349,8 @@ PR comment is the deliverable.
 
 ### Working-set delta after Phase 6
 
-- `artifact.json` has fully-populated `subagent_tokens` and `metrics`.
+- `artifact.json` has fully-populated `subagent_tokens`,
+  `orchestrator_tokens`, and `metrics`.
 - `artifact.md` rendered at `$review_dir/artifact.md`.
 - `latest.txt` points at `$review_id`.
 - PR mode: review comment posted or edited (`comment_id` persisted).

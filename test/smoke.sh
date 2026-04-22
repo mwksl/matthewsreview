@@ -3226,6 +3226,149 @@ else
     fail "TK-6: expected empty output; got [$tk5_missing]"
 fi
 
+# ------------------------------------------------------------------ orchestrator-tokens.sh
+
+OT_DIR="$WORK/ot"
+mkdir -p "$OT_DIR"
+cp "$FIX/artifact-seed.json" "$OT_DIR/artifact.json"
+
+# OT-1: slug derivation — both `/` AND `.` map to `-`. Claude Code's own
+# convention; easy to miss because `/ → -` alone would handle the worktree
+# path too, but `/.claude/` must become `--claude-` (double hyphen from
+# the slash+dot pair), not `-.claude-`. Guard the algorithm directly so
+# a future refactor can't break it silently.
+ot1_slug=$(printf '%s' "/Users/x/Projects/adams-review/.claude/worktrees/y" | tr '/.' '-')
+ot1_expected="-Users-x-Projects-adams-review--claude-worktrees-y"
+if [[ "$ot1_slug" == "$ot1_expected" ]]; then
+    pass "OT-1: slug derivation (tr '/.' '-') — both chars collapse correctly"
+else
+    fail "OT-1: slug mismatch" "expected=[$ot1_expected] got=[$ot1_slug]"
+fi
+
+# OT-2: missing transcript dir → zero rollup; schema-validates.
+"$TOOLS/orchestrator-tokens.sh" \
+    --artifact "$OT_DIR/artifact.json" \
+    --since    "2026-04-21T00:00:00.000Z" \
+    --transcript-dir "$OT_DIR/does-not-exist" \
+    >/dev/null 2>&1 || fail "OT-2: helper exit non-zero on missing dir"
+ot2_total_input=$(jq -r '.orchestrator_tokens.total_input' "$OT_DIR/artifact.json")
+ot2_turns=$(jq -r '.orchestrator_tokens.turn_count' "$OT_DIR/artifact.json")
+ot2_sessions=$(jq -c '.orchestrator_tokens.sessions' "$OT_DIR/artifact.json")
+if [[ "$ot2_total_input" == "0" && "$ot2_turns" == "0" && "$ot2_sessions" == "[]" ]] \
+   && "$TOOLS/artifact-validate.sh" --path "$OT_DIR/artifact.json" >/dev/null 2>&1; then
+    pass "OT-2: missing transcript dir → zero rollup; schema-validates"
+else
+    fail "OT-2: expected zeros + valid artifact; got input=$ot2_total_input turns=$ot2_turns sessions=$ot2_sessions"
+fi
+
+# OT-3: one synthetic transcript, 3 in-window assistant turns with known
+# usage counts. Verify all four counters sum correctly, turn_count=3,
+# sessions[] has exactly one entry with the right ids and transcript_path.
+OT3_DIR="$OT_DIR/t3"
+mkdir -p "$OT_DIR/art3" "$OT3_DIR"
+cp "$FIX/artifact-seed.json" "$OT_DIR/art3/artifact.json"
+cat > "$OT3_DIR/sess-a.jsonl" <<'JSONL'
+{"type":"assistant","timestamp":"2026-04-21T10:00:00.000Z","sessionId":"sess-a","message":{"usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":30,"cache_creation_input_tokens":40}}}
+{"type":"assistant","timestamp":"2026-04-21T10:01:00.000Z","sessionId":"sess-a","message":{"usage":{"input_tokens":5,"output_tokens":15,"cache_read_input_tokens":25,"cache_creation_input_tokens":35}}}
+{"type":"assistant","timestamp":"2026-04-21T10:02:00.000Z","sessionId":"sess-a","message":{"usage":{"input_tokens":1,"output_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":4}}}
+JSONL
+"$TOOLS/orchestrator-tokens.sh" \
+    --artifact "$OT_DIR/art3/artifact.json" \
+    --since    "2026-04-21T00:00:00.000Z" \
+    --transcript-dir "$OT3_DIR" \
+    >/dev/null 2>&1 || fail "OT-3: helper exit non-zero on populated transcript"
+ot3_in=$(jq -r '.orchestrator_tokens.total_input' "$OT_DIR/art3/artifact.json")
+ot3_out=$(jq -r '.orchestrator_tokens.total_output' "$OT_DIR/art3/artifact.json")
+ot3_cr=$(jq -r '.orchestrator_tokens.cache_read' "$OT_DIR/art3/artifact.json")
+ot3_cc=$(jq -r '.orchestrator_tokens.cache_creation' "$OT_DIR/art3/artifact.json")
+ot3_turns=$(jq -r '.orchestrator_tokens.turn_count' "$OT_DIR/art3/artifact.json")
+ot3_sid=$(jq -r '.orchestrator_tokens.sessions[0].session_id' "$OT_DIR/art3/artifact.json")
+ot3_slen=$(jq -r '.orchestrator_tokens.sessions | length' "$OT_DIR/art3/artifact.json")
+if [[ "$ot3_in" == "16" && "$ot3_out" == "37" && "$ot3_cr" == "58" && "$ot3_cc" == "79" \
+   && "$ot3_turns" == "3" && "$ot3_sid" == "sess-a" && "$ot3_slen" == "1" ]]; then
+    pass "OT-3: 3-turn transcript → correct four-counter sums + sessions[] entry"
+else
+    fail "OT-3: sum mismatch" "in=$ot3_in out=$ot3_out cr=$ot3_cr cc=$ot3_cc turns=$ot3_turns sid=$ot3_sid slen=$ot3_slen"
+fi
+
+# OT-4: cross-session merge — two transcripts in the same dir with
+# distinct sessionIds. Verify sessions[] has 2 entries sorted by
+# first_seen, and totals sum across both.
+cat > "$OT3_DIR/sess-b.jsonl" <<'JSONL'
+{"type":"assistant","timestamp":"2026-04-21T09:00:00.000Z","sessionId":"sess-b","message":{"usage":{"input_tokens":100,"output_tokens":200,"cache_read_input_tokens":300,"cache_creation_input_tokens":400}}}
+JSONL
+"$TOOLS/orchestrator-tokens.sh" \
+    --artifact "$OT_DIR/art3/artifact.json" \
+    --since    "2026-04-21T00:00:00.000Z" \
+    --transcript-dir "$OT3_DIR" \
+    >/dev/null 2>&1 || fail "OT-4: helper exit non-zero on multi-transcript"
+ot4_turns=$(jq -r '.orchestrator_tokens.turn_count' "$OT_DIR/art3/artifact.json")
+ot4_in=$(jq -r '.orchestrator_tokens.total_input' "$OT_DIR/art3/artifact.json")
+ot4_slen=$(jq -r '.orchestrator_tokens.sessions | length' "$OT_DIR/art3/artifact.json")
+# sort_by(.first_seen): sess-b (09:00) comes before sess-a (10:00).
+ot4_first=$(jq -r '.orchestrator_tokens.sessions[0].session_id' "$OT_DIR/art3/artifact.json")
+ot4_second=$(jq -r '.orchestrator_tokens.sessions[1].session_id' "$OT_DIR/art3/artifact.json")
+if [[ "$ot4_turns" == "4" && "$ot4_in" == "116" && "$ot4_slen" == "2" \
+   && "$ot4_first" == "sess-b" && "$ot4_second" == "sess-a" ]]; then
+    pass "OT-4: cross-session merge — totals sum; sessions[] sorted by first_seen"
+else
+    fail "OT-4: merge mismatch" "turns=$ot4_turns in=$ot4_in slen=$ot4_slen first=$ot4_first second=$ot4_second"
+fi
+
+# OT-5: time-window filter — --since in the future excludes all turns,
+# yielding zero rollup even though transcripts are populated. Also
+# verifies the partial-window case where only some turns survive.
+"$TOOLS/orchestrator-tokens.sh" \
+    --artifact "$OT_DIR/art3/artifact.json" \
+    --since    "2099-01-01T00:00:00.000Z" \
+    --transcript-dir "$OT3_DIR" \
+    >/dev/null 2>&1 || fail "OT-5: helper exit non-zero on future --since"
+ot5_turns=$(jq -r '.orchestrator_tokens.turn_count' "$OT_DIR/art3/artifact.json")
+ot5_slen=$(jq -r '.orchestrator_tokens.sessions | length' "$OT_DIR/art3/artifact.json")
+# Partial window: cut between the two sess-a turns at 10:00 and 10:01.
+"$TOOLS/orchestrator-tokens.sh" \
+    --artifact "$OT_DIR/art3/artifact.json" \
+    --since    "2026-04-21T10:00:30.000Z" \
+    --transcript-dir "$OT3_DIR" \
+    >/dev/null 2>&1 || fail "OT-5: helper exit non-zero on partial window"
+ot5p_turns=$(jq -r '.orchestrator_tokens.turn_count' "$OT_DIR/art3/artifact.json")
+ot5p_in=$(jq -r '.orchestrator_tokens.total_input' "$OT_DIR/art3/artifact.json")
+# Surviving: two sess-a turns (10:01 and 10:02) — input = 5 + 1 = 6.
+if [[ "$ot5_turns" == "0" && "$ot5_slen" == "0" && "$ot5p_turns" == "2" && "$ot5p_in" == "6" ]]; then
+    pass "OT-5: --since filter — future excludes all; partial window keeps only post-since turns"
+else
+    fail "OT-5: window filter mismatch" "future_turns=$ot5_turns future_slen=$ot5_slen partial_turns=$ot5p_turns partial_in=$ot5p_in"
+fi
+
+# OT-6: non-assistant lines (user messages, worktree-state snapshots, etc.)
+# are ignored. This guards the `type == "assistant"` filter specifically —
+# real Claude Code transcripts mix many line types and the helper must
+# not accidentally count `type == "user"` or `type == "worktree-state"`
+# lines that happen to have nested numeric fields.
+OT6_DIR="$OT_DIR/t6"
+mkdir -p "$OT_DIR/art6" "$OT6_DIR"
+cp "$FIX/artifact-seed.json" "$OT_DIR/art6/artifact.json"
+cat > "$OT6_DIR/mix.jsonl" <<'JSONL'
+{"type":"user","timestamp":"2026-04-21T10:00:00.000Z","message":{"content":"hi"}}
+{"type":"system","timestamp":"2026-04-21T10:00:01.000Z","message":"boot"}
+{"type":"worktree-state","timestamp":"2026-04-21T10:00:02.000Z"}
+{"type":"assistant","timestamp":"2026-04-21T10:00:03.000Z","sessionId":"sess-c","message":{"usage":{"input_tokens":7,"output_tokens":8,"cache_read_input_tokens":9,"cache_creation_input_tokens":10}}}
+{"type":"attachment","timestamp":"2026-04-21T10:00:04.000Z"}
+JSONL
+"$TOOLS/orchestrator-tokens.sh" \
+    --artifact "$OT_DIR/art6/artifact.json" \
+    --since    "2026-04-21T00:00:00.000Z" \
+    --transcript-dir "$OT6_DIR" \
+    >/dev/null 2>&1 || fail "OT-6: helper exit non-zero on mixed-types transcript"
+ot6_turns=$(jq -r '.orchestrator_tokens.turn_count' "$OT_DIR/art6/artifact.json")
+ot6_in=$(jq -r '.orchestrator_tokens.total_input' "$OT_DIR/art6/artifact.json")
+ot6_out=$(jq -r '.orchestrator_tokens.total_output' "$OT_DIR/art6/artifact.json")
+if [[ "$ot6_turns" == "1" && "$ot6_in" == "7" && "$ot6_out" == "8" ]]; then
+    pass "OT-6: non-assistant line types (user/system/worktree-state/attachment) ignored"
+else
+    fail "OT-6: filter let non-assistant lines through" "turns=$ot6_turns in=$ot6_in out=$ot6_out"
+fi
+
 echo
 echo "smoke: PASS ($N assertions)"
 exit 0
