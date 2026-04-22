@@ -95,7 +95,7 @@ retry ONCE. Only escalate to the user if the second retry also fails.
 Sub-agents dispatched from this command inherit the parent session's
 effort level. There is no per-sub-agent `effort` override in current
 Claude Code — the Agent tool exposes `model` but not `effort`. Every
-sub-agent the pipeline spawns (Haiku L1, Opus L2, Sonnet L3-L6, Opus
+sub-agent the pipeline spawns (Sonnet L1, Opus L2, Sonnet L3-L6, Opus
 L7 under `--ensemble`, Phase 2 dedup Sonnet, Phase 3 scorers, Phase 4a
 Opus validators, Phase 4b Sonnet validators, Phase 5 Opus cross-
 cutting, ensemble normalizer)

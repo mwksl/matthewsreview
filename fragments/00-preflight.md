@@ -3,7 +3,7 @@
 Pre-flight sets up every downstream phase's working context: branch + base,
 PR state, `review_started_at`, CLAUDE.md paths, the dirty-tree gate, the
 trivial-diff gate, prior-review detection, and the initial `artifact.json`.
-This phase is mostly deterministic shell — the only LLM call is the Haiku
+This phase is mostly deterministic shell — the only LLM call is the Sonnet
 user-facing-change classifier (step 0.9), and that's skipped in trivial mode.
 
 Work through the steps below in order. Capture each named variable into
@@ -341,13 +341,13 @@ done <<<"$reviewed_files_all"
 If `num_files <= 3 AND lines_changed <= 30 AND all_trivial == true`:
 set `trivial_mode=true`. Otherwise `trivial_mode=false`.
 
-### 0.12. User-facing-change classifier (Haiku — skipped in trivial mode)
+### 0.12. User-facing-change classifier (Sonnet — skipped in trivial mode)
 
 If `trivial_mode == true`, set `user_facing=false` and skip this step
 (L5 is already off in trivial mode per §13.9; Phase 1's L5 gating will also
 re-check `trivial_mode`).
 
-Otherwise, launch a Haiku sub-agent with this input:
+Otherwise, launch a Sonnet sub-agent with this input:
 
 ```
 Diff files (with short descriptions of each file's apparent type):
@@ -363,7 +363,7 @@ i18n files. Return false for pure backend logic, build tooling,
 internal utilities, config.
 ```
 
-Dispatch with the `Agent` tool, `model: haiku`. After the sub-agent returns,
+Dispatch with the `Agent` tool, `model: sonnet`. After the sub-agent returns,
 parse `user_facing` + `surfaces`. Then log tokens (every required arg is
 explicit here to match the helper's argparse — don't infer):
 
@@ -372,13 +372,13 @@ log-tokens.sh \
   --review-dir "$review_dir" \
   --phase phase_0 \
   --agent-role user_facing_classifier \
-  --agent-id "$haiku_agent_id" \
-  --model haiku \
-  --tokens "$haiku_tokens_or_null"
+  --agent-id "$classifier_agent_id" \
+  --model sonnet \
+  --tokens "$classifier_tokens_or_null"
 ```
 
-Where `$haiku_agent_id` is the id in the Agent tool result and
-`$haiku_tokens_or_null` is either the parsed token count or the literal
+Where `$classifier_agent_id` is the id in the Agent tool result and
+`$classifier_tokens_or_null` is either the parsed token count or the literal
 word `null` on parse failure (per §11 fallback).
 
 If JSON parsing of the classifier result fails after one retry, default
