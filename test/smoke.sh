@@ -3130,6 +3130,102 @@ else
     fail "PFD-7: expected default=0 / wide=1; got default=$len wide=$len_wide"
 fi
 
+# ------------------------------------------------------------------ tally-subagent-tokens.sh
+
+TK_DIR="$WORK/tk"
+mkdir -p "$TK_DIR"
+cp "$FIX/artifact-seed.json" "$TK_DIR/artifact.json"
+: > "$TK_DIR/tokens.jsonl"
+
+# TK-1: empty tokens.jsonl → zero rollup that schema-validates.
+"$TOOLS/tally-subagent-tokens.sh" \
+    --tokens-log "$TK_DIR/tokens.jsonl" \
+    --artifact   "$TK_DIR/artifact.json" \
+    >/dev/null 2>&1 || fail "TK-1: helper exit non-zero on empty log"
+tk1_total=$(jq -r '.subagent_tokens.total' "$TK_DIR/artifact.json")
+tk1_invs=$(jq -r '.subagent_tokens.invocations' "$TK_DIR/artifact.json")
+tk1_by_phase=$(jq -c '.subagent_tokens.by_phase' "$TK_DIR/artifact.json")
+if [[ "$tk1_total" == "0" && "$tk1_invs" == "0" && "$tk1_by_phase" == "{}" ]] \
+   && "$TOOLS/artifact-validate.sh" --path "$TK_DIR/artifact.json" >/dev/null 2>&1; then
+    pass "TK-1: empty log → zero rollup; schema-validates"
+else
+    fail "TK-1: expected zeros; got total=$tk1_total invs=$tk1_invs by_phase=$tk1_by_phase"
+fi
+
+# TK-2: 4-line log with a tokens:null entry → correct totals, null coerced to 0.
+cat > "$TK_DIR/tokens.jsonl" <<'JSONL'
+{"phase":"phase_1","agent_role":"lens_security","agent_id":"a1","model":"sonnet","tokens":1000,"ts":"2026-04-21T10:00:00Z"}
+{"phase":"phase_1","agent_role":"lens_ux","agent_id":"a2","model":"sonnet","tokens":2000,"ts":"2026-04-21T10:00:05Z"}
+{"phase":"phase_4a","agent_role":"validator","agent_id":"a3","model":"opus","tokens":null,"ts":"2026-04-21T10:01:00Z","finding_id":"F001"}
+{"phase":"phase_4a","agent_role":"validator","agent_id":"a4","model":"opus","tokens":5000,"ts":"2026-04-21T10:01:10Z","finding_id":"F002"}
+JSONL
+"$TOOLS/tally-subagent-tokens.sh" \
+    --tokens-log "$TK_DIR/tokens.jsonl" \
+    --artifact   "$TK_DIR/artifact.json" \
+    >/dev/null 2>&1 || fail "TK-2: helper exit non-zero on populated log"
+tk2_total=$(jq -r '.subagent_tokens.total' "$TK_DIR/artifact.json")
+tk2_invs=$(jq -r '.subagent_tokens.invocations' "$TK_DIR/artifact.json")
+tk2_lens_sec=$(jq -r '.subagent_tokens.by_lens.lens_security' "$TK_DIR/artifact.json")
+tk2_p4_f001=$(jq -r '.subagent_tokens.by_finding_phase4.F001' "$TK_DIR/artifact.json")
+if [[ "$tk2_total" == "8000" && "$tk2_invs" == "4" \
+      && "$tk2_lens_sec" == "1000" && "$tk2_p4_f001" == "0" ]]; then
+    pass "TK-2: 4-line log with tokens:null → total=8000 invs=4, null coerced to 0"
+else
+    fail "TK-2: expected total=8000 invs=4 lens_security=1000 F001=0; got total=$tk2_total invs=$tk2_invs lens_security=$tk2_lens_sec F001=$tk2_p4_f001"
+fi
+
+# TK-3: re-invocation is idempotent (bit-for-bit subagent_tokens).
+tk3_before=$(jq -cS '.subagent_tokens' "$TK_DIR/artifact.json")
+"$TOOLS/tally-subagent-tokens.sh" \
+    --tokens-log "$TK_DIR/tokens.jsonl" \
+    --artifact   "$TK_DIR/artifact.json" \
+    >/dev/null 2>&1 || fail "TK-3: helper exit non-zero on re-run"
+tk3_after=$(jq -cS '.subagent_tokens' "$TK_DIR/artifact.json")
+if [[ "$tk3_before" == "$tk3_after" ]]; then
+    pass "TK-3: idempotent re-invocation on unchanged log"
+else
+    fail "TK-3: subagent_tokens diverged on re-run" "before=$tk3_before after=$tk3_after"
+fi
+
+# TK-4: append new lines → total strictly grows by the appended sum (the
+# cumulative-growth invariant that the lifecycle wiring relies on).
+printf '{"phase":"phase_9","agent_role":"post_fix_reviewer","agent_id":"a5","model":"opus","tokens":3500,"ts":"2026-04-21T11:00:00Z"}\n' >> "$TK_DIR/tokens.jsonl"
+printf '{"phase":"phase_9","agent_role":"fix_group","agent_id":"a6","model":"opus","tokens":1500,"ts":"2026-04-21T11:00:30Z"}\n' >> "$TK_DIR/tokens.jsonl"
+"$TOOLS/tally-subagent-tokens.sh" \
+    --tokens-log "$TK_DIR/tokens.jsonl" \
+    --artifact   "$TK_DIR/artifact.json" \
+    >/dev/null 2>&1 || fail "TK-4: helper exit non-zero after append"
+tk4_total=$(jq -r '.subagent_tokens.total' "$TK_DIR/artifact.json")
+tk4_invs=$(jq -r '.subagent_tokens.invocations' "$TK_DIR/artifact.json")
+tk4_p9=$(jq -r '.subagent_tokens.by_phase.phase_9' "$TK_DIR/artifact.json")
+if [[ "$tk4_total" == "13000" && "$tk4_invs" == "6" && "$tk4_p9" == "5000" ]]; then
+    pass "TK-4: cumulative growth — total=8000→13000 (+5000), phase_9=5000"
+else
+    fail "TK-4: expected total=13000 invs=6 phase_9=5000; got total=$tk4_total invs=$tk4_invs phase_9=$tk4_p9"
+fi
+
+# TK-5: the chat-summary jq -r filter used by adams-review-add step 10 and
+# adams-review-walkthrough step 9. Must produce a clean (unquoted) line on
+# a populated artifact and empty stdout when subagent_tokens is absent.
+token_filter='if (.subagent_tokens.total // null) != null and (.subagent_tokens.invocations // null) != null
+    then "Cumulative sub-agent spend: \(.subagent_tokens.total) tokens across \(.subagent_tokens.invocations) invocations."
+    else empty end'
+tk5_line=$(jq -r "$token_filter" "$TK_DIR/artifact.json")
+tk5_expected="Cumulative sub-agent spend: 13000 tokens across 6 invocations."
+if [[ "$tk5_line" == "$tk5_expected" ]]; then
+    pass "TK-5: chat-summary jq -r filter produces clean line on populated artifact"
+else
+    fail "TK-5: filter output mismatch" "expected=[$tk5_expected] got=[$tk5_line]"
+fi
+
+jq 'del(.subagent_tokens)' "$TK_DIR/artifact.json" > "$TK_DIR/art-no-st.json"
+tk5_missing=$(jq -r "$token_filter" "$TK_DIR/art-no-st.json")
+if [[ -z "$tk5_missing" ]]; then
+    pass "TK-6: chat-summary filter omits line when subagent_tokens absent"
+else
+    fail "TK-6: expected empty output; got [$tk5_missing]"
+fi
+
 echo
 echo "smoke: PASS ($N assertions)"
 exit 0
