@@ -1189,6 +1189,7 @@ Pre-existing issues filed: <N; list id → url pairs below, or omit section>
   F028 → <url>
 
 Cumulative sub-agent spend: <total> tokens across <invs> invocations.
+Cumulative orchestrator spend: <cache_read> cache-read / <output> output / <cache_creation> cache-creation / <input> fresh input across <turns> turns.
 
 Promoted findings are now auto-fix-eligible via the human_confirmation
 bypass (§27.6). To apply them:
@@ -1208,15 +1209,22 @@ Read the cumulative spend numbers from the artifact (populated by
 §6.1's re-tally). Direct `jq -r` call so stdout is the chat line
 itself, not a JSON-quoted string (`artifact-read.sh --filter` doesn't
 enable raw mode). Note that §6.5 issue-filer agents dispatched after
-the tally won't be included in this line — they'll surface on the
-next lifecycle command's re-tally (§6.1 above documents this). Omit
-the line entirely if `subagent_tokens.total` is absent/null — matches
+the tally won't be included in these lines — they (and the
+orchestrator turns that dispatch them) surface on the next lifecycle
+command's re-tally (§6.1 above documents this). Omit each line
+entirely when its source field is absent/null — matches
 `artifact-render.py`'s renderer guard:
 
 ```bash
-token_line=$(jq -r '
+subagent_token_line=$(jq -r '
     if (.subagent_tokens.total // null) != null and (.subagent_tokens.invocations // null) != null
     then "Cumulative sub-agent spend: \(.subagent_tokens.total) tokens across \(.subagent_tokens.invocations) invocations."
+    else empty end
+' "$artifact_path")
+
+orchestrator_token_line=$(jq -r '
+    if (.orchestrator_tokens.turn_count // null) != null
+    then "Cumulative orchestrator spend: \(.orchestrator_tokens.cache_read) cache-read / \(.orchestrator_tokens.total_output) output / \(.orchestrator_tokens.cache_creation) cache-creation / \(.orchestrator_tokens.total_input) fresh input across \(.orchestrator_tokens.turn_count) turns."
     else empty end
 ' "$artifact_path")
 ```

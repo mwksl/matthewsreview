@@ -885,6 +885,7 @@ Deduplicated K candidates against existing findings (sources merged):
   new#2 → F003   (skipped — same underlying issue)
 
 Cumulative sub-agent spend: <total> tokens across <invs> invocations.
+Cumulative orchestrator spend: <cache_read> cache-read / <output> output / <cache_creation> cache-creation / <input> fresh input across <turns> turns.
 
 Next:
   - /adams-review-fix             apply newly auto-eligible findings (deep-lane confirmed_auto)
@@ -904,14 +905,20 @@ Build the per-finding lines from `artifact-read.sh`:
 Read the cumulative spend numbers from the artifact (populated by §8's
 re-tally). Direct `jq -r` call so stdout is the chat line itself, not
 a JSON-quoted string (`artifact-read.sh --filter` doesn't enable raw
-mode). Omit the line entirely if `subagent_tokens` is absent or
-`total` is null — matches `artifact-render.py`'s renderer guard so
-the chat never shows `null tokens across null invocations`:
+mode). Omit each line entirely if its source field is absent — matches
+`artifact-render.py`'s renderer guard so the chat never shows `null
+tokens across null invocations`:
 
 ```bash
-token_line=$(jq -r '
+subagent_token_line=$(jq -r '
     if (.subagent_tokens.total // null) != null and (.subagent_tokens.invocations // null) != null
     then "Cumulative sub-agent spend: \(.subagent_tokens.total) tokens across \(.subagent_tokens.invocations) invocations."
+    else empty end
+' "$artifact_path")
+
+orchestrator_token_line=$(jq -r '
+    if (.orchestrator_tokens.turn_count // null) != null
+    then "Cumulative orchestrator spend: \(.orchestrator_tokens.cache_read) cache-read / \(.orchestrator_tokens.total_output) output / \(.orchestrator_tokens.cache_creation) cache-creation / \(.orchestrator_tokens.total_input) fresh input across \(.orchestrator_tokens.turn_count) turns."
     else empty end
 ' "$artifact_path")
 ```
