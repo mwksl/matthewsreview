@@ -58,6 +58,15 @@ Steps 2–4 can land days or weeks after step 1 — the review artifact persists
 2. Install [uv](https://docs.astral.sh/uv/), [jq](https://jqlang.github.io/jq/download/), and the [GitHub CLI](https://cli.github.com/).
 3. In a Claude Code session: `/plugin marketplace add adamjgmiller/adamsreview` and `/plugin install adamsreview@adamsreview`.
 
+### Install from a local checkout
+
+If you've cloned this repo and prefer running from source — or you want to pin to a specific commit — two paths work without the GitHub marketplace round-trip:
+
+- **Persistent install from a local path.** In a Claude Code session, run `/plugin marketplace add /path/to/adamsreview` then `/plugin install adamsreview@adamsreview`. Same end state as the GitHub marketplace flow above — the plugin is registered under `~/.claude/` and survives restarts. Use `.` in place of the absolute path if your cwd is already the clone.
+- **One-shot via `--plugin-dir`.** `claude --plugin-dir /path/to/adamsreview` launches Claude Code with the clone loaded as a plugin for that session only. Nothing is written to `~/.claude/`; re-launch without the flag and the plugin is gone. Handy for trying the plugin without any persistent state, or for running a specific checkout side-by-side with an installed version.
+
+Both paths still require the runtime deps listed above (`uv`, `jq`, `gh`, `bash` 4+, `git`).
+
 ### Commands (post-install)
 
 All invocations are plugin-namespaced:
