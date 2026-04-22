@@ -5,7 +5,7 @@ underlying issue doesn't surface as multiple findings downstream.
 No structural fingerprinting — one LLM pass, pennies of cost.
 
 Capture `phase_2_start_epoch=$(date +%s)` and `pre_dedup_count=$(
-~/.claude/commands/_shared/tools/artifact-read.sh --path "$artifact_path" \
+artifact-read.sh --path "$artifact_path" \
   --filter '.findings | length')` as the first actions of this phase —
 step 2.4 references both.
 
@@ -14,7 +14,7 @@ step 2.4 references both.
 Read the current findings list:
 
 ```bash
-~/.claude/commands/_shared/tools/artifact-read.sh \
+artifact-read.sh \
   --path "$artifact_path" \
   --filter '[.findings[] | {id, file, line_range, claim, source_families, sources}]'
 ```
@@ -62,7 +62,7 @@ Log tokens with every required arg spelled out (the helper's argparse
 refuses short forms):
 
 ```bash
-~/.claude/commands/_shared/tools/log-tokens.sh \
+log-tokens.sh \
   --review-dir "$review_dir" \
   --phase phase_2 \
   --agent-role dedup \
@@ -108,7 +108,7 @@ Concretely, for each group `[K, D1, D2, ...]` (K = keeper, Di = dupes):
 1. Read the current state of every id in the group:
 
     ```bash
-    ~/.claude/commands/_shared/tools/artifact-read.sh \
+    artifact-read.sh \
       --path "$artifact_path" \
       --filter '[.findings[] | select(.id as $id | ["K","D1","D2"] | index($id))]'
     ```
@@ -148,7 +148,7 @@ Concretely, for each group `[K, D1, D2, ...]` (K = keeper, Di = dupes):
 4. Apply to the keeper in one patch:
 
     ```bash
-    ~/.claude/commands/_shared/tools/artifact-patch.py \
+    artifact-patch.py \
       --path "$artifact_path" --finding-id K \
       --set-json "sources=$union_sources" \
       --set-json "source_families=$union_families" \
@@ -161,7 +161,7 @@ Concretely, for each group `[K, D1, D2, ...]` (K = keeper, Di = dupes):
 
     ```bash
     for dupe in D1 D2; do
-        ~/.claude/commands/_shared/tools/artifact-patch.py \
+        artifact-patch.py \
           --path "$artifact_path" --delete-finding "$dupe"
     done
     ```
@@ -174,18 +174,18 @@ corrupting.
 
 ```bash
 phase_2_elapsed=$(( $(date +%s) - phase_2_start_epoch ))
-post_count=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+post_count=$(artifact-read.sh \
   --path "$artifact_path" --filter '.findings | length')
 
 # candidates before - candidates after = merged
 merged=$(( pre_dedup_count - post_count ))
 
-~/.claude/commands/_shared/tools/log-phase.sh \
+log-phase.sh \
   --review-dir "$review_dir" --phase 2 --name dedup \
   --elapsed "$phase_2_elapsed" \
   --summary "groups=<N>; merged=$merged; surviving=$post_count"
 
-~/.claude/commands/_shared/tools/log-phase.sh \
+log-phase.sh \
   --review-dir "$review_dir" --phase 2 --record "$(jq -nc \
     --argjson elapsed "$phase_2_elapsed" \
     --argjson survivors "$post_count" \

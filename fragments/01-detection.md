@@ -186,7 +186,7 @@ if [[ "$trivial_mode" != "true" ]]; then
       | awk 'NF' | paste -sd, -)
 
     prior_fix_suspects=$(
-        ~/.claude/commands/_shared/tools/prior-fix-diff.sh \
+        prior-fix-diff.sh \
           --comparison-ref "$comparison_ref" \
           --reviewed-files "$reviewed_files_csv" \
           2> >(tee -a "$trace_log_path" >&2)
@@ -450,14 +450,14 @@ Prompt essence:
 Launch one `Agent` tool-use with `model: sonnet`. Inline the UX reference
 content into the prompt via a preprocessor include — in the fragment as
 consumed, the reference is inlined by the top-level command file via
-`` !`cat ~/.claude/commands/_shared/lens-ux-reference.md` `` so the
+`` !`include lens-ux-reference.md` `` so the
 sub-agent sees the full reference in its prompt.
 
 Prompt essence:
 
 > UX reference:
 >
-> !`cat ~/.claude/commands/_shared/lens-ux-reference.md`
+> !`include lens-ux-reference.md`
 >
 > Read the diff between `$comparison_ref` and HEAD and the CLAUDE.md files in
 > `$claude_md_paths` (project-specific UX conventions take precedence over
@@ -480,7 +480,7 @@ Prompt essence:
 
 > Security reference:
 >
-> !`cat ~/.claude/commands/_shared/lens-security-reference.md`
+> !`include lens-security-reference.md`
 >
 > Read the diff between `$comparison_ref` and HEAD. If structural reasoning
 > (similar to L2 — walking callers and writers) suggests a security
@@ -638,7 +638,7 @@ For each sub-agent result, in the order it returns:
    that. On parse failure, use `--tokens null` per the §11 fallback.
 
    ```bash
-   ~/.claude/commands/_shared/tools/log-tokens.sh \
+   log-tokens.sh \
      --review-dir "$review_dir" \
      --phase phase_1 --agent-role <lens-name> \
      --agent-id <id-from-Agent-result> \
@@ -685,7 +685,7 @@ For each sub-agent result, in the order it returns:
        corrected_candidates="$lens_candidates_json"
    else
        corrected_candidates=$(
-         ~/.claude/commands/_shared/tools/origin-crosscheck.sh \
+         origin-crosscheck.sh \
            --comparison-ref "$comparison_ref" \
            --candidates "$lens_candidates_json" \
            2> >(tee -a "$trace_log_path" >&2)
@@ -764,7 +764,7 @@ before ids are assigned so wasted IDs don't litter the artifact:
 
 ```bash
 sanitized=$(printf '%s' "$pooled" \
-  | ~/.claude/commands/_shared/tools/line-range-check.sh \
+  | line-range-check.sh \
       --reviewed-sha "$reviewed_sha" \
       2> >(tee -a "$trace_log_path" >&2))
 ```
@@ -790,7 +790,7 @@ fi
 
 ```bash
 ided=$(printf '%s' "$sanitized" \
-  | ~/.claude/commands/_shared/tools/assign-finding-ids.sh)
+  | assign-finding-ids.sh)
 ```
 
 `assign-finding-ids.sh` sorts by source priority (L1, L2, L3, L4, L5,
@@ -840,7 +840,7 @@ while IFS= read -r candidate; do
         related_parent_finding_id: null
       } | del(.source_family, .evidence_snippet)')   # strip candidate-only fields — schema additionalProperties:false
 
-    ~/.claude/commands/_shared/tools/artifact-patch.py \
+    artifact-patch.py \
       --path "$artifact_path" --add-finding "$full_finding"
 done < <(printf '%s' "$ided" | jq -c '.[]')
 ```
@@ -874,11 +874,11 @@ the pool to the artifact:
 phase_1_elapsed=$(( $(date +%s) - phase_1_start_epoch ))
 
 # Per-lens candidate count via artifact-read
-counts_by_family=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+counts_by_family=$(artifact-read.sh \
   --path "$artifact_path" \
   --filter '[.findings[] | .source_families[]?] | group_by(.) | map({key:.[0], value:length}) | from_entries')
 
-total_candidates=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+total_candidates=$(artifact-read.sh \
   --path "$artifact_path" --filter '.findings | length')
 
 # Surface Phase 1's loud-failure audit tags so the operator sees a non-
@@ -893,12 +893,12 @@ total_candidates=$(~/.claude/commands/_shared/tools/artifact-read.sh \
 lens_drops=$(grep -c '^lens_dropped_unparseable:' "$trace_log_path" 2>/dev/null || true)
 oc_skipped=$(grep -c '^origin_crosscheck_skipped:' "$trace_log_path" 2>/dev/null || true)
 
-~/.claude/commands/_shared/tools/log-phase.sh \
+log-phase.sh \
   --review-dir "$review_dir" --phase 1 --name detection \
   --elapsed "$phase_1_elapsed" \
   --summary "total=$total_candidates; counts_by_family=$counts_by_family; skipped_lenses=<list-if-any>; lens_drops=$lens_drops; origin_crosscheck_skipped=$oc_skipped"
 
-~/.claude/commands/_shared/tools/log-phase.sh \
+log-phase.sh \
   --review-dir "$review_dir" --phase 1 --record "$(jq -nc \
     --arg name detection \
     --argjson elapsed "$phase_1_elapsed" \

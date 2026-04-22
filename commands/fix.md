@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-read.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-patch.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-validate.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-render.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-publish.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/claude-md-paths.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/staleness.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/external-scrape.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/log-phase.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/log-tokens.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/tally-subagent-tokens.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/orchestrator-tokens.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/origin-crosscheck.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/assign-finding-ids.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/group-fixes.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/repo-slug.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(node:*), Bash(find:*), Bash(uv:*), AskUserQuestion, Agent, Read, Edit, Write, BashOutput, KillShell
+allowed-tools: Bash(artifact-read.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(claude-md-paths.sh:*), Bash(staleness.sh:*), Bash(external-scrape.sh:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(origin-crosscheck.sh:*), Bash(assign-finding-ids.sh:*), Bash(group-fixes.py:*), Bash(repo-slug.sh:*), Bash(include:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(node:*), Bash(find:*), AskUserQuestion, Agent, Read, Edit, Write, BashOutput, KillShell
 argument-hint: "[threshold] [--granular-commits]"
 description: Apply auto-fixable code review findings. Dispatches fix-group agents, post-fix-reviews the working tree, commits survivors, reverts regressions, updates the artifact.
 disable-model-invocation: false
@@ -27,7 +27,7 @@ Arguments (optional):
 ## Execution overview — read this first
 
 This command orchestrates DESIGN §4 Phases 7–9 in order. Each phase is
-defined in a fragment under `_shared/NN-<name>.md` — the bodies are
+defined in a fragment under `fragments/NN-<name>.md` — the bodies are
 inlined via `` !`cat` `` preprocessor at the bottom of this file.
 
 **Before you start, build a TaskList that mirrors the phases below**
@@ -91,7 +91,7 @@ content):
 1. Extract the token count from the structured `usage` field or the
    `<usage>total_tokens: N</usage>` fallback; log `null` on parse
    failure per §11.
-2. Call `~/.claude/commands/_shared/tools/log-tokens.sh` with phase,
+2. Call `log-tokens.sh` with phase,
    agent_role, agent_id, model, finding_id (when applicable), and the
    tokens value. §24.4 invariant: every sub-agent's cost is accounted
    even when its output fails to parse.
@@ -162,15 +162,15 @@ Capture both in your working context before executing Phase 7.
 
 ---
 
-!`cat ~/.claude/commands/_shared/08-fix-loader.md`
+!`include 08-fix-loader.md`
 
 ---
 
-!`cat ~/.claude/commands/_shared/09-fix-execution.md`
+!`include 09-fix-execution.md`
 
 ---
 
-!`cat ~/.claude/commands/_shared/10-post-fix-and-commit.md`
+!`include 10-post-fix-and-commit.md`
 
 ---
 

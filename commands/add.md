@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-read.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-patch.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-validate.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-render.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-publish.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/assign-finding-ids.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/log-phase.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/log-tokens.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/tally-subagent-tokens.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/orchestrator-tokens.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/repo-slug.sh:*), Bash(git:*), Bash(jq:*), Bash(date:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(cat:*), Bash(printf:*), Bash(tr:*), Bash(awk:*), Bash(grep:*), Bash(mktemp:*), Read, Agent
+allowed-tools: Bash(artifact-read.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(assign-finding-ids.sh:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(include:*), Bash(git:*), Bash(jq:*), Bash(date:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(cat:*), Bash(printf:*), Bash(tr:*), Bash(awk:*), Bash(grep:*), Bash(mktemp:*), Read, Agent
 argument-hint: "[<paste...>] [--file path --line N --claim \"...\"] [--impact <type>] [--no-dedup]"
 description: Inject externally-sourced findings (cloud /ultrareview, manual finds, etc.) into the most recent /adams-review artifact for this branch. Validates via Phase 4, re-renders, re-publishes.
 disable-model-invocation: false
@@ -91,7 +91,7 @@ After every sub-agent returns, immediately:
 1. Extract the token count from the structured `usage` field or the
    `<usage>total_tokens: N</usage>` fallback; log `null` on parse
    failure per §11.
-2. Call `~/.claude/commands/_shared/tools/log-tokens.sh` with phase,
+2. Call `log-tokens.sh` with phase,
    agent_role, agent_id, model, finding_id (when applicable), and the
    tokens value.
 3. Parse the sub-agent's structured output. Light repair (strip code
@@ -153,7 +153,7 @@ Validate `cli_impact` against the enum (`correctness`, `security`, `ux`,
 reviews_root="${ADAMS_REVIEW_REVIEWS_ROOT:-$HOME/.adams-reviews}"
 head_branch=$(git rev-parse --abbrev-ref HEAD)
 repo_root=$(git rev-parse --show-toplevel)
-repo_slug=$(~/.claude/commands/_shared/tools/repo-slug.sh --repo-root "$repo_root")
+repo_slug=$(repo-slug.sh --repo-root "$repo_root")
 latest_path="$reviews_root/$repo_slug/$head_branch/latest.txt"
 ```
 
@@ -177,7 +177,7 @@ tokens_log_path="$review_dir/tokens.jsonl"
 Schema-validate as a safety rail:
 
 ```bash
-~/.claude/commands/_shared/tools/artifact-validate.sh --path "$artifact_path"
+artifact-validate.sh --path "$artifact_path"
 ```
 
 On non-zero: surface the validator stderr and abort. A schema-invalid
@@ -187,7 +187,7 @@ patch around it.
 Capture `add_start_epoch=$(date +%s)`. Append a header to `trace.md`:
 
 ```bash
-~/.claude/commands/_shared/tools/log-phase.sh \
+log-phase.sh \
   --review-dir "$review_dir" --phase add --name review-add \
   --summary "input_mode=$mode_input cli_impact=$cli_impact no_dedup=$no_dedup paste_length=${#paste_body}"
 ```
@@ -195,7 +195,7 @@ Capture `add_start_epoch=$(date +%s)`. Append a header to `trace.md`:
 ### 3. Leftover-`attempted` hard abort
 
 ```bash
-leftover_ids=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+leftover_ids=$(artifact-read.sh \
     --path "$artifact_path" \
     --filter '[.findings[] | select(.current_state == "attempted") | .id] | join(", ")')
 ```
@@ -312,10 +312,10 @@ the guard, a nonexistent `match_id` makes the sources-merge jq pipe
 error on empty stdin and leaves the artifact partially mutated):
 
 ```bash
-existing_compact=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+existing_compact=$(artifact-read.sh \
     --path "$artifact_path" \
     --filter '[.findings[] | {id, file, line_range, claim}]')
-existing_ids_csv=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+existing_ids_csv=$(artifact-read.sh \
     --path "$artifact_path" \
     --filter '[.findings[].id] | join(",")')
 ```
@@ -340,7 +340,7 @@ string into it via one `--set-json sources=@…` patch:
 # Run once per matched verdict; $match_id and $candidate are bound
 # to the verdict's "matches" field and the new candidate at
 # new_candidates[new_index] respectively.
-existing_sources=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+existing_sources=$(artifact-read.sh \
     --path "$artifact_path" \
     --filter ".findings[] | select(.id == \"$match_id\") | .sources")
 new_source=$(echo "$candidate" | jq -r '.sources[0]')
@@ -349,7 +349,7 @@ merged_sources=$(echo "$existing_sources" \
 
 src_tmp=$(mktemp -t adams-add-srcs.XXXXXX)
 echo "$merged_sources" > "$src_tmp"
-~/.claude/commands/_shared/tools/artifact-patch.py \
+artifact-patch.py \
     --path "$artifact_path" --finding-id "$match_id" \
     --set-json "sources=@$src_tmp"
 rm -f "$src_tmp"
@@ -398,7 +398,7 @@ directly to step 6.
 Compute the next free F-id by scanning existing ids:
 
 ```bash
-next_n=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+next_n=$(artifact-read.sh \
     --path "$artifact_path" \
     --filter '[.findings[].id | sub("^F"; "") | tonumber] | (max // 0) + 1')
 next_id=$(printf 'F%03d' "$next_n")
@@ -412,7 +412,7 @@ Pipe the surviving candidates through the helper:
 
 ```bash
 ids_assigned=$(echo "$new_candidates" \
-    | ~/.claude/commands/_shared/tools/assign-finding-ids.sh --start-from "$next_id")
+    | assign-finding-ids.sh --start-from "$next_id")
 ```
 
 Read `trivial_mode` from the artifact so the `validation_lane`
@@ -480,7 +480,7 @@ Loop and add each finding:
 
 ```bash
 echo "$findings_to_add" | jq -c '.[]' | while IFS= read -r f; do
-    ~/.claude/commands/_shared/tools/artifact-patch.py \
+    artifact-patch.py \
         --path "$artifact_path" --add-finding "$f"
 done
 ```
@@ -497,7 +497,7 @@ Append `add_new_findings: $new_ids` to `trace.md`.
 ### 7. Phase 4 validation (lane-aware, no Wave 2)
 
 This step inlines the relevant slices of
-`commands/_shared/05-validation.md` — lane partition, deep + light
+`fragments/05-validation.md` — lane partition, deep + light
 dispatch, post-wave tree-cleanliness sweep, `--apply-decisions`, and
 the §4.6 pre-existing override re-assertion. Wave 2 chain retry is
 intentionally NOT included (the user is adding a bounded set; following
@@ -524,7 +524,7 @@ fi
 #### 7.1 Read CLAUDE.md paths from the artifact
 
 ```bash
-claude_md_paths=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+claude_md_paths=$(artifact-read.sh \
     --path "$artifact_path" --filter '.claude_md_paths | join(" ")')
 ```
 
@@ -537,11 +537,11 @@ see the same governance context the original Phase 4 saw.
 ```bash
 trivial_mode=$(jq -r '.trivial_mode' "$artifact_path")
 
-deep_ids=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+deep_ids=$(artifact-read.sh \
     --path "$artifact_path" \
     --filter "[.findings[] | select(.id | IN(\"${new_ids//,/\",\"}\")) | select(.validation_lane == \"deep\") | .id] | join(\",\")")
 
-light_ids=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+light_ids=$(artifact-read.sh \
     --path "$artifact_path" \
     --filter "[.findings[] | select(.id | IN(\"${new_ids//,/\",\"}\")) | select(.validation_lane == \"light\") | .id] | join(\",\")")
 
@@ -729,7 +729,7 @@ mkdir -p "$scratch"
 # $scratch/add-decisions.json by whatever means is natural. The helper
 # only cares about the file path + tuple shape.
 
-out=$(~/.claude/commands/_shared/tools/artifact-patch.py \
+out=$(artifact-patch.py \
         --path "$artifact_path" \
         --apply-decisions "@$scratch/add-decisions.json")
 echo "$out"
@@ -741,7 +741,7 @@ Capture `dispositions_summary` for the step-10 trace block by reading
 back the new findings:
 
 ```bash
-dispositions_summary=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+dispositions_summary=$(artifact-read.sh \
     --path "$artifact_path" \
     --filter "[.findings[] | select(.id | IN(\"${new_ids//,/\",\"}\")) | \"\\(.id)=\\(.disposition)\"] | join(\" \")")
 ```
@@ -758,7 +758,7 @@ catches any new finding the validator graduated to a confirmed band
 while marking it `pre_existing` with `high` confidence.
 
 ```bash
-~/.claude/commands/_shared/tools/artifact-read.sh \
+artifact-read.sh \
   --path "$artifact_path" \
   --filter "[.findings[] | select(.id | IN(\"${new_ids//,/\",\"}\")) | select(.origin == \"pre_existing\" and .origin_confidence == \"high\" and .disposition != \"pre_existing_report\") | .id]"
 ```
@@ -766,7 +766,7 @@ while marking it `pre_existing` with `high` confidence.
 For each returned id:
 
 ```bash
-~/.claude/commands/_shared/tools/artifact-patch.py \
+artifact-patch.py \
   --path "$artifact_path" --finding-id "$id" \
   --set disposition=pre_existing_report \
   --set is_actionable=false \
@@ -780,7 +780,7 @@ For each returned id:
 ```bash
 phase_4_elapsed=$(( $(date +%s) - phase_4_start_epoch ))
 
-~/.claude/commands/_shared/tools/log-phase.sh \
+log-phase.sh \
   --review-dir "$review_dir" --phase add --name validation \
   --elapsed "$phase_4_elapsed" \
   --summary "deep=$deep_count light=$light_count new_ids=$new_ids"
@@ -797,19 +797,19 @@ normalizer (§3a) and any Phase-4 re-validators that ran during this
 main-session turn. Both helpers are pure readbacks:
 
 ```bash
-~/.claude/commands/_shared/tools/tally-subagent-tokens.sh \
+tally-subagent-tokens.sh \
     --tokens-log "$tokens_log_path" \
     --artifact   "$artifact_path" \
     2>>"$trace_log_path" || printf 'add_tally_failed\n' >> "$trace_log_path"
 
 review_started_at=$(jq -r '.review_started_at // empty' "$artifact_path")
 
-~/.claude/commands/_shared/tools/orchestrator-tokens.sh \
+orchestrator-tokens.sh \
     --artifact "$artifact_path" \
     --since    "$review_started_at" \
     2>>"$trace_log_path" || printf 'add_orchestrator_tally_failed\n' >> "$trace_log_path"
 
-~/.claude/commands/_shared/tools/artifact-render.py \
+artifact-render.py \
     --input "$artifact_path" \
     --output "$review_dir/artifact.md"
 ```
@@ -843,7 +843,7 @@ publish_args=(
 )
 [[ -n "$comment_id" ]] && publish_args+=(--comment-id "$comment_id")
 
-~/.claude/commands/_shared/tools/artifact-publish.sh "${publish_args[@]}"
+artifact-publish.sh "${publish_args[@]}"
 ```
 
 If `mode == "local"`: call with `--mode local --review-id "$review_id"
@@ -898,7 +898,7 @@ Next:
 Build the per-finding lines from `artifact-read.sh`:
 
 ```bash
-~/.claude/commands/_shared/tools/artifact-read.sh \
+artifact-read.sh \
   --path "$artifact_path" \
   --filter "[.findings[] | select(.id | IN(\"${new_ids//,/\",\"}\"))
             | \"  \\(.id) \\(.disposition | (. + \"                \")[0:18]) \\(.impact_type | (. + \"          \")[0:11]) \\(.file):\\(.line_range[0]) — \\(.claim | .[0:80])\"]

@@ -128,7 +128,7 @@ continue per §24.2:
 
 ```bash
 if [[ "$mode" == "pr" ]]; then
-    ~/.claude/commands/_shared/tools/external-scrape.sh \
+    external-scrape.sh \
         --pr "$pr_number" \
         > "$scratch_dir/pr-scrape.raw.json" \
         2> "$scratch_dir/pr-scrape.err" \
@@ -142,7 +142,7 @@ if [[ "$mode" == "pr" ]]; then
         # Pipe through comment-freshness.sh. Audit lines (`comment_freshness: …`)
         # flow into trace.md via `tee -a` — mirrors origin-crosscheck.sh
         # dispatch at 01-detection.md step 1.4 step 2a.
-        if ! ~/.claude/commands/_shared/tools/comment-freshness.sh \
+        if ! comment-freshness.sh \
                 --pr "$pr_number" \
                 --reviewed-files "$reviewed_files_csv" \
                 --comments "$scratch_dir/pr-scrape.raw.json" \
@@ -318,7 +318,7 @@ the notes before the merge).
 Log the normalizer's tokens under `phase_1_5`:
 
 ```bash
-~/.claude/commands/_shared/tools/log-tokens.sh \
+log-tokens.sh \
   --review-dir "$review_dir" --phase phase_1_5 \
   --agent-role external_normalizer --agent-id <id> \
   --model sonnet --tokens <N or null>
@@ -343,12 +343,12 @@ for post-mortem inspection.
 ```bash
 phase_1_5_elapsed=$(( $(date +%s) - phase_1_5_start_epoch ))
 
-~/.claude/commands/_shared/tools/log-phase.sh \
+log-phase.sh \
   --review-dir "$review_dir" --phase 1_5 --name ensemble-adapter \
   --elapsed "$phase_1_5_elapsed" \
   --summary "coderabbit=$coderabbit_status; codex=$codex_status; scrape_bots=$scrape_bot_count; normalized=$external_candidate_count"
 
-~/.claude/commands/_shared/tools/log-phase.sh \
+log-phase.sh \
   --review-dir "$review_dir" --phase 1_5 --record "$(jq -nc \
     --arg name ensemble-adapter \
     --argjson elapsed "$phase_1_5_elapsed" \

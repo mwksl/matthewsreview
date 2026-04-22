@@ -2228,7 +2228,7 @@ fi
 # runtime (the command file is a prompt, not a shell script), this is a
 # template-integrity check — guards against accidental removal of any
 # section so the posted PR comment stays auditable.
-WALK_MD="$REPO/commands/adams-review-walkthrough.md"
+WALK_MD="$REPO/commands/walkthrough.md"
 if grep -q 'adams-review-walkthrough-v1' "$WALK_MD" \
    && grep -q '### Walkthrough decisions' "$WALK_MD" \
    && grep -q '#### Promoted' "$WALK_MD" \
@@ -2639,7 +2639,7 @@ fi
 # that Claude Code interprets — these assertions verify the load-bearing
 # pieces are present, mirroring the VR-* / PF-* pattern for prompts that
 # only an LLM can execute.
-ADD_MD="$REPO/commands/adams-review-add.md"
+ADD_MD="$REPO/commands/add.md"
 
 # RA-1: command file exists.
 if [[ -f "$ADD_MD" ]]; then

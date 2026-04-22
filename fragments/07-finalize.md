@@ -10,7 +10,7 @@ to chat, and pop any stash taken at Phase 0's dirty-tree gate.
 ### 6.1. Schema-validate the artifact
 
 ```bash
-~/.claude/commands/_shared/tools/artifact-validate.sh --path "$artifact_path"
+artifact-validate.sh --path "$artifact_path"
 ```
 
 On non-zero exit: log the validator stderr verbatim to `trace.md`;
@@ -22,7 +22,7 @@ should not shadow the PR comment.
 ### 6.2. Tally `subagent_tokens` from `tokens.jsonl`
 
 ```bash
-~/.claude/commands/_shared/tools/tally-subagent-tokens.sh \
+tally-subagent-tokens.sh \
   --tokens-log "$tokens_log_path" \
   --artifact   "$artifact_path"
 ```
@@ -46,7 +46,7 @@ spend, not just the initial `/adams-review` snapshot.
 ```bash
 review_started_at=$(jq -r '.review_started_at // empty' "$artifact_path")
 
-~/.claude/commands/_shared/tools/orchestrator-tokens.sh \
+orchestrator-tokens.sh \
   --artifact "$artifact_path" \
   --since    "$review_started_at"
 ```
@@ -109,7 +109,7 @@ reviewer_sources=$(jq -c '
 ' "$artifact_path")
 
 echo "$reviewer_sources" > "/tmp/adams-review-rs-$review_id.json"
-~/.claude/commands/_shared/tools/artifact-patch.py \
+artifact-patch.py \
   --path "$artifact_path" \
   --set-json "reviewer_sources=@/tmp/adams-review-rs-$review_id.json"
 rm -f "/tmp/adams-review-rs-$review_id.json"
@@ -143,7 +143,7 @@ metrics=$(jq -n \
   }')
 
 echo "$metrics" > "/tmp/adams-review-metrics-$review_id.json"
-~/.claude/commands/_shared/tools/artifact-patch.py \
+artifact-patch.py \
   --path "$artifact_path" \
   --set-json "metrics=@/tmp/adams-review-metrics-$review_id.json"
 rm -f "/tmp/adams-review-metrics-$review_id.json"
@@ -152,17 +152,17 @@ rm -f "/tmp/adams-review-metrics-$review_id.json"
 ### 6.4. Append Phase 6 record to `phases.jsonl`
 
 ```bash
-by_disp=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+by_disp=$(artifact-read.sh \
   --path "$artifact_path" --summary | jq -c '.counts_by_disposition')
-by_state=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+by_state=$(artifact-read.sh \
   --path "$artifact_path" --summary | jq -c '.counts_by_state')
 
-~/.claude/commands/_shared/tools/log-phase.sh \
+log-phase.sh \
   --review-dir "$review_dir" --phase 6 --name finalize \
   --elapsed 0 \
   --summary "rendering + publishing; total findings=$(jq '.findings | length' $artifact_path)"
 
-~/.claude/commands/_shared/tools/log-phase.sh \
+log-phase.sh \
   --review-dir "$review_dir" --phase 6 --record "$(jq -nc \
     --argjson by_disp "$by_disp" \
     --argjson by_state "$by_state" \
@@ -172,7 +172,7 @@ by_state=$(~/.claude/commands/_shared/tools/artifact-read.sh \
 ### 6.5. Render `artifact.md`
 
 ```bash
-~/.claude/commands/_shared/tools/artifact-render.py \
+artifact-render.py \
   --input "$artifact_path" --output "$review_dir/artifact.md"
 ```
 
@@ -205,7 +205,7 @@ recovery prompt populated `existing_comment_id` (user chose "replace
 prior comment in place"):
 
 ```bash
-comment_id_from_artifact=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+comment_id_from_artifact=$(artifact-read.sh \
   --path "$artifact_path" --filter '.comment_id // empty' 2>/dev/null || true)
 ```
 
@@ -236,7 +236,7 @@ elif [[ -n "$existing_comment_id" ]]; then
     publish_args+=(--comment-id "$existing_comment_id")
 fi
 
-stdout=$(~/.claude/commands/_shared/tools/artifact-publish.sh "${publish_args[@]}") \
+stdout=$(artifact-publish.sh "${publish_args[@]}") \
     || publish_exit=$?
 publish_exit=${publish_exit:-0}
 ```
@@ -250,7 +250,7 @@ persist to artifact per §13.4:
 ```bash
 new_id=$(echo "$stdout" | jq -r '.comment_id // empty')
 if [[ -n "$new_id" ]]; then
-    ~/.claude/commands/_shared/tools/artifact-patch.py \
+    artifact-patch.py \
       --path "$artifact_path" --set "comment_id=$new_id"
 fi
 ```
@@ -263,7 +263,7 @@ even though the PR didn't get it).
 **Local mode:**
 
 ```bash
-~/.claude/commands/_shared/tools/artifact-publish.sh \
+artifact-publish.sh \
   --mode local --review-id "$review_id" --review-dir "$review_dir"
 ```
 

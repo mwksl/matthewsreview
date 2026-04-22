@@ -16,7 +16,7 @@ phase — step 5.4 logs the elapsed time.
 Read the candidates that qualify for cross-cutting analysis:
 
 ```bash
-~/.claude/commands/_shared/tools/artifact-read.sh \
+artifact-read.sh \
   --path "$artifact_path" \
   --filter '[.findings[] | select(.is_actionable == true and .validation_lane == "deep")]'
 ```
@@ -26,7 +26,7 @@ disproven/uncertain/confirmed_manual/confirmed_report), **skip Phase 5
 entirely**:
 
 ```bash
-~/.claude/commands/_shared/tools/log-phase.sh \
+log-phase.sh \
   --review-dir "$review_dir" --phase 5 --name cross-cutting \
   --elapsed 0 \
   --summary "skipped — no deep-lane actionable findings"
@@ -99,7 +99,7 @@ Prompt essence (per §19.7):
 First, token log:
 
 ```bash
-~/.claude/commands/_shared/tools/log-tokens.sh \
+log-tokens.sh \
   --review-dir "$review_dir" --phase phase_5 \
   --agent-role cross_cutting --agent-id <id> \
   --model opus --tokens <N or null>
@@ -124,7 +124,7 @@ Write the groups to a tmpfile so `--set-json` can use `@file` form
 # we pluck the inner array.
 jq -c '.cross_cutting_groups // .' <<<"$subagent_response_json" \
     > "/tmp/adams-review-ccg-$review_id.json"
-~/.claude/commands/_shared/tools/artifact-patch.py \
+artifact-patch.py \
   --path "$artifact_path" \
   --set-json "cross_cutting_groups=@/tmp/adams-review-ccg-$review_id.json"
 rm -f "/tmp/adams-review-ccg-$review_id.json"
@@ -141,15 +141,15 @@ parse failure).
 
 ```bash
 phase_5_elapsed=$(( $(date +%s) - phase_5_start_epoch ))
-group_count=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+group_count=$(artifact-read.sh \
   --path "$artifact_path" --filter '.cross_cutting_groups | length')
 
-~/.claude/commands/_shared/tools/log-phase.sh \
+log-phase.sh \
   --review-dir "$review_dir" --phase 5 --name cross-cutting \
   --elapsed "$phase_5_elapsed" \
   --summary "groups=$group_count"
 
-~/.claude/commands/_shared/tools/log-phase.sh \
+log-phase.sh \
   --review-dir "$review_dir" --phase 5 --record "$(jq -nc \
     --argjson elapsed "$phase_5_elapsed" \
     --argjson groups "$group_count" \

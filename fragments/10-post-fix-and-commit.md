@@ -391,7 +391,7 @@ After the agent returns:
    original_group_count=$(echo "$original_fix_group_by_finding" | jq '[.[].group] | unique | length')
    overlap_count=$(echo "$overlap_files_snapshot" | jq 'length')
 
-   ~/.claude/commands/_shared/tools/log-phase.sh \
+   log-phase.sh \
      --review-dir "$review_dir" --phase 9 --name reconcile \
      --elapsed "$phase_9_reconcile_elapsed" \
      --summary "reconciled $overlap_count overlap(s): $reconciled_finding_count finding(s) from $original_group_count group(s) merged across $reconciled_file_count file(s)"
@@ -519,7 +519,7 @@ original abort logic unchanged from prior revisions.
    fi
 
    echo "$overlap_abort_tuples" | \
-       ~/.claude/commands/_shared/tools/artifact-patch.py \
+       artifact-patch.py \
          --path "$artifact_path" --apply-fix-outcomes @-
    ```
 
@@ -975,7 +975,7 @@ apply_tuples=$(jq -nc \
 ')
 
 echo "$apply_tuples" | \
-    ~/.claude/commands/_shared/tools/artifact-patch.py \
+    artifact-patch.py \
       --path "$artifact_path" --apply-fix-outcomes @-
 ```
 
@@ -1008,14 +1008,14 @@ each step's outcome is logged; failures do not abort the block.
    turn already logged itself; this is a pure readback:
 
    ```bash
-   ~/.claude/commands/_shared/tools/tally-subagent-tokens.sh \
+   tally-subagent-tokens.sh \
      --tokens-log "$tokens_log_path" \
      --artifact   "$artifact_path" \
      2>>"$trace_log_path" || printf 'tally_failed\n' >> "$trace_log_path"
 
    review_started_at=$(jq -r '.review_started_at // empty' "$artifact_path")
 
-   ~/.claude/commands/_shared/tools/orchestrator-tokens.sh \
+   orchestrator-tokens.sh \
      --artifact "$artifact_path" \
      --since    "$review_started_at" \
      2>>"$trace_log_path" || printf 'orchestrator_tally_failed\n' >> "$trace_log_path"
@@ -1031,7 +1031,7 @@ each step's outcome is logged; failures do not abort the block.
 3. **Schema-validate** the mutated artifact:
 
    ```bash
-   if ! ~/.claude/commands/_shared/tools/artifact-validate.sh --path "$artifact_path" 2>>"$trace_log_path"; then
+   if ! artifact-validate.sh --path "$artifact_path" 2>>"$trace_log_path"; then
        printf 'schema_invalid_post_9d\n' >> "$trace_log_path"
        # Dump for debugging but keep going — artifact is atomic so it
        # can't be half-written; the validator is the canary.
@@ -1041,7 +1041,7 @@ each step's outcome is logged; failures do not abort the block.
 4. **Re-render `artifact.md`:**
 
    ```bash
-   ~/.claude/commands/_shared/tools/artifact-render.py \
+   artifact-render.py \
      --input "$artifact_path" --output "$review_dir/artifact.md" \
      2>>"$trace_log_path" || printf 'render_failed\n' >> "$trace_log_path"
    ```
@@ -1050,22 +1050,22 @@ each step's outcome is logged; failures do not abort the block.
 
    ```bash
    phase_9_elapsed=$(( $(date +%s) - phase_9_start_epoch ))
-   by_disp=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+   by_disp=$(artifact-read.sh \
      --path "$artifact_path" --summary | jq -c '.counts_by_disposition')
-   by_state=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+   by_state=$(artifact-read.sh \
      --path "$artifact_path" --summary | jq -c '.counts_by_state')
 
    verified_count=$(echo "$group_outcomes" | jq '[.[] | select(.outcome == "verified")] | length')
    partial_count=$(echo "$group_outcomes" | jq '[.[] | select(.outcome == "partial")] | length')
 
-   ~/.claude/commands/_shared/tools/log-phase.sh \
+   log-phase.sh \
      --review-dir "$review_dir" --phase 9 --name post-fix-review \
      --elapsed "$phase_9_elapsed" \
      --summary "$verified_count verified, $partial_count partial, $reverted_count regression (committed=$commit_sha)"
 
    reconciled_flag=$(echo "$fix_groups" | jq -r '.[0].id == "FG-RECON"')
 
-   ~/.claude/commands/_shared/tools/log-phase.sh \
+   log-phase.sh \
      --review-dir "$review_dir" --phase 9 --record "$(jq -nc \
        --arg run_id "$run_id" --arg commit_sha "$commit_sha" \
        --arg reconciled "$reconciled_flag" \
@@ -1112,14 +1112,14 @@ each step's outcome is logged; failures do not abort the block.
        if [[ -n "$comment_id" ]]; then
            publish_args+=(--comment-id "$comment_id")
        fi
-       if ! stdout=$(~/.claude/commands/_shared/tools/artifact-publish.sh "${publish_args[@]}" 2>>"$trace_log_path"); then
+       if ! stdout=$(artifact-publish.sh "${publish_args[@]}" 2>>"$trace_log_path"); then
            publish_failed=true
            printf 'publish_failed\n' >> "$trace_log_path"
        else
            # Persist any newly-minted comment_id (first post on a local artifact)
            new_id=$(echo "$stdout" | jq -r '.comment_id // empty' 2>/dev/null || true)
            if [[ -n "$new_id" && -z "$comment_id" ]]; then
-               ~/.claude/commands/_shared/tools/artifact-patch.py \
+               artifact-patch.py \
                  --path "$artifact_path" --set "comment_id=$new_id"
                comment_id="$new_id"
            fi
@@ -1246,7 +1246,7 @@ an extra `reconcile_fallback=true` flag that step 8 reads.
              )
          ')
          echo "$apply_tuples" | \
-             ~/.claude/commands/_shared/tools/artifact-patch.py \
+             artifact-patch.py \
                --path "$artifact_path" --apply-fix-outcomes @-
      fi
      ```

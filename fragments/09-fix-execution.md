@@ -85,7 +85,7 @@ they stashed at 7.5.
 Skipped when `eligible_count == 0` (8.2 already handled the short-circuit).
 
 ```bash
-fix_groups=$(~/.claude/commands/_shared/tools/group-fixes.py \
+fix_groups=$(group-fixes.py \
     --artifact "$artifact_path" \
     --eligible-finding-ids "$eligible_finding_ids")
 ```
@@ -113,7 +113,7 @@ start_tuples=$(jq -nc --arg run_id "$run_id" --arg ids "$eligible_finding_ids" '
     ($ids | split(",")) | map({id: ., run_id: $run_id})
 ')
 echo "$start_tuples" | \
-    ~/.claude/commands/_shared/tools/artifact-patch.py \
+    artifact-patch.py \
       --path "$artifact_path" --apply-fix-start @-
 ```
 
@@ -278,7 +278,7 @@ After every agent returns (before branching on its content):
 1. **Log tokens first** (§24.4):
 
    ```bash
-   ~/.claude/commands/_shared/tools/log-tokens.sh \
+   log-tokens.sh \
      --review-dir "$review_dir" \
      --phase phase_8 --agent-role "fix_group_$group.id" \
      --agent-id <id-from-Agent-result> \
@@ -331,12 +331,12 @@ After every agent returns (before branching on its content):
 ```bash
 phase_8_elapsed=$(( $(date +%s) - phase_8_start_epoch ))
 
-~/.claude/commands/_shared/tools/log-phase.sh \
+log-phase.sh \
   --review-dir "$review_dir" --phase 8 --name fix-execution \
   --elapsed "$phase_8_elapsed" \
   --summary "dispatched $group_count fix groups over $eligible_count findings (run_id=$run_id)"
 
-~/.claude/commands/_shared/tools/log-phase.sh \
+log-phase.sh \
   --review-dir "$review_dir" --phase 8 --record "$(jq -nc \
     --arg run_id "$run_id" \
     --argjson elapsed "$phase_8_elapsed" \

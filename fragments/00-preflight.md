@@ -182,12 +182,12 @@ Delegate to the canonical helper (DESIGN §9.2 — single source of truth
 shared with Phase 7's fix-loader so the two paths cannot drift):
 
 ```bash
-repo_slug=$(~/.claude/commands/_shared/tools/repo-slug.sh --repo-root "$repo_root")
+repo_slug=$(repo-slug.sh --repo-root "$repo_root")
 ```
 
 The helper runs `git remote get-url origin`, strips scheme + `git@` +
 trailing `.git`, normalizes separators, and lowercases. No remote → falls
-back to `local-<sanitized-path>`. See `tools/repo-slug.sh` for the exact
+back to `local-<sanitized-path>`. See `bin/repo-slug.sh` for the exact
 algorithm and test matrix.
 
 Capture as `repo_slug`.
@@ -274,7 +274,7 @@ Run:
 
 ```bash
 printf '%s\n' $reviewed_files_all | \
-  ~/.claude/commands/_shared/tools/claude-md-paths.sh \
+  claude-md-paths.sh \
     --repo-root "$repo_root" --files @-
 ```
 
@@ -368,7 +368,7 @@ parse `user_facing` + `surfaces`. Then log tokens (every required arg is
 explicit here to match the helper's argparse — don't infer):
 
 ```bash
-~/.claude/commands/_shared/tools/log-tokens.sh \
+log-tokens.sh \
   --review-dir "$review_dir" \
   --phase phase_0 \
   --agent-role user_facing_classifier \
@@ -547,7 +547,7 @@ jq -n \
       pr_size_buckets: {files_changed: $files_changed, lines_changed: $lines_changed}
     }
   }' \
-  | ~/.claude/commands/_shared/tools/artifact-patch.py --init - --path "$artifact_path"
+  | artifact-patch.py --init - --path "$artifact_path"
 ```
 
 **Flush `preflight_warnings` to `trace.md`** (only after `--init`
@@ -586,12 +586,12 @@ mv "$tmp" "$reviews_root/$repo_slug/$head_branch/latest.txt"
 
 ```bash
 elapsed=$(( $(date +%s) - phase_0_start_epoch ))
-~/.claude/commands/_shared/tools/log-phase.sh \
+log-phase.sh \
   --review-dir "$review_dir" --phase 0 --name preflight \
   --elapsed "$elapsed" \
   --summary "mode=$mode; trivial_mode=$trivial_mode; user_facing=$user_facing; files=$num_files; lines=$lines_changed; claude_md_paths=$(printf '%s\n' $claude_md_paths | wc -l | tr -d ' ')"
 
-~/.claude/commands/_shared/tools/log-phase.sh \
+log-phase.sh \
   --review-dir "$review_dir" --phase 0 --record "$(jq -nc \
     --arg name preflight \
     --argjson elapsed_sec "$elapsed" \

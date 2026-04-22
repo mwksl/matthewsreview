@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-read.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-patch.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-validate.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-render.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-publish.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/repo-slug.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/log-tokens.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/tally-subagent-tokens.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/orchestrator-tokens.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(cat:*), Bash(printf:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(tr:*), Bash(awk:*), Bash(mktemp:*), Agent, Read, AskUserQuestion
+allowed-tools: Bash(artifact-read.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(repo-slug.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(include:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(cat:*), Bash(printf:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(tr:*), Bash(awk:*), Bash(mktemp:*), Agent, Read, AskUserQuestion
 argument-hint: "[threshold]"
 description: Walk interactively through findings /adams-review-fix would skip. Per-finding briefing + options + recommendation, then batch re-render/re-publish and post a decisions-log PR comment.
 disable-model-invocation: false
@@ -74,7 +74,7 @@ your working context.
 reviews_root="${ADAMS_REVIEW_REVIEWS_ROOT:-$HOME/.adams-reviews}"
 head_branch=$(git rev-parse --abbrev-ref HEAD)
 repo_root=$(git rev-parse --show-toplevel)
-repo_slug=$(~/.claude/commands/_shared/tools/repo-slug.sh --repo-root "$repo_root")
+repo_slug=$(repo-slug.sh --repo-root "$repo_root")
 latest_path="$reviews_root/$repo_slug/$head_branch/latest.txt"
 ```
 
@@ -96,7 +96,7 @@ trace_log_path="$review_dir/trace.md"
 Capture paths. Schema-validate:
 
 ```bash
-~/.claude/commands/_shared/tools/artifact-validate.sh --path "$artifact_path"
+artifact-validate.sh --path "$artifact_path"
 ```
 
 On non-zero: surface the validator stderr and abort.
@@ -399,7 +399,7 @@ For each `$finding_id`:
 #### 5.1. Fetch the finding JSON
 
 ```bash
-finding_json=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+finding_json=$(artifact-read.sh \
     --path "$artifact_path" \
     --filter ".findings[] | select(.id == \"$finding_id\")")
 ```
@@ -504,7 +504,7 @@ fix-group logging) — token tracking is observability, not
 correctness:
 
 ```bash
-~/.claude/commands/_shared/tools/log-tokens.sh \
+log-tokens.sh \
     --review-dir "$review_dir" \
     --phase walkthrough --agent-role briefing \
     --agent-id <id-from-Agent-result> \
@@ -712,19 +712,19 @@ already captured every main-session turn. Both helpers are pure
 readbacks:
 
 ```bash
-~/.claude/commands/_shared/tools/tally-subagent-tokens.sh \
+tally-subagent-tokens.sh \
     --tokens-log "$review_dir/tokens.jsonl" \
     --artifact   "$artifact_path" \
     2>>"$trace_log_path" || printf 'walkthrough_tally_failed\n' >> "$trace_log_path"
 
 review_started_at=$(jq -r '.review_started_at // empty' "$artifact_path")
 
-~/.claude/commands/_shared/tools/orchestrator-tokens.sh \
+orchestrator-tokens.sh \
     --artifact "$artifact_path" \
     --since    "$review_started_at" \
     2>>"$trace_log_path" || printf 'walkthrough_orchestrator_tally_failed\n' >> "$trace_log_path"
 
-~/.claude/commands/_shared/tools/artifact-render.py \
+artifact-render.py \
     --input "$artifact_path" \
     --output "$review_dir/artifact.md"
 ```
@@ -764,7 +764,7 @@ publish_args=(
 )
 [[ -n "$comment_id" ]] && publish_args+=(--comment-id "$comment_id")
 
-~/.claude/commands/_shared/tools/artifact-publish.sh "${publish_args[@]}"
+artifact-publish.sh "${publish_args[@]}"
 ```
 
 If `mode == "local"`: call with `--mode local --review-id "$review_id"
@@ -841,7 +841,7 @@ walked finding's values (wrong file in the draft) or are unset when
 the walk was cancelled (undefined-variable expansion):
 
 ```bash
-finding_json=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+finding_json=$(artifact-read.sh \
     --path "$artifact_path" \
     --filter ".findings[] | select(.id == \"$finding_id\")")
 f_file=$(jq -r '.file' <<<"$finding_json")
@@ -920,7 +920,7 @@ via one `AskUserQuestion` free-form follow-up).
 Log the drafting agent's tokens per §5.2 convention:
 
 ```bash
-~/.claude/commands/_shared/tools/log-tokens.sh \
+log-tokens.sh \
     --review-dir "$review_dir" \
     --phase walkthrough --agent-role pre_existing_issue_draft \
     --agent-id <id-from-Agent-result> \
@@ -1269,9 +1269,9 @@ pattern as `/adams-review-promote` step 10).
 ## Appendix — shared promote-core fragment
 
 The body below is the verbatim content of
-`commands/_shared/promote-core.md`, included once via the Claude Code
+`fragments/promote-core.md`, included once via the Claude Code
 preprocessor. Step 5.5 above references this content — treat it as
 the per-iteration playbook for a single promote decision, not as
 a single-shot action.
 
-!`cat ~/.claude/commands/_shared/promote-core.md`
+!`include promote-core.md`

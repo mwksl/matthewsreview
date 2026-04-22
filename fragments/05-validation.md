@@ -22,7 +22,7 @@ gate-fail `below_gate` and pre-existing `pre_existing_report` findings
 are excluded by the positive filter):
 
 ```bash
-~/.claude/commands/_shared/tools/artifact-read.sh \
+artifact-read.sh \
   --path "$artifact_path" \
   --filter '[.findings[] | select(.disposition == "pending_validation") | {id, impact_type, validation_lane}]'
 ```
@@ -193,7 +193,7 @@ Prompt essence (per §19.6):
 For each Wave 1 result, first log tokens:
 
 ```bash
-~/.claude/commands/_shared/tools/log-tokens.sh \
+log-tokens.sh \
   --review-dir "$review_dir" --phase <phase_4a|phase_4b> \
   --agent-role validator --finding-id "$id" \
   --agent-id <id> --model <opus|sonnet> \
@@ -282,7 +282,7 @@ mkdir -p "$scratch"
 # $scratch/phase4-wave1-decisions.json by whatever means is natural.
 # The helper only cares about the file path + tuple shape above.
 
-out=$(~/.claude/commands/_shared/tools/artifact-patch.py \
+out=$(artifact-patch.py \
         --path "$artifact_path" \
         --apply-decisions "@$scratch/phase4-wave1-decisions.json")
 echo "$out"  # e.g. "applied 18 decisions (confirmed_auto=4, confirmed_manual=1, confirmed_report=0, uncertain=3, disproven=10)"
@@ -379,7 +379,7 @@ If the resulting list is non-empty AND we haven't already done Wave 2:
         related_parent_finding_id: $parent
       }')
 
-   ~/.claude/commands/_shared/tools/artifact-patch.py \
+   artifact-patch.py \
      --path "$artifact_path" --add-finding "$wave2_finding"
    ```
 
@@ -403,7 +403,7 @@ If the list is empty, proceed to step 4.6.
 After Phase 4 completes, sweep the findings list one more time:
 
 ```bash
-~/.claude/commands/_shared/tools/artifact-read.sh \
+artifact-read.sh \
   --path "$artifact_path" \
   --filter '[.findings[] | select(.origin == "pre_existing" and .origin_confidence == "high" and .disposition != "pre_existing_report") | .id]'
 ```
@@ -413,7 +413,7 @@ finding's score into the confirmed band — the pre-existing rule trumps.
 For each returned id:
 
 ```bash
-~/.claude/commands/_shared/tools/artifact-patch.py \
+artifact-patch.py \
   --path "$artifact_path" --finding-id "$id" \
   --set disposition=pre_existing_report \
   --set is_actionable=false \
@@ -440,19 +440,19 @@ rm -rf -- "/tmp/adams-review-$review_id"
 ```bash
 phase_4_elapsed=$(( $(date +%s) - phase_4_start_epoch ))
 
-by_disp=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+by_disp=$(artifact-read.sh \
   --path "$artifact_path" --summary | jq -c '.counts_by_disposition')
 
-~/.claude/commands/_shared/tools/log-phase.sh \
+log-phase.sh \
   --review-dir "$review_dir" --phase 4 --name validation \
   --elapsed "$phase_4_elapsed" \
   --summary "$(jq -nc --argjson by_disp "$by_disp" '$by_disp | to_entries | map("\(.key)=\(.value)") | join(", ")')"
 
-~/.claude/commands/_shared/tools/log-phase.sh \
+log-phase.sh \
   --review-dir "$review_dir" --phase 4 --record "$(jq -nc \
     --argjson elapsed "$phase_4_elapsed" \
     --argjson by_disp "$by_disp" \
-    --argjson total_open "$(~/.claude/commands/_shared/tools/artifact-read.sh --path "$artifact_path" --filter '[.findings[] | select(.current_state == "open")] | length')" \
+    --argjson total_open "$(artifact-read.sh --path "$artifact_path" --filter '[.findings[] | select(.current_state == "open")] | length')" \
     '{name:"validation", elapsed_sec:$elapsed, counts_by_state:{open:$total_open}, counts_by_disposition:$by_disp, delta:"<summarize e.g. +9 confirmed_auto, -5 disproven>"}')"
 ```
 

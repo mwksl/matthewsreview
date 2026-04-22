@@ -41,7 +41,7 @@ top-level command.
 ### Step 3. Read the target finding
 
 ```bash
-finding_json=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+finding_json=$(artifact-read.sh \
     --path "$artifact_path" \
     --filter ".findings[] | select(.id == \"$finding_id\")")
 ```
@@ -50,7 +50,7 @@ If empty, error-as-prompt with the list of existing ids. Use
 `artifact-read.sh --filter` to pull the id list for the suggestion:
 
 ```bash
-existing_ids=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+existing_ids=$(artifact-read.sh \
     --path "$artifact_path" \
     --filter '[.findings[].id] | join(", ")')
 ```
@@ -193,7 +193,7 @@ One `artifact-patch.py` call mutates all four fields in a single atomic
 write. The helper enforces `is_actionable` coupling automatically:
 
 ```bash
-~/.claude/commands/_shared/tools/artifact-patch.py \
+artifact-patch.py \
     --path "$artifact_path" \
     --finding-id "$finding_id" \
     --set disposition=confirmed_auto \

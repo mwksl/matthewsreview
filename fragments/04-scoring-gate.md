@@ -14,7 +14,7 @@ Before scoring runs, sweep the findings list for pre-existing candidates
 that should bypass the Phase-3 gate entirely:
 
 ```bash
-~/.claude/commands/_shared/tools/artifact-read.sh \
+artifact-read.sh \
   --path "$artifact_path" \
   --filter '[.findings[] | select(.origin == "pre_existing" and .origin_confidence == "high") | .id]'
 ```
@@ -22,7 +22,7 @@ that should bypass the Phase-3 gate entirely:
 For each returned id, apply:
 
 ```bash
-~/.claude/commands/_shared/tools/artifact-patch.py \
+artifact-patch.py \
   --path "$artifact_path" --finding-id "$id" \
   --set disposition=pre_existing_report \
   --set is_actionable=false \
@@ -39,7 +39,7 @@ Get every finding that still needs a `score_phase3` (i.e., not pre-existing-
 overridden):
 
 ```bash
-~/.claude/commands/_shared/tools/artifact-read.sh \
+artifact-read.sh \
   --path "$artifact_path" \
   --filter '[.findings[] | select(.disposition != "pre_existing_report") | .id]'
 ```
@@ -97,7 +97,7 @@ For each sub-agent result:
 1. **Log tokens** first (§24.4 invariant):
 
     ```bash
-    ~/.claude/commands/_shared/tools/log-tokens.sh \
+    log-tokens.sh \
       --review-dir "$review_dir" --phase phase_3 \
       --agent-role scoring --finding-id "$id" \
       --agent-id <id-from-result> --model sonnet \
@@ -112,7 +112,7 @@ For each sub-agent result:
    `score_history`:
 
     ```bash
-    ~/.claude/commands/_shared/tools/artifact-patch.py \
+    artifact-patch.py \
       --path "$artifact_path" --finding-id "$id" \
       --set "score_phase3=$score" \
       --set "reason=$score_rationale"
@@ -127,7 +127,7 @@ For each sub-agent result:
 For every finding still at the Phase-1 parking disposition:
 
 ```bash
-~/.claude/commands/_shared/tools/artifact-read.sh \
+artifact-read.sh \
   --path "$artifact_path" \
   --filter '[.findings[]
     | select(.disposition == "pending_validation")
@@ -144,7 +144,7 @@ overwrite with the real verdict. Erase the Phase-3 rationale from
 `reason` so it doesn't bleed into the Phase-4 record:
 
 ```bash
-~/.claude/commands/_shared/tools/artifact-patch.py \
+artifact-patch.py \
   --path "$artifact_path" --finding-id "$id" \
   --set reason=null
 ```
@@ -161,7 +161,7 @@ confidence findings are already at `pre_existing_report` from step
 If `advances_to_phase_4 == false`: lock in the gate-out state:
 
 ```bash
-~/.claude/commands/_shared/tools/artifact-patch.py \
+artifact-patch.py \
   --path "$artifact_path" --finding-id "$id" \
   --set disposition=below_gate \
   --set is_actionable=false \
@@ -173,14 +173,14 @@ If `advances_to_phase_4 == false`: lock in the gate-out state:
 ```bash
 phase_3_elapsed=$(( $(date +%s) - phase_3_start_epoch ))
 
-gate_pass=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+gate_pass=$(artifact-read.sh \
   --path "$artifact_path" \
   --filter '[.findings[] | select(.disposition == "pending_validation")] | length')
-gate_fail=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+gate_fail=$(artifact-read.sh \
   --path "$artifact_path" \
   --filter '[.findings[] | select(.disposition == "below_gate")] | length')
 
-~/.claude/commands/_shared/tools/log-phase.sh \
+log-phase.sh \
   --review-dir "$review_dir" --phase 3 --name scoring-gate \
   --elapsed "$phase_3_elapsed" \
   --summary "advanced_to_phase_4=$gate_pass; below_gate=$gate_fail"
@@ -189,11 +189,11 @@ gate_fail=$(~/.claude/commands/_shared/tools/artifact-read.sh \
 # with the Phase-3 table. (Phase 1 + Phase 2 parked every finding at
 # pending_validation; this phase is where below_gate / pre_existing_report
 # first appear on gate-fail / override findings respectively.)
-by_disp=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+by_disp=$(artifact-read.sh \
   --path "$artifact_path" --summary \
   | jq -c '.counts_by_disposition')
 
-~/.claude/commands/_shared/tools/log-phase.sh \
+log-phase.sh \
   --review-dir "$review_dir" --phase 3 --record "$(jq -nc \
     --argjson elapsed "$phase_3_elapsed" \
     --argjson pass "$gate_pass" \

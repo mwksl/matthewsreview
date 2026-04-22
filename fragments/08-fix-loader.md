@@ -31,7 +31,7 @@ Derive `repo_slug` via the shared helper — identical call to Phase 0
 step 0.3 so the two phases resolve the same directory (DESIGN §9.2):
 
 ```bash
-repo_slug=$(~/.claude/commands/_shared/tools/repo-slug.sh --repo-root "$repo_root")
+repo_slug=$(repo-slug.sh --repo-root "$repo_root")
 latest_path="$reviews_root/$repo_slug/$head_branch/latest.txt"
 ```
 
@@ -55,7 +55,7 @@ tokens_log_path="$review_dir/tokens.jsonl"
 Capture all paths. Append a Phase 7 header to `trace.md`:
 
 ```bash
-~/.claude/commands/_shared/tools/log-phase.sh \
+log-phase.sh \
   --review-dir "$review_dir" --phase 7 --name fix-loader \
   --summary "loading review $review_id; threshold=$threshold granular_commits=$granular_commits"
 ```
@@ -63,7 +63,7 @@ Capture all paths. Append a Phase 7 header to `trace.md`:
 ### 7.3. Schema-validate the artifact
 
 ```bash
-~/.claude/commands/_shared/tools/artifact-validate.sh --path "$artifact_path"
+artifact-validate.sh --path "$artifact_path"
 ```
 
 On non-zero: log the validator stderr to `trace.md`, dump a copy to
@@ -74,7 +74,7 @@ the invariant; do NOT try to "fix" by patching — surface to the user.
 ### 7.4. Leftover-`attempted` hard abort (§4 Phase 7 step 4)
 
 ```bash
-leftover_ids=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+leftover_ids=$(artifact-read.sh \
     --path "$artifact_path" \
     --filter '[.findings[] | select(.current_state == "attempted") | .id] | join(", ")')
 ```
@@ -156,12 +156,12 @@ if [[ "$head_sha" == "$latest_known_sha" ]]; then
     staleness_verdict="safe"
 else
     # HEAD moved — intersect with reviewed_files_all.
-    reviewed_files=$(~/.claude/commands/_shared/tools/artifact-read.sh \
+    reviewed_files=$(artifact-read.sh \
         --path "$artifact_path" \
         --filter '.reviewed_files_all | join("\n")')
     set +e
     staleness_stdout=$(printf '%s\n' "$reviewed_files" | \
-        ~/.claude/commands/_shared/tools/staleness.sh \
+        staleness.sh \
           --reviewed-sha "$latest_known_sha" --reviewed-files @- 2>&1)
     staleness_rc=$?
     set -e

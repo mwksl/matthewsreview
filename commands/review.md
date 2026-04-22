@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-read.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-patch.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-validate.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-render.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-publish.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/claude-md-paths.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/staleness.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/external-scrape.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/comment-freshness.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/prior-fix-diff.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/log-phase.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/log-tokens.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/tally-subagent-tokens.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/orchestrator-tokens.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/repo-slug.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(coderabbit:*), Bash(node:*), Bash(find:*), Bash(uv:*), AskUserQuestion, Agent, Read, BashOutput, KillShell
+allowed-tools: Bash(artifact-read.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(claude-md-paths.sh:*), Bash(staleness.sh:*), Bash(external-scrape.sh:*), Bash(comment-freshness.sh:*), Bash(prior-fix-diff.sh:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(include:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(coderabbit:*), Bash(node:*), Bash(find:*), AskUserQuestion, Agent, Read, BashOutput, KillShell
 argument-hint: "[--ensemble] [--full]"
 description: Deep code review producing artifact.json, artifact.md, and (PR mode) a review comment on the PR.
 disable-model-invocation: false
@@ -20,7 +20,7 @@ Flags (optional):
 ## Execution overview — read this first
 
 This command orchestrates DESIGN §4 Phases 0–6 in order. Each phase is
-defined in a fragment under `_shared/NN-<name>.md` — the bodies are
+defined in a fragment under `fragments/NN-<name>.md` — the bodies are
 inlined via `!`cat`` preprocessor at the bottom of this file.
 
 **Before you start, build a TaskList that mirrors the phases below**
@@ -76,7 +76,7 @@ content):
    `usage` field when available; otherwise parse
    `<usage>total_tokens: N</usage>` from the sub-agent's output text.
    On parse failure, log with `--tokens null` per §11.
-2. Call `~/.claude/commands/_shared/tools/log-tokens.sh` with the
+2. Call `log-tokens.sh` with the
    phase, agent_role, agent_id, model, finding_id (when applicable),
    and the tokens value. This invariant (§24.4) ensures every agent's
    cost is accounted even when its output fails to parse.
@@ -134,35 +134,35 @@ Capture both in your working context before executing Phase 0.
 
 ---
 
-!`cat ~/.claude/commands/_shared/00-preflight.md`
+!`include 00-preflight.md`
 
 ---
 
-!`cat ~/.claude/commands/_shared/01-detection.md`
+!`include 01-detection.md`
 
 ---
 
-!`cat ~/.claude/commands/_shared/02-ensemble-adapter.md`
+!`include 02-ensemble-adapter.md`
 
 ---
 
-!`cat ~/.claude/commands/_shared/03-dedup.md`
+!`include 03-dedup.md`
 
 ---
 
-!`cat ~/.claude/commands/_shared/04-scoring-gate.md`
+!`include 04-scoring-gate.md`
 
 ---
 
-!`cat ~/.claude/commands/_shared/05-validation.md`
+!`include 05-validation.md`
 
 ---
 
-!`cat ~/.claude/commands/_shared/06-cross-cutting.md`
+!`include 06-cross-cutting.md`
 
 ---
 
-!`cat ~/.claude/commands/_shared/07-finalize.md`
+!`include 07-finalize.md`
 
 ---
 
