@@ -89,6 +89,19 @@ issue-filer agents dispatched in §6.5 (and the orchestrator turns that
 dispatch them) land in the logs/transcript after the tally, so their
 cost surfaces on the next lifecycle command's tally.
 
+**Orchestrator-tokens over-count modes (v1 accepted).** The time-
+window filter (`timestamp >= review_started_at`) counts every
+assistant turn in any transcript under `~/.claude/projects/<cwd-slug>/`,
+regardless of whether it belongs to this review. Clean cases: review
+→ fix back-to-back; review → new review on the updated codebase
+(each new review's `review_started_at` excludes the prior arc).
+Over-count cases: any unrelated session or unrelated same-session
+chat in the same cwd between `review_started_at` and the tally's
+invocation. Sub-agent tokens are unaffected (their log is per-review-id,
+not cwd-wide). See `tools/orchestrator-tokens.sh` header for the full
+caveat list; `plans/orchestrator-tokens.md` §"Known limitations" for
+why this was accepted over a `SessionStart`-hook-based fix.
+
 ## Finding state model
 
 Three states, one disposition enum. States transition; dispositions classify.

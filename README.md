@@ -125,6 +125,23 @@ mv ~/.claude/reviews ~/.adams-reviews
 export ADAMS_REVIEW_REVIEWS_ROOT=~/.claude/reviews
 ```
 
+### Token counts: what they measure
+
+The rendered report surfaces two numbers:
+
+- **Sub-agent tokens** — rolled up from the per-review `tokens.jsonl` log. Counts every dispatched sub-agent (lenses, validators, fix agents, post-fix reviewer, etc.) for this specific review. Precise.
+- **Orchestrator tokens** — rolled up from the Claude Code session transcripts under `~/.claude/projects/<cwd-slug>/`, filtered to assistant turns with `timestamp >= review_started_at`. Captures the main-session spend that `subagent_tokens` deliberately excludes.
+
+The two are complementary, not overlapping. Together they're a good estimate of total cost.
+
+**Orchestrator tokens can over-count.** The filter is time-window only, so any Claude Code turn in the same working directory between `review_started_at` and the last tally gets counted — even if it's unrelated work. In practice that means:
+
+- **Clean:** review → fix back-to-back, or review → new review on updated codebase (each review's `review_started_at` excludes the prior one's turns).
+- **Over-counts:** review → unrelated work in the same cwd → fix (the unrelated turns land in the fix run's re-tally).
+- **Mitigation:** run the lifecycle commands close together, or do unrelated work in a different worktree (different cwd → different transcript directory → not scanned).
+
+Sub-agent tokens don't have this problem — their log is per-review. If you need a precise total, trust sub-agent tokens and treat orchestrator tokens as a rough ceiling. See `commands/_shared/tools/orchestrator-tokens.sh` header for the full list of caveats.
+
 ### Why `uv` instead of plain pip
 
 PEP 668 (Python 3.12+ with Homebrew) marks system and user site-packages as externally managed and refuses direct `pip install`. The original plan assumed plain pip; `uv`'s inline-script dep spec is the cleanest workaround: each Python helper is self-contained, runs without activation ceremony, and its dep list lives next to the code that imports it. Tradeoff: requires `uv` on the machine running the scripts.
