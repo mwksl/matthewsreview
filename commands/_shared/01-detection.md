@@ -18,7 +18,7 @@ Based on the Phase 0 variables:
 
 | Lens | Model | Runs when |
 |---|---|---|
-| L1 — diff-local scan | `haiku` | always |
+| L1 — diff-local scan | `sonnet` | always |
 | L2 — structural / blast-radius | `opus` | `trivial_mode != true` |
 | L3 — CLAUDE.md compliance | `sonnet` | always |
 | L4 — comment compliance | `sonnet` | always |
@@ -224,9 +224,9 @@ the two `elapsed_sec` values naturally overlap in `phases.jsonl`.
 
 ### 1.3. Dispatch the lenses (one turn, one Agent call per applicable lens)
 
-#### L1 — diff-local scan (Haiku)
+#### L1 — diff-local scan (Sonnet)
 
-Launch one `Agent` tool-use with `model: haiku`, `subagent_type: general-purpose`.
+Launch one `Agent` tool-use with `model: sonnet`, `subagent_type: general-purpose`.
 Prompt essence:
 
 > Read ONLY the diff between `$comparison_ref` and HEAD. Do not open other
