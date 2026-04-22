@@ -49,14 +49,14 @@ Steps 2–4 can land days or weeks after step 1 — the review artifact persists
 ### macOS / Linux
 
 1. Install deps: `brew install uv jq gh bash git` (macOS) or the distro equivalent. Bash 4+ is required — macOS's default `/bin/bash` is 3.2.
-2. In a Claude Code session: `/plugin marketplace add adamjgmiller/adams-review`
+2. In a Claude Code session: `/plugin marketplace add adamjgmiller/adamsreview`
 3. In the same session: `/plugin install adamsreview@adamsreview`
 
 ### Windows (native)
 
 1. Install [Git for Windows](https://git-scm.com/downloads/win) — provides Git Bash (bash 5+) and `git`, which Claude Code uses internally. Claude Code auto-routes `#!/usr/bin/env bash` helpers through Git Bash; set `CLAUDE_CODE_GIT_BASH_PATH` if Git Bash lives in a non-default location (see *Troubleshooting*).
 2. Install [uv](https://docs.astral.sh/uv/), [jq](https://jqlang.github.io/jq/download/), and the [GitHub CLI](https://cli.github.com/).
-3. In a Claude Code session: `/plugin marketplace add adamjgmiller/adams-review` and `/plugin install adamsreview@adamsreview`.
+3. In a Claude Code session: `/plugin marketplace add adamjgmiller/adamsreview` and `/plugin install adamsreview@adamsreview`.
 
 ### Commands (post-install)
 

@@ -252,7 +252,7 @@ adamsreview/
     └── fixtures/
 ```
 
-Plugin users install via `/plugin marketplace add adamjgmiller/adams-review` + `/plugin install adamsreview@adamsreview` in Claude Code — no symlinks, no install script. Plugin authors iterate with `scripts/dev-run.sh` (loads the working tree as a plugin via `claude --plugin-dir "$(pwd)"`). Adding a new top-level command means dropping `commands/<stem>.md` at bare-stem path (no `adamsreview-` prefix — namespacing lives in the plugin name); post-install invocation is automatically `/adamsreview:<stem>`. See README §Installation for the end-user flow.
+Plugin users install via `/plugin marketplace add adamjgmiller/adamsreview` + `/plugin install adamsreview@adamsreview` in Claude Code — no symlinks, no install script. Plugin authors iterate with `scripts/dev-run.sh` (loads the working tree as a plugin via `claude --plugin-dir "$(pwd)"`). Adding a new top-level command means dropping `commands/<stem>.md` at bare-stem path (no `adamsreview-` prefix — namespacing lives in the plugin name); post-install invocation is automatically `/adamsreview:<stem>`. See README §Installation for the end-user flow.
 
 ## How to test
 
