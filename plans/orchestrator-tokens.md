@@ -1,7 +1,7 @@
 # Orchestrator tokens — cumulative per-session token tally alongside `subagent_tokens`
 
 **Status:** shipped 2026-04-21 on branch `token-count` (commits `5ebc40f` → `commit-5`). Companion to `plans/cumulative-token-tally.md`, which closed the sub-agent side of this gap.
-**Pattern:** one new helper (`tools/orchestrator-tokens.sh`), schema addition (optional top-level `orchestrator_tokens`), five call sites at every lifecycle terminus, renderer + chat-summary surfacing, six smoke assertions.
+**Pattern:** one new helper (`tools/orchestrator-tokens.sh`), schema addition (optional top-level `orchestrator_tokens`), five call sites at every lifecycle terminus, renderer + chat-summary surfacing, seven smoke assertions.
 
 ---
 
@@ -29,7 +29,7 @@ After `/adams-review` finalize and after every `/adams-review-fix` / `-add` / `-
 4. Wired into: `07-finalize.md` §6.2b (right after the sub-agent tally), `10-post-fix-and-commit.md` §9e step 2 (the "same as committed branch" cross-reference covers both branches), `adams-review-add.md` step 8, `adams-review-walkthrough.md` §6.1. Frontmatter `allowed-tools` grants on all four top-level command files.
 5. `artifact-render.py` surfaces the number in `artifact.md` directly under `**Sub-agent tokens:**`. Chat summary lines in add step 10 and walkthrough §9 include an orchestrator line.
 6. `CLAUDE.md` helper index + pipeline shape + the clarification on what `subagent_tokens` covers vs. doesn't.
-7. `test/smoke.sh` gains six `OT-*` assertions. Final count: 202 assertions.
+7. `test/smoke.sh` gains seven `OT-*` assertions. Final count: 203 assertions.
 
 ---
 
@@ -99,7 +99,7 @@ Four counters preserved separately because cache-read $/token is roughly an orde
 | 2 | `/adams-review` finalize wiring | `_shared/07-finalize.md` §6.2b, `adams-review.md` frontmatter |
 | 3 | Lifecycle commands wiring | `_shared/10-post-fix-and-commit.md` §9e, `adams-review-add.md` step 8, `adams-review-walkthrough.md` §6.1, + fix/add/walkthrough frontmatter |
 | 4 | Renderer + chat-summary surfacing | `tools/artifact-render.py`, `adams-review-add.md` step 10, `adams-review-walkthrough.md` §9 |
-| 5 | CLAUDE.md + smoke + this plan | `CLAUDE.md`, `test/smoke.sh` (+6 OT-* assertions), `plans/orchestrator-tokens.md` (NEW) |
+| 5 | CLAUDE.md + smoke + this plan | `CLAUDE.md`, `test/smoke.sh` (+7 OT-* assertions), `plans/orchestrator-tokens.md` (NEW) |
 
 ---
 
@@ -111,6 +111,7 @@ Four counters preserved separately because cache-read $/token is roughly an orde
 - **OT-4** — cross-session merge: two transcripts in same dir, distinct sessionIds. Verifies `sessions[]` length 2, sorted by `first_seen` (earlier session first).
 - **OT-5** — time-window filter: future-`--since` zeros everything; mid-window `--since` keeps only post-since turns.
 - **OT-6** — non-assistant line types (`user`, `system`, `worktree-state`, `attachment`) are ignored by the filter.
+- **OT-7** — second-precision `--since` (the format Phase 0 writes via `date -u +%Y-%m-%dT%H:%M:%SZ`) correctly includes same-second turns whose timestamps carry milliseconds. Guards against the lexical `.500Z < Z` pitfall by padding bare-seconds input to `.000Z` inside the helper.
 
 ---
 

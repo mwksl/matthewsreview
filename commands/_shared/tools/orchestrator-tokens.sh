@@ -88,6 +88,20 @@ if [[ ! -f "$ARTIFACT" ]]; then
     exit 1
 fi
 
+# Normalize $SINCE: Phase 0 writes review_started_at at second
+# precision via `date -u +%Y-%m-%dT%H:%M:%SZ`, but Claude Code
+# transcript timestamps carry milliseconds (e.g.
+# 2026-04-21T23:37:36.102Z). The lexical `>=` comparison used below
+# treats `.` (0x2E) as less than `Z` (0x5A), so without normalization
+# a turn at `...:36.500Z` compares LESS than `--since "...:36Z"` and
+# would be silently excluded. Pad the bare-seconds form to `.000Z`
+# so same-second turns are included as expected.
+# Narrow regex: only normalizes the exact shape Phase 0 writes.
+# Any fractional-seconds input passes through unchanged.
+if [[ "$SINCE" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})Z$ ]]; then
+    SINCE="${BASH_REMATCH[1]}.000Z"
+fi
+
 # Slug derivation only runs when --transcript-dir is not explicitly
 # provided. Using tr to map both `/` and `.` matches Claude Code's own
 # path-to-directory convention; writing the algorithm inline keeps the

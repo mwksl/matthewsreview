@@ -3340,6 +3340,34 @@ else
     fail "OT-5: window filter mismatch" "future_turns=$ot5_turns future_slen=$ot5_slen partial_turns=$ot5p_turns partial_in=$ot5p_in"
 fi
 
+# OT-7: --since at second precision (matching Phase 0's
+# `date -u +%Y-%m-%dT%H:%M:%SZ` format) correctly includes same-second
+# turns that carry millisecond-precision timestamps. Without the helper's
+# internal .000Z normalization, lexical `.500Z >= Z` evaluates FALSE
+# (because `.` < `Z`), and the helper would silently drop turns that
+# happened in the same wall-clock second as review_started_at.
+OT7_DIR="$OT_DIR/t7"
+mkdir -p "$OT_DIR/art7" "$OT7_DIR"
+cp "$FIX/artifact-seed.json" "$OT_DIR/art7/artifact.json"
+cat > "$OT7_DIR/sess.jsonl" <<'JSONL'
+{"type":"assistant","timestamp":"2026-04-21T10:00:00.500Z","sessionId":"sess-d","message":{"usage":{"input_tokens":100,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+{"type":"assistant","timestamp":"2026-04-21T10:00:01.000Z","sessionId":"sess-d","message":{"usage":{"input_tokens":100,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+JSONL
+"$TOOLS/orchestrator-tokens.sh" \
+    --artifact "$OT_DIR/art7/artifact.json" \
+    --since    "2026-04-21T10:00:00Z" \
+    --transcript-dir "$OT7_DIR" \
+    >/dev/null 2>&1 || fail "OT-7: helper exit non-zero on second-precision since"
+ot7_turns=$(jq -r '.orchestrator_tokens.turn_count' "$OT_DIR/art7/artifact.json")
+ot7_in=$(jq -r '.orchestrator_tokens.total_input' "$OT_DIR/art7/artifact.json")
+# Both turns (10:00:00.500Z and 10:00:01.000Z) are AT or AFTER 10:00:00Z
+# and should be included. Without normalization we'd get turns=1 in=100.
+if [[ "$ot7_turns" == "2" && "$ot7_in" == "200" ]]; then
+    pass "OT-7: second-precision --since includes same-second ms-precision turns (normalized to .000Z)"
+else
+    fail "OT-7: expected turns=2 in=200 (normalization works); got turns=$ot7_turns in=$ot7_in"
+fi
+
 # OT-6: non-assistant lines (user messages, worktree-state snapshots, etc.)
 # are ignored. This guards the `type == "assistant"` filter specifically —
 # real Claude Code transcripts mix many line types and the helper must
