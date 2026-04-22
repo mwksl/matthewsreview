@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-read.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-patch.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-validate.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-render.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-publish.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/repo-slug.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/log-tokens.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(cat:*), Bash(printf:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(tr:*), Bash(awk:*), Bash(mktemp:*), Agent, Read, AskUserQuestion
+allowed-tools: Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-read.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-patch.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-validate.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-render.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-publish.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/repo-slug.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/log-tokens.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/tally-subagent-tokens.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(cat:*), Bash(printf:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(tr:*), Bash(awk:*), Bash(mktemp:*), Agent, Read, AskUserQuestion
 argument-hint: "[threshold]"
 description: Walk interactively through findings /adams-review-fix would skip. Per-finding briefing + options + recommendation, then batch re-render/re-publish and post a decisions-log PR comment.
 disable-model-invocation: false
@@ -702,17 +702,36 @@ case "$scope_tier" in
 esac
 ```
 
-#### 6.1. Re-render `artifact.md`
+#### 6.1. Re-tally `subagent_tokens` + re-render `artifact.md`
+
+Re-tally first so the rendered report (and the PR comment update in
+6.2) reflect cumulative sub-agent spend. Each walkthrough briefer
+dispatched in the per-finding loop already logged itself to
+`tokens.jsonl` (§24.4); the helper is a pure readback:
 
 ```bash
+~/.claude/commands/_shared/tools/tally-subagent-tokens.sh \
+    --tokens-log "$review_dir/tokens.jsonl" \
+    --artifact   "$artifact_path" \
+    2>>"$trace_log_path" || printf 'walkthrough_tally_failed\n' >> "$trace_log_path"
+
 ~/.claude/commands/_shared/tools/artifact-render.py \
     --input "$artifact_path" \
     --output "$review_dir/artifact.md"
 ```
 
-On non-zero: log stderr to `trace.md` with tag
+Tally failure is non-fatal (observability, not correctness). On
+render non-zero: log stderr to `trace.md` with tag
 `walkthrough_render_failed`. Continue to step 6.2 — the artifact
 patches stand; the user can manually re-render.
+
+Issue-filing in §6.5 below dispatches another batch of sub-agents
+after this point; those land in `tokens.jsonl` but the walkthrough
+does not re-render after §6.5, so their cost will only surface on
+the next `/adams-review-fix` (or subsequent `/adams-review-add` /
+`/adams-review-walkthrough`) run when that command re-tallies. This
+is acceptable — issue-filing is terminal and no further re-publish
+follows it.
 
 #### 6.2. Re-publish the main review comment (PR mode only)
 
@@ -1162,6 +1181,8 @@ Pre-existing issues filed: <N; list id → url pairs below, or omit section>
   F026 → <url>
   F028 → <url>
 
+Cumulative sub-agent spend: <total> tokens across <invs> invocations.
+
 Promoted findings are now auto-fix-eligible via the human_confirmation
 bypass (§27.6). To apply them:
 
@@ -1174,6 +1195,23 @@ You can resume later by re-running /adams-review-walkthrough — the
 scope filter naturally excludes anything you already promoted, so the
 $unreviewed_count unreviewed finding(s) plus any newly-added ones
 will be what you see.
+```
+
+Read the cumulative spend numbers from the artifact (populated by
+§6.1's re-tally). Direct `jq -r` call so stdout is the chat line
+itself, not a JSON-quoted string (`artifact-read.sh --filter` doesn't
+enable raw mode). Note that §6.5 issue-filer agents dispatched after
+the tally won't be included in this line — they'll surface on the
+next lifecycle command's re-tally (§6.1 above documents this). Omit
+the line entirely if `subagent_tokens.total` is absent/null — matches
+`artifact-render.py`'s renderer guard:
+
+```bash
+token_line=$(jq -r '
+    if (.subagent_tokens.total // null) != null and (.subagent_tokens.invocations // null) != null
+    then "Cumulative sub-agent spend: \(.subagent_tokens.total) tokens across \(.subagent_tokens.invocations) invocations."
+    else empty end
+' "$artifact_path")
 ```
 
 Omit the "Unreviewed" line entirely (and the final re-run sentence's
