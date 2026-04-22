@@ -164,6 +164,17 @@ def render_header(artifact):
     invs = tokens.get("invocations")
     if total is not None and invs is not None:
         lines.append(f"**Sub-agent tokens:** {thousands(total)} across {thousands(invs)} invocations")
+    orch = artifact.get("orchestrator_tokens") or {}
+    turn_count = orch.get("turn_count")
+    if turn_count is not None:
+        lines.append(
+            "**Orchestrator tokens:** "
+            f"{thousands(orch.get('cache_read', 0))} cache-read / "
+            f"{thousands(orch.get('total_output', 0))} output / "
+            f"{thousands(orch.get('cache_creation', 0))} cache-creation / "
+            f"{thousands(orch.get('total_input', 0))} fresh input "
+            f"across {thousands(turn_count)} turns"
+        )
     if artifact.get("trivial_mode"):
         lines.append("**Trivial mode:** on (downshifted pipeline per §13.9)")
     return "\n".join(lines)

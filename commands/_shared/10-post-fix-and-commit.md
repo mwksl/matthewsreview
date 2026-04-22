@@ -285,7 +285,7 @@ After the agent returns:
    Then drop into §9.pre.abort — the attempted findings are still
    `current_state=attempted` on disk, so the abort tuples apply
    cleanly. The user sees a reconcile_fallback user-visible message
-   from 9e step 7 that names `$reconcile_fallback_reason`.
+   from 9e step 8 that names `$reconcile_fallback_reason`.
 
 4. **On success** (no fallback trigger fired above), replace
    `fix_groups` with a synthetic single entry and clear overlap so
@@ -427,7 +427,7 @@ overlap_inspect=true
 
 Jump to 9e no-commit branch. The stash-pop skip matches revert-failure
 semantics (leave stash in place — tree has agent edits and popping
-could create conflicts); 9e step 7's `overlap_inspect` case surfaces a
+could create conflicts); 9e step 8's `overlap_inspect` case surfaces a
 tailored message.
 
 #### 9.pre.abort — overlap-abort (current behavior; default)
@@ -999,7 +999,36 @@ each step's outcome is logged; failures do not abort the block.
 
 1. **fix_attempts + state transitions** — done in 9d above.
 
-2. **Schema-validate** the mutated artifact:
+2. **Re-tally `subagent_tokens` and `orchestrator_tokens`** so the
+   published artifact reflects cumulative spend across `/adams-review`
+   + this fix run (Phase 9a/9b/9c reviewer + any 9.pre.reconcile agent,
+   plus every orchestrator turn since `review_started_at`).
+   `tokens.jsonl` is append-only and the transcript files on disk are
+   append-only too — every sub-agent dispatch and every orchestrator
+   turn already logged itself; this is a pure readback:
+
+   ```bash
+   ~/.claude/commands/_shared/tools/tally-subagent-tokens.sh \
+     --tokens-log "$tokens_log_path" \
+     --artifact   "$artifact_path" \
+     2>>"$trace_log_path" || printf 'tally_failed\n' >> "$trace_log_path"
+
+   review_started_at=$(jq -r '.review_started_at // empty' "$artifact_path")
+
+   ~/.claude/commands/_shared/tools/orchestrator-tokens.sh \
+     --artifact "$artifact_path" \
+     --since    "$review_started_at" \
+     2>>"$trace_log_path" || printf 'orchestrator_tally_failed\n' >> "$trace_log_path"
+   ```
+
+   Both failures are non-fatal (observability, not correctness): the PR
+   comment's totals may stay stale but the commit and state transitions
+   already landed. Same fallback philosophy as §11's `tokens: null`.
+   `review_started_at` is loaded inline here (Phase 7 doesn't hoist it
+   into the working set by default) so this block is self-contained
+   regardless of what earlier fragments loaded.
+
+3. **Schema-validate** the mutated artifact:
 
    ```bash
    if ! ~/.claude/commands/_shared/tools/artifact-validate.sh --path "$artifact_path" 2>>"$trace_log_path"; then
@@ -1009,7 +1038,7 @@ each step's outcome is logged; failures do not abort the block.
    fi
    ```
 
-3. **Re-render `artifact.md`:**
+4. **Re-render `artifact.md`:**
 
    ```bash
    ~/.claude/commands/_shared/tools/artifact-render.py \
@@ -1017,7 +1046,7 @@ each step's outcome is logged; failures do not abort the block.
      2>>"$trace_log_path" || printf 'render_failed\n' >> "$trace_log_path"
    ```
 
-4. **Phase 9 phases.jsonl record:**
+5. **Phase 9 phases.jsonl record:**
 
    ```bash
    phase_9_elapsed=$(( $(date +%s) - phase_9_start_epoch ))
@@ -1052,7 +1081,7 @@ each step's outcome is logged; failures do not abort the block.
          group_outcomes:{verified:$verified, partial:$partial, regression:$reverted}}')"
    ```
 
-5. **`git push`** (PR mode only):
+6. **`git push`** (PR mode only):
 
    ```bash
    push_failed=false
@@ -1067,7 +1096,7 @@ each step's outcome is logged; failures do not abort the block.
    Failure does NOT undo the commit or the artifact update — the
    local record is already authoritative.
 
-6. **`artifact-publish.sh`** (PR mode only):
+7. **`artifact-publish.sh`** (PR mode only):
 
    ```bash
    publish_failed=false
@@ -1158,7 +1187,7 @@ each step's outcome is logged; failures do not abort the block.
 Reached by one of five degenerate paths: empty-eligibility (8.2),
 overlap-abort (9.pre), overlap-inspect (9.pre), all-regression (9b),
 revert-failure (9b). Overlap-abort reached via reconcile-fallback sets
-an extra `reconcile_fallback=true` flag that step 7 reads.
+an extra `reconcile_fallback=true` flag that step 8 reads.
 
 1. **fix_attempts + state transitions** — already applied in the
    originating path:
@@ -1226,12 +1255,19 @@ an extra `reconcile_fallback=true` flag that step 7 reads.
      leftover-attempted hard abort on next run is the deterministic
      recovery path).
 
-2. **Schema-validate** — same as committed branch step 2.
+2. **Re-tally `subagent_tokens` and `orchestrator_tokens`** — same as
+   committed branch step 2. Runs here too so the artifact (and its
+   downstream re-render) reflect sub-agent spend from any
+   9.pre.reconcile / 9a agents that dispatched before the degenerate
+   path was taken, and orchestrator spend from every turn since
+   `review_started_at`.
 
-3. **Re-render `artifact.md`** — same as committed branch step 3.
+3. **Schema-validate** — same as committed branch step 3.
 
-4. **Phase 9 phases.jsonl record** — same shape as committed branch
-   step 4 but include a degenerate-case tag:
+4. **Re-render `artifact.md`** — same as committed branch step 4.
+
+5. **Phase 9 phases.jsonl record** — same shape as committed branch
+   step 5 but include a degenerate-case tag:
 
    ```bash
    degen=""
@@ -1247,7 +1283,7 @@ an extra `reconcile_fallback=true` flag that step 7 reads.
    Include `degenerate_case: $degen` in the phases.jsonl record.
    `commit_sha` is null.
 
-5. **Pop stash** if `stash_taken=true` — BUT only if
+6. **Pop stash** if `stash_taken=true` — BUT only if
    `revert_failed != true` AND `overlap_inspect != true`. Revert
    failure left the tree in an unknown state; overlap-inspect left
    the tree in the post-Phase-8 state with agent edits. In either
@@ -1255,11 +1291,11 @@ an extra `reconcile_fallback=true` flag that step 7 reads.
    user work. Leave the stash in place and note the ref in the
    user-visible error below.
 
-6. **No push, no publish** — no new commit, nothing to ship. The
+7. **No push, no publish** — no new commit, nothing to ship. The
    artifact-side update is still valuable for the next run's
    staleness logic and for user inspection.
 
-7. **Surface user-visible degenerate-case error:**
+8. **Surface user-visible degenerate-case error:**
 
    - `overlap_abort` → the overlap message from 9.pre.abort step 5
      (above).

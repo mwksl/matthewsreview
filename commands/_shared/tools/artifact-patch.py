@@ -301,6 +301,7 @@ JSON_SETTABLE_FINDING_FIELDS = frozenset({
 JSON_SETTABLE_ARTIFACT_FIELDS = frozenset({
     "cross_cutting_groups",
     "subagent_tokens",
+    "orchestrator_tokens",
     "metrics",
     "reviewer_sources",
 })

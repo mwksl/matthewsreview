@@ -1,11 +1,11 @@
 ## Phase 6 — Finalize
 
-Close out the review: validate the artifact, tally `subagent_tokens`,
-populate `metrics`, record the final `phases.jsonl` entry, render
-`artifact.md`, update `latest.txt` (already done in Phase 0 — re-
-asserted here for atomic safety), publish to the PR (PR mode) or
-no-op (local mode), mirror the report to chat, and pop any stash
-taken at Phase 0's dirty-tree gate.
+Close out the review: validate the artifact, tally `subagent_tokens`
+and `orchestrator_tokens`, populate `metrics`, record the final
+`phases.jsonl` entry, render `artifact.md`, update `latest.txt`
+(already done in Phase 0 — re-asserted here for atomic safety),
+publish to the PR (PR mode) or no-op (local mode), mirror the report
+to chat, and pop any stash taken at Phase 0's dirty-tree gate.
 
 ### 6.1. Schema-validate the artifact
 
@@ -22,26 +22,61 @@ should not shadow the PR comment.
 ### 6.2. Tally `subagent_tokens` from `tokens.jsonl`
 
 ```bash
-# Totals + invocation count + per-phase + per-model + per-lens + per-finding.
-subagent_tokens=$(jq -s '{
-  total: ([.[] | .tokens // 0] | add),
-  invocations: length,
-  by_phase: (group_by(.phase) | map({key:.[0].phase, value: ([.[] | .tokens // 0] | add)}) | from_entries),
-  by_model: (group_by(.model) | map({key:.[0].model, value: ([.[] | .tokens // 0] | add)}) | from_entries),
-  by_lens:  ([.[] | select(.agent_role | startswith("lens_"))] | group_by(.agent_role) | map({key:.[0].agent_role, value: ([.[] | .tokens // 0] | add)}) | from_entries),
-  by_finding_phase4: ([.[] | select(.phase == "phase_4a" or .phase == "phase_4b")] | group_by(.finding_id) | map({key:.[0].finding_id, value: ([.[] | .tokens // 0] | add)}) | from_entries)
-}' "$tokens_log_path")
-
-echo "$subagent_tokens" > "/tmp/adams-review-st-$review_id.json"
-~/.claude/commands/_shared/tools/artifact-patch.py \
-  --path "$artifact_path" \
-  --set-json "subagent_tokens=@/tmp/adams-review-st-$review_id.json"
-rm -f "/tmp/adams-review-st-$review_id.json"
+~/.claude/commands/_shared/tools/tally-subagent-tokens.sh \
+  --tokens-log "$tokens_log_path" \
+  --artifact   "$artifact_path"
 ```
 
-The jq expression handles `tokens: null` entries gracefully (coerces to
-0 for totals). Parse-failure entries (§11 fallback) don't inflate or
-deflate the aggregate by much.
+The helper slurps `tokens.jsonl`, computes totals + invocation count +
+per-phase + per-model + per-lens + per-finding-phase4, and writes the
+rollup to `<artifact>.subagent_tokens` via `artifact-patch.py
+--set-json`. It's a pure readback — `tokens.jsonl` itself is never
+touched, and repeat invocations are idempotent.
+
+`tokens: null` entries (§11 parse-failure fallback) coerce to 0 in
+totals; an empty log produces a zero rollup rather than an error, so
+the helper is safe to call at any terminus. The three lifecycle
+commands (`/adams-review-fix`, `/adams-review-add`,
+`/adams-review-walkthrough`) each re-invoke it before their final
+render so the published PR comment reflects cumulative sub-agent
+spend, not just the initial `/adams-review` snapshot.
+
+### 6.2b. Tally `orchestrator_tokens` from the session transcript(s)
+
+```bash
+review_started_at=$(jq -r '.review_started_at // empty' "$artifact_path")
+
+~/.claude/commands/_shared/tools/orchestrator-tokens.sh \
+  --artifact "$artifact_path" \
+  --since    "$review_started_at"
+```
+
+Companion to the sub-agent tally. Scans every Claude Code transcript
+under `~/.claude/projects/<cwd-slug>/` whose assistant-line timestamps
+fall in the review window and sums the main-session (orchestrator)
+`message.usage` counters into `<artifact>.orchestrator_tokens`.
+Complements `subagent_tokens` — the two are non-overlapping: sub-agent
+tokens are the sub-agents' own internal API calls, orchestrator tokens
+are the main session's per-turn usage. Together they cover the full
+spend of a review.
+
+The helper defaults `--cwd` to `$(pwd -P)`, which is exactly the
+Claude Code session's cwd — the same path whose slugged form
+(`tr '/.' '-'`) names the transcript directory. Don't override
+`--cwd` unless testing; passing `$repo_root` would mis-point in
+worktrees where the session was started from the worktree path.
+
+The helper is safe to call when the transcript directory is absent —
+it emits a zero rollup rather than erroring. Same "cumulative across
+every lifecycle terminus" pattern as the sub-agent tally:
+`/adams-review-fix`, `/adams-review-add`, and
+`/adams-review-walkthrough` each re-invoke it before their final
+render.
+
+Soft over-count modes (unrelated same-cwd sessions, intermission chat
+between lifecycle commands) are accepted for v1 — both bias towards
+over-count, never under-count. See the helper header for the full
+list.
 
 ### 6.3a. Recompute `reviewer_sources` from actual findings
 
@@ -316,7 +351,8 @@ PR comment is the deliverable.
 
 ### Working-set delta after Phase 6
 
-- `artifact.json` has fully-populated `subagent_tokens` and `metrics`.
+- `artifact.json` has fully-populated `subagent_tokens`,
+  `orchestrator_tokens`, and `metrics`.
 - `artifact.md` rendered at `$review_dir/artifact.md`.
 - `latest.txt` points at `$review_id`.
 - PR mode: review comment posted or edited (`comment_id` persisted).

@@ -37,7 +37,9 @@ The original four are **built and in production use** as of 2026-04-19 (Stages 1
 ├── Phase 4 — Validation (deep Opus per candidate for correctness/security;
 │              light Sonnet confirmation for ux/policy/architecture)
 ├── Phase 5 — Cross-cutting review (deep-lane only; dispatched Opus sub-agent)
-└── Phase 6 — Finalize (phases.jsonl, artifact write, render, PR comment POST)
+└── Phase 6 — Finalize (phases.jsonl, tally-subagent-tokens.sh → subagent_tokens,
+               orchestrator-tokens.sh → orchestrator_tokens, artifact write,
+               render, PR comment POST)
 
 /adams-review-fix [threshold]
 ├── Phase 7 — Load artifact; leftover-attempted abort; clean-tree gate; staleness check
@@ -45,7 +47,8 @@ The original four are **built and in production use** as of 2026-04-19 (Stages 1
 │              each group reports files_modified + files_created
 └── Phase 9 — Post-fix Opus review pre-commit; aggregate outcomes per group;
               revert regression groups (checkout modified, rm created);
-              commit surviving groups with outcome in message; push; append fix_attempts
+              re-tally subagent_tokens + orchestrator_tokens; commit surviving groups with outcome
+              in message; push; append fix_attempts
               (on 9.pre overlap: offer reconcile | abort | inspect — reconcile
                dispatches one Opus merge agent, collapses fix_groups to FG-RECON
                in memory, then runs Phase 9a/9b/9c unchanged; original
@@ -58,8 +61,46 @@ The original four are **built and in production use** as of 2026-04-19 (Stages 1
     max existing F-id (assign-finding-ids.sh --start-from) → --add-finding loop →
     Phase 4 validation lane-aware, NO Wave 2 (Opus deep / Sonnet light) →
     --apply-decisions → §13.1 pre-existing override re-assertion →
-    re-render → re-publish to existing comment_id → trace + summary
+    re-tally subagent_tokens + orchestrator_tokens → re-render →
+    re-publish to existing comment_id → trace + summary
 ```
+
+Every lifecycle command re-tallies two sibling fields before its final
+re-render so the published PR comment reflects cumulative spend across
+the full review → fix / add / walkthrough arc:
+
+- **`subagent_tokens`** — rolled up from `tokens.jsonl` (every
+  dispatched sub-agent's cost). Captures Phase 1 lenses, Phase 4
+  validators, Phase 8 fix groups, Phase 9 post-fix reviewer, etc.
+- **`orchestrator_tokens`** — rolled up from the Claude Code session
+  transcript(s) under `~/.claude/projects/<cwd-slug>/` (main-session
+  `message.usage` per assistant turn, filtered by timestamp ≥
+  `review_started_at`). Captures what `subagent_tokens` deliberately
+  excludes: the orchestrator's own per-turn spend, which is what the
+  statusline's live `ctx:` badge is measuring the depth of.
+
+The two are non-overlapping (sub-agent internal API calls vs.
+main-session turns). Four separate orchestrator counters — fresh
+input / output / cache-read / cache-creation — are preserved because
+their $/token pricing differs by roughly an order of magnitude.
+
+`/adams-review-walkthrough` re-tallies both before §6.1's re-publish;
+issue-filer agents dispatched in §6.5 (and the orchestrator turns that
+dispatch them) land in the logs/transcript after the tally, so their
+cost surfaces on the next lifecycle command's tally.
+
+**Orchestrator-tokens over-count modes (v1 accepted).** The time-
+window filter (`timestamp >= review_started_at`) counts every
+assistant turn in any transcript under `~/.claude/projects/<cwd-slug>/`,
+regardless of whether it belongs to this review. Clean cases: review
+→ fix back-to-back; review → new review on the updated codebase
+(each new review's `review_started_at` excludes the prior arc).
+Over-count cases: any unrelated session or unrelated same-session
+chat in the same cwd between `review_started_at` and the tally's
+invocation. Sub-agent tokens are unaffected (their log is per-review-id,
+not cwd-wide). See `tools/orchestrator-tokens.sh` header for the full
+caveat list; `plans/orchestrator-tokens.md` §"Known limitations" for
+why this was accepted over a `SessionStart`-hook-based fix.
 
 ## Finding state model
 
@@ -287,6 +328,8 @@ All scripts live under `commands/_shared/tools/`. Grant `Bash(/Users/.../tools/<
 |---|---|---|
 | `log-phase.sh` | Bash | Appends `trace.md` + `phases.jsonl`. Every phase fragment calls this. |
 | `log-tokens.sh` | Bash | Appends `tokens.jsonl`. Every sub-agent dispatch. |
+| `tally-subagent-tokens.sh` | Bash | Rolls `tokens.jsonl` into `subagent_tokens` on the artifact. Pure readback, idempotent. Called at Phase 6 finalize and before each lifecycle command's final re-render so the published total stays cumulative across review → fix / add / walkthrough. |
+| `orchestrator-tokens.sh` | Bash | Rolls Claude Code session transcripts under `~/.claude/projects/<cwd-slug>/` into `orchestrator_tokens`. Complements `tally-subagent-tokens.sh` by capturing the main-session per-turn spend that `subagent_tokens` deliberately excludes (§11). Slug algorithm is `tr '/.' '-'` (both chars map to `-`). `--since` filters by assistant-line timestamp; v1 accepts soft over-count modes from unrelated same-cwd sessions or intermission chat between lifecycle commands. |
 | `group-fixes.py` | Python | Phase 8 union-find over `files_planned` across eligible findings. Emits `[{id, finding_ids, files_planned}]`. |
 | `assign-finding-ids.sh` | Bash | Phase 1 post-join. Monotonic ID assignment over the pooled candidate list. |
 | `external-scrape.sh` | Bash | Phase 1.5 PR-comment fetch + bot filter (allow/deny config). |

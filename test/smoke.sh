@@ -3130,6 +3130,273 @@ else
     fail "PFD-7: expected default=0 / wide=1; got default=$len wide=$len_wide"
 fi
 
+# ------------------------------------------------------------------ tally-subagent-tokens.sh
+
+TK_DIR="$WORK/tk"
+mkdir -p "$TK_DIR"
+cp "$FIX/artifact-seed.json" "$TK_DIR/artifact.json"
+: > "$TK_DIR/tokens.jsonl"
+
+# TK-1: empty tokens.jsonl → zero rollup that schema-validates.
+"$TOOLS/tally-subagent-tokens.sh" \
+    --tokens-log "$TK_DIR/tokens.jsonl" \
+    --artifact   "$TK_DIR/artifact.json" \
+    >/dev/null 2>&1 || fail "TK-1: helper exit non-zero on empty log"
+tk1_total=$(jq -r '.subagent_tokens.total' "$TK_DIR/artifact.json")
+tk1_invs=$(jq -r '.subagent_tokens.invocations' "$TK_DIR/artifact.json")
+tk1_by_phase=$(jq -c '.subagent_tokens.by_phase' "$TK_DIR/artifact.json")
+if [[ "$tk1_total" == "0" && "$tk1_invs" == "0" && "$tk1_by_phase" == "{}" ]] \
+   && "$TOOLS/artifact-validate.sh" --path "$TK_DIR/artifact.json" >/dev/null 2>&1; then
+    pass "TK-1: empty log → zero rollup; schema-validates"
+else
+    fail "TK-1: expected zeros; got total=$tk1_total invs=$tk1_invs by_phase=$tk1_by_phase"
+fi
+
+# TK-2: 4-line log with a tokens:null entry → correct totals, null coerced to 0.
+cat > "$TK_DIR/tokens.jsonl" <<'JSONL'
+{"phase":"phase_1","agent_role":"lens_security","agent_id":"a1","model":"sonnet","tokens":1000,"ts":"2026-04-21T10:00:00Z"}
+{"phase":"phase_1","agent_role":"lens_ux","agent_id":"a2","model":"sonnet","tokens":2000,"ts":"2026-04-21T10:00:05Z"}
+{"phase":"phase_4a","agent_role":"validator","agent_id":"a3","model":"opus","tokens":null,"ts":"2026-04-21T10:01:00Z","finding_id":"F001"}
+{"phase":"phase_4a","agent_role":"validator","agent_id":"a4","model":"opus","tokens":5000,"ts":"2026-04-21T10:01:10Z","finding_id":"F002"}
+JSONL
+"$TOOLS/tally-subagent-tokens.sh" \
+    --tokens-log "$TK_DIR/tokens.jsonl" \
+    --artifact   "$TK_DIR/artifact.json" \
+    >/dev/null 2>&1 || fail "TK-2: helper exit non-zero on populated log"
+tk2_total=$(jq -r '.subagent_tokens.total' "$TK_DIR/artifact.json")
+tk2_invs=$(jq -r '.subagent_tokens.invocations' "$TK_DIR/artifact.json")
+tk2_lens_sec=$(jq -r '.subagent_tokens.by_lens.lens_security' "$TK_DIR/artifact.json")
+tk2_p4_f001=$(jq -r '.subagent_tokens.by_finding_phase4.F001' "$TK_DIR/artifact.json")
+if [[ "$tk2_total" == "8000" && "$tk2_invs" == "4" \
+      && "$tk2_lens_sec" == "1000" && "$tk2_p4_f001" == "0" ]]; then
+    pass "TK-2: 4-line log with tokens:null → total=8000 invs=4, null coerced to 0"
+else
+    fail "TK-2: expected total=8000 invs=4 lens_security=1000 F001=0; got total=$tk2_total invs=$tk2_invs lens_security=$tk2_lens_sec F001=$tk2_p4_f001"
+fi
+
+# TK-3: re-invocation is idempotent (bit-for-bit subagent_tokens).
+tk3_before=$(jq -cS '.subagent_tokens' "$TK_DIR/artifact.json")
+"$TOOLS/tally-subagent-tokens.sh" \
+    --tokens-log "$TK_DIR/tokens.jsonl" \
+    --artifact   "$TK_DIR/artifact.json" \
+    >/dev/null 2>&1 || fail "TK-3: helper exit non-zero on re-run"
+tk3_after=$(jq -cS '.subagent_tokens' "$TK_DIR/artifact.json")
+if [[ "$tk3_before" == "$tk3_after" ]]; then
+    pass "TK-3: idempotent re-invocation on unchanged log"
+else
+    fail "TK-3: subagent_tokens diverged on re-run" "before=$tk3_before after=$tk3_after"
+fi
+
+# TK-4: append new lines → total strictly grows by the appended sum (the
+# cumulative-growth invariant that the lifecycle wiring relies on).
+printf '{"phase":"phase_9","agent_role":"post_fix_reviewer","agent_id":"a5","model":"opus","tokens":3500,"ts":"2026-04-21T11:00:00Z"}\n' >> "$TK_DIR/tokens.jsonl"
+printf '{"phase":"phase_9","agent_role":"fix_group","agent_id":"a6","model":"opus","tokens":1500,"ts":"2026-04-21T11:00:30Z"}\n' >> "$TK_DIR/tokens.jsonl"
+"$TOOLS/tally-subagent-tokens.sh" \
+    --tokens-log "$TK_DIR/tokens.jsonl" \
+    --artifact   "$TK_DIR/artifact.json" \
+    >/dev/null 2>&1 || fail "TK-4: helper exit non-zero after append"
+tk4_total=$(jq -r '.subagent_tokens.total' "$TK_DIR/artifact.json")
+tk4_invs=$(jq -r '.subagent_tokens.invocations' "$TK_DIR/artifact.json")
+tk4_p9=$(jq -r '.subagent_tokens.by_phase.phase_9' "$TK_DIR/artifact.json")
+if [[ "$tk4_total" == "13000" && "$tk4_invs" == "6" && "$tk4_p9" == "5000" ]]; then
+    pass "TK-4: cumulative growth — total=8000→13000 (+5000), phase_9=5000"
+else
+    fail "TK-4: expected total=13000 invs=6 phase_9=5000; got total=$tk4_total invs=$tk4_invs phase_9=$tk4_p9"
+fi
+
+# TK-5: the chat-summary jq -r filter used by adams-review-add step 10 and
+# adams-review-walkthrough step 9. Must produce a clean (unquoted) line on
+# a populated artifact and empty stdout when subagent_tokens is absent.
+token_filter='if (.subagent_tokens.total // null) != null and (.subagent_tokens.invocations // null) != null
+    then "Cumulative sub-agent spend: \(.subagent_tokens.total) tokens across \(.subagent_tokens.invocations) invocations."
+    else empty end'
+tk5_line=$(jq -r "$token_filter" "$TK_DIR/artifact.json")
+tk5_expected="Cumulative sub-agent spend: 13000 tokens across 6 invocations."
+if [[ "$tk5_line" == "$tk5_expected" ]]; then
+    pass "TK-5: chat-summary jq -r filter produces clean line on populated artifact"
+else
+    fail "TK-5: filter output mismatch" "expected=[$tk5_expected] got=[$tk5_line]"
+fi
+
+jq 'del(.subagent_tokens)' "$TK_DIR/artifact.json" > "$TK_DIR/art-no-st.json"
+tk5_missing=$(jq -r "$token_filter" "$TK_DIR/art-no-st.json")
+if [[ -z "$tk5_missing" ]]; then
+    pass "TK-6: chat-summary filter omits line when subagent_tokens absent"
+else
+    fail "TK-6: expected empty output; got [$tk5_missing]"
+fi
+
+# ------------------------------------------------------------------ orchestrator-tokens.sh
+
+OT_DIR="$WORK/ot"
+mkdir -p "$OT_DIR"
+cp "$FIX/artifact-seed.json" "$OT_DIR/artifact.json"
+
+# OT-1: slug derivation — both `/` AND `.` map to `-`. Claude Code's own
+# convention; easy to miss because `/ → -` alone would handle the worktree
+# path too, but `/.claude/` must become `--claude-` (double hyphen from
+# the slash+dot pair), not `-.claude-`. Guard the algorithm directly so
+# a future refactor can't break it silently.
+ot1_slug=$(printf '%s' "/Users/x/Projects/adams-review/.claude/worktrees/y" | tr '/.' '-')
+ot1_expected="-Users-x-Projects-adams-review--claude-worktrees-y"
+if [[ "$ot1_slug" == "$ot1_expected" ]]; then
+    pass "OT-1: slug derivation (tr '/.' '-') — both chars collapse correctly"
+else
+    fail "OT-1: slug mismatch" "expected=[$ot1_expected] got=[$ot1_slug]"
+fi
+
+# OT-2: missing transcript dir → zero rollup; schema-validates.
+"$TOOLS/orchestrator-tokens.sh" \
+    --artifact "$OT_DIR/artifact.json" \
+    --since    "2026-04-21T00:00:00.000Z" \
+    --transcript-dir "$OT_DIR/does-not-exist" \
+    >/dev/null 2>&1 || fail "OT-2: helper exit non-zero on missing dir"
+ot2_total_input=$(jq -r '.orchestrator_tokens.total_input' "$OT_DIR/artifact.json")
+ot2_turns=$(jq -r '.orchestrator_tokens.turn_count' "$OT_DIR/artifact.json")
+ot2_sessions=$(jq -c '.orchestrator_tokens.sessions' "$OT_DIR/artifact.json")
+if [[ "$ot2_total_input" == "0" && "$ot2_turns" == "0" && "$ot2_sessions" == "[]" ]] \
+   && "$TOOLS/artifact-validate.sh" --path "$OT_DIR/artifact.json" >/dev/null 2>&1; then
+    pass "OT-2: missing transcript dir → zero rollup; schema-validates"
+else
+    fail "OT-2: expected zeros + valid artifact; got input=$ot2_total_input turns=$ot2_turns sessions=$ot2_sessions"
+fi
+
+# OT-3: one synthetic transcript, 3 in-window assistant turns with known
+# usage counts. Verify all four counters sum correctly, turn_count=3,
+# sessions[] has exactly one entry with the right ids and transcript_path.
+OT3_DIR="$OT_DIR/t3"
+mkdir -p "$OT_DIR/art3" "$OT3_DIR"
+cp "$FIX/artifact-seed.json" "$OT_DIR/art3/artifact.json"
+cat > "$OT3_DIR/sess-a.jsonl" <<'JSONL'
+{"type":"assistant","timestamp":"2026-04-21T10:00:00.000Z","sessionId":"sess-a","message":{"usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":30,"cache_creation_input_tokens":40}}}
+{"type":"assistant","timestamp":"2026-04-21T10:01:00.000Z","sessionId":"sess-a","message":{"usage":{"input_tokens":5,"output_tokens":15,"cache_read_input_tokens":25,"cache_creation_input_tokens":35}}}
+{"type":"assistant","timestamp":"2026-04-21T10:02:00.000Z","sessionId":"sess-a","message":{"usage":{"input_tokens":1,"output_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":4}}}
+JSONL
+"$TOOLS/orchestrator-tokens.sh" \
+    --artifact "$OT_DIR/art3/artifact.json" \
+    --since    "2026-04-21T00:00:00.000Z" \
+    --transcript-dir "$OT3_DIR" \
+    >/dev/null 2>&1 || fail "OT-3: helper exit non-zero on populated transcript"
+ot3_in=$(jq -r '.orchestrator_tokens.total_input' "$OT_DIR/art3/artifact.json")
+ot3_out=$(jq -r '.orchestrator_tokens.total_output' "$OT_DIR/art3/artifact.json")
+ot3_cr=$(jq -r '.orchestrator_tokens.cache_read' "$OT_DIR/art3/artifact.json")
+ot3_cc=$(jq -r '.orchestrator_tokens.cache_creation' "$OT_DIR/art3/artifact.json")
+ot3_turns=$(jq -r '.orchestrator_tokens.turn_count' "$OT_DIR/art3/artifact.json")
+ot3_sid=$(jq -r '.orchestrator_tokens.sessions[0].session_id' "$OT_DIR/art3/artifact.json")
+ot3_slen=$(jq -r '.orchestrator_tokens.sessions | length' "$OT_DIR/art3/artifact.json")
+if [[ "$ot3_in" == "16" && "$ot3_out" == "37" && "$ot3_cr" == "58" && "$ot3_cc" == "79" \
+   && "$ot3_turns" == "3" && "$ot3_sid" == "sess-a" && "$ot3_slen" == "1" ]]; then
+    pass "OT-3: 3-turn transcript → correct four-counter sums + sessions[] entry"
+else
+    fail "OT-3: sum mismatch" "in=$ot3_in out=$ot3_out cr=$ot3_cr cc=$ot3_cc turns=$ot3_turns sid=$ot3_sid slen=$ot3_slen"
+fi
+
+# OT-4: cross-session merge — two transcripts in the same dir with
+# distinct sessionIds. Verify sessions[] has 2 entries sorted by
+# first_seen, and totals sum across both.
+cat > "$OT3_DIR/sess-b.jsonl" <<'JSONL'
+{"type":"assistant","timestamp":"2026-04-21T09:00:00.000Z","sessionId":"sess-b","message":{"usage":{"input_tokens":100,"output_tokens":200,"cache_read_input_tokens":300,"cache_creation_input_tokens":400}}}
+JSONL
+"$TOOLS/orchestrator-tokens.sh" \
+    --artifact "$OT_DIR/art3/artifact.json" \
+    --since    "2026-04-21T00:00:00.000Z" \
+    --transcript-dir "$OT3_DIR" \
+    >/dev/null 2>&1 || fail "OT-4: helper exit non-zero on multi-transcript"
+ot4_turns=$(jq -r '.orchestrator_tokens.turn_count' "$OT_DIR/art3/artifact.json")
+ot4_in=$(jq -r '.orchestrator_tokens.total_input' "$OT_DIR/art3/artifact.json")
+ot4_slen=$(jq -r '.orchestrator_tokens.sessions | length' "$OT_DIR/art3/artifact.json")
+# sort_by(.first_seen): sess-b (09:00) comes before sess-a (10:00).
+ot4_first=$(jq -r '.orchestrator_tokens.sessions[0].session_id' "$OT_DIR/art3/artifact.json")
+ot4_second=$(jq -r '.orchestrator_tokens.sessions[1].session_id' "$OT_DIR/art3/artifact.json")
+if [[ "$ot4_turns" == "4" && "$ot4_in" == "116" && "$ot4_slen" == "2" \
+   && "$ot4_first" == "sess-b" && "$ot4_second" == "sess-a" ]]; then
+    pass "OT-4: cross-session merge — totals sum; sessions[] sorted by first_seen"
+else
+    fail "OT-4: merge mismatch" "turns=$ot4_turns in=$ot4_in slen=$ot4_slen first=$ot4_first second=$ot4_second"
+fi
+
+# OT-5: time-window filter — --since in the future excludes all turns,
+# yielding zero rollup even though transcripts are populated. Also
+# verifies the partial-window case where only some turns survive.
+"$TOOLS/orchestrator-tokens.sh" \
+    --artifact "$OT_DIR/art3/artifact.json" \
+    --since    "2099-01-01T00:00:00.000Z" \
+    --transcript-dir "$OT3_DIR" \
+    >/dev/null 2>&1 || fail "OT-5: helper exit non-zero on future --since"
+ot5_turns=$(jq -r '.orchestrator_tokens.turn_count' "$OT_DIR/art3/artifact.json")
+ot5_slen=$(jq -r '.orchestrator_tokens.sessions | length' "$OT_DIR/art3/artifact.json")
+# Partial window: cut between the two sess-a turns at 10:00 and 10:01.
+"$TOOLS/orchestrator-tokens.sh" \
+    --artifact "$OT_DIR/art3/artifact.json" \
+    --since    "2026-04-21T10:00:30.000Z" \
+    --transcript-dir "$OT3_DIR" \
+    >/dev/null 2>&1 || fail "OT-5: helper exit non-zero on partial window"
+ot5p_turns=$(jq -r '.orchestrator_tokens.turn_count' "$OT_DIR/art3/artifact.json")
+ot5p_in=$(jq -r '.orchestrator_tokens.total_input' "$OT_DIR/art3/artifact.json")
+# Surviving: two sess-a turns (10:01 and 10:02) — input = 5 + 1 = 6.
+if [[ "$ot5_turns" == "0" && "$ot5_slen" == "0" && "$ot5p_turns" == "2" && "$ot5p_in" == "6" ]]; then
+    pass "OT-5: --since filter — future excludes all; partial window keeps only post-since turns"
+else
+    fail "OT-5: window filter mismatch" "future_turns=$ot5_turns future_slen=$ot5_slen partial_turns=$ot5p_turns partial_in=$ot5p_in"
+fi
+
+# OT-7: --since at second precision (matching Phase 0's
+# `date -u +%Y-%m-%dT%H:%M:%SZ` format) correctly includes same-second
+# turns that carry millisecond-precision timestamps. Without the helper's
+# internal .000Z normalization, lexical `.500Z >= Z` evaluates FALSE
+# (because `.` < `Z`), and the helper would silently drop turns that
+# happened in the same wall-clock second as review_started_at.
+OT7_DIR="$OT_DIR/t7"
+mkdir -p "$OT_DIR/art7" "$OT7_DIR"
+cp "$FIX/artifact-seed.json" "$OT_DIR/art7/artifact.json"
+cat > "$OT7_DIR/sess.jsonl" <<'JSONL'
+{"type":"assistant","timestamp":"2026-04-21T10:00:00.500Z","sessionId":"sess-d","message":{"usage":{"input_tokens":100,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+{"type":"assistant","timestamp":"2026-04-21T10:00:01.000Z","sessionId":"sess-d","message":{"usage":{"input_tokens":100,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+JSONL
+"$TOOLS/orchestrator-tokens.sh" \
+    --artifact "$OT_DIR/art7/artifact.json" \
+    --since    "2026-04-21T10:00:00Z" \
+    --transcript-dir "$OT7_DIR" \
+    >/dev/null 2>&1 || fail "OT-7: helper exit non-zero on second-precision since"
+ot7_turns=$(jq -r '.orchestrator_tokens.turn_count' "$OT_DIR/art7/artifact.json")
+ot7_in=$(jq -r '.orchestrator_tokens.total_input' "$OT_DIR/art7/artifact.json")
+# Both turns (10:00:00.500Z and 10:00:01.000Z) are AT or AFTER 10:00:00Z
+# and should be included. Without normalization we'd get turns=1 in=100.
+if [[ "$ot7_turns" == "2" && "$ot7_in" == "200" ]]; then
+    pass "OT-7: second-precision --since includes same-second ms-precision turns (normalized to .000Z)"
+else
+    fail "OT-7: expected turns=2 in=200 (normalization works); got turns=$ot7_turns in=$ot7_in"
+fi
+
+# OT-6: non-assistant lines (user messages, worktree-state snapshots, etc.)
+# are ignored. This guards the `type == "assistant"` filter specifically —
+# real Claude Code transcripts mix many line types and the helper must
+# not accidentally count `type == "user"` or `type == "worktree-state"`
+# lines that happen to have nested numeric fields.
+OT6_DIR="$OT_DIR/t6"
+mkdir -p "$OT_DIR/art6" "$OT6_DIR"
+cp "$FIX/artifact-seed.json" "$OT_DIR/art6/artifact.json"
+cat > "$OT6_DIR/mix.jsonl" <<'JSONL'
+{"type":"user","timestamp":"2026-04-21T10:00:00.000Z","message":{"content":"hi"}}
+{"type":"system","timestamp":"2026-04-21T10:00:01.000Z","message":"boot"}
+{"type":"worktree-state","timestamp":"2026-04-21T10:00:02.000Z"}
+{"type":"assistant","timestamp":"2026-04-21T10:00:03.000Z","sessionId":"sess-c","message":{"usage":{"input_tokens":7,"output_tokens":8,"cache_read_input_tokens":9,"cache_creation_input_tokens":10}}}
+{"type":"attachment","timestamp":"2026-04-21T10:00:04.000Z"}
+JSONL
+"$TOOLS/orchestrator-tokens.sh" \
+    --artifact "$OT_DIR/art6/artifact.json" \
+    --since    "2026-04-21T00:00:00.000Z" \
+    --transcript-dir "$OT6_DIR" \
+    >/dev/null 2>&1 || fail "OT-6: helper exit non-zero on mixed-types transcript"
+ot6_turns=$(jq -r '.orchestrator_tokens.turn_count' "$OT_DIR/art6/artifact.json")
+ot6_in=$(jq -r '.orchestrator_tokens.total_input' "$OT_DIR/art6/artifact.json")
+ot6_out=$(jq -r '.orchestrator_tokens.total_output' "$OT_DIR/art6/artifact.json")
+if [[ "$ot6_turns" == "1" && "$ot6_in" == "7" && "$ot6_out" == "8" ]]; then
+    pass "OT-6: non-assistant line types (user/system/worktree-state/attachment) ignored"
+else
+    fail "OT-6: filter let non-assistant lines through" "turns=$ot6_turns in=$ot6_in out=$ot6_out"
+fi
+
 echo
 echo "smoke: PASS ($N assertions)"
 exit 0
