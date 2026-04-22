@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-read.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-patch.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-validate.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-render.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-publish.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/repo-slug.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/log-tokens.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/tally-subagent-tokens.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(cat:*), Bash(printf:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(tr:*), Bash(awk:*), Bash(mktemp:*), Agent, Read, AskUserQuestion
+allowed-tools: Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-read.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-patch.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-validate.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-render.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-publish.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/repo-slug.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/log-tokens.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/tally-subagent-tokens.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/orchestrator-tokens.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(cat:*), Bash(printf:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(tr:*), Bash(awk:*), Bash(mktemp:*), Agent, Read, AskUserQuestion
 argument-hint: "[threshold]"
 description: Walk interactively through findings /adams-review-fix would skip. Per-finding briefing + options + recommendation, then batch re-render/re-publish and post a decisions-log PR comment.
 disable-model-invocation: false
@@ -702,12 +702,14 @@ case "$scope_tier" in
 esac
 ```
 
-#### 6.1. Re-tally `subagent_tokens` + re-render `artifact.md`
+#### 6.1. Re-tally `subagent_tokens` + `orchestrator_tokens`, then re-render `artifact.md`
 
 Re-tally first so the rendered report (and the PR comment update in
-6.2) reflect cumulative sub-agent spend. Each walkthrough briefer
-dispatched in the per-finding loop already logged itself to
-`tokens.jsonl` (§24.4); the helper is a pure readback:
+6.2) reflect cumulative sub-agent + orchestrator spend. Each
+walkthrough briefer dispatched in the per-finding loop already logged
+itself to `tokens.jsonl` (§24.4); the orchestrator transcript on disk
+already captured every main-session turn. Both helpers are pure
+readbacks:
 
 ```bash
 ~/.claude/commands/_shared/tools/tally-subagent-tokens.sh \
@@ -715,23 +717,28 @@ dispatched in the per-finding loop already logged itself to
     --artifact   "$artifact_path" \
     2>>"$trace_log_path" || printf 'walkthrough_tally_failed\n' >> "$trace_log_path"
 
+~/.claude/commands/_shared/tools/orchestrator-tokens.sh \
+    --artifact "$artifact_path" \
+    --since    "$review_started_at" \
+    2>>"$trace_log_path" || printf 'walkthrough_orchestrator_tally_failed\n' >> "$trace_log_path"
+
 ~/.claude/commands/_shared/tools/artifact-render.py \
     --input "$artifact_path" \
     --output "$review_dir/artifact.md"
 ```
 
-Tally failure is non-fatal (observability, not correctness). On
+Tally failures are non-fatal (observability, not correctness). On
 render non-zero: log stderr to `trace.md` with tag
 `walkthrough_render_failed`. Continue to step 6.2 — the artifact
 patches stand; the user can manually re-render.
 
 Issue-filing in §6.5 below dispatches another batch of sub-agents
-after this point; those land in `tokens.jsonl` but the walkthrough
-does not re-render after §6.5, so their cost will only surface on
-the next `/adams-review-fix` (or subsequent `/adams-review-add` /
-`/adams-review-walkthrough`) run when that command re-tallies. This
-is acceptable — issue-filing is terminal and no further re-publish
-follows it.
+after this point; those land in `tokens.jsonl` (and generate further
+orchestrator turns) but the walkthrough does not re-render after §6.5,
+so their cost will only surface on the next `/adams-review-fix` (or
+subsequent `/adams-review-add` / `/adams-review-walkthrough`) run when
+that command re-tallies. This is acceptable — issue-filing is terminal
+and no further re-publish follows it.
 
 #### 6.2. Re-publish the main review comment (PR mode only)
 

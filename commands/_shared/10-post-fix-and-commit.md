@@ -999,24 +999,31 @@ each step's outcome is logged; failures do not abort the block.
 
 1. **fix_attempts + state transitions** — done in 9d above.
 
-2. **Re-tally `subagent_tokens` from `tokens.jsonl`** so the published
-   artifact reflects cumulative sub-agent spend across
-   `/adams-review` + this fix run (Phase 9a/9b/9c reviewer + any
-   9.pre.reconcile agent). `tokens.jsonl` is append-only — every
-   sub-agent dispatch already logged itself; this is a pure
-   readback:
+2. **Re-tally `subagent_tokens` and `orchestrator_tokens`** so the
+   published artifact reflects cumulative spend across `/adams-review`
+   + this fix run (Phase 9a/9b/9c reviewer + any 9.pre.reconcile agent,
+   plus every orchestrator turn since `review_started_at`).
+   `tokens.jsonl` is append-only and the transcript files on disk are
+   append-only too — every sub-agent dispatch and every orchestrator
+   turn already logged itself; this is a pure readback:
 
    ```bash
    ~/.claude/commands/_shared/tools/tally-subagent-tokens.sh \
      --tokens-log "$tokens_log_path" \
      --artifact   "$artifact_path" \
      2>>"$trace_log_path" || printf 'tally_failed\n' >> "$trace_log_path"
+
+   ~/.claude/commands/_shared/tools/orchestrator-tokens.sh \
+     --artifact "$artifact_path" \
+     --since    "$review_started_at" \
+     2>>"$trace_log_path" || printf 'orchestrator_tally_failed\n' >> "$trace_log_path"
    ```
 
-   Failure is non-fatal (observability, not correctness): the PR
-   comment's total may stay stale but the commit and state
-   transitions already landed. Same fallback philosophy as §11's
-   `tokens: null`.
+   Both failures are non-fatal (observability, not correctness): the PR
+   comment's totals may stay stale but the commit and state transitions
+   already landed. Same fallback philosophy as §11's `tokens: null`.
+   `$review_started_at` is loaded from the artifact in Phase 7, so it's
+   in scope here.
 
 3. **Schema-validate** the mutated artifact:
 
@@ -1245,10 +1252,12 @@ an extra `reconcile_fallback=true` flag that step 8 reads.
      leftover-attempted hard abort on next run is the deterministic
      recovery path).
 
-2. **Re-tally `subagent_tokens`** — same as committed branch step 2.
-   Runs here too so the artifact (and its downstream re-render) reflect
-   sub-agent spend from any 9.pre.reconcile / 9a agents that dispatched
-   before the degenerate path was taken.
+2. **Re-tally `subagent_tokens` and `orchestrator_tokens`** — same as
+   committed branch step 2. Runs here too so the artifact (and its
+   downstream re-render) reflect sub-agent spend from any
+   9.pre.reconcile / 9a agents that dispatched before the degenerate
+   path was taken, and orchestrator spend from every turn since
+   `review_started_at`.
 
 3. **Schema-validate** — same as committed branch step 3.
 

@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-read.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-patch.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-validate.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-render.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-publish.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/assign-finding-ids.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/log-phase.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/log-tokens.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/tally-subagent-tokens.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/repo-slug.sh:*), Bash(git:*), Bash(jq:*), Bash(date:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(cat:*), Bash(printf:*), Bash(tr:*), Bash(awk:*), Bash(grep:*), Bash(mktemp:*), Read, Agent
+allowed-tools: Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-read.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-patch.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-validate.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-render.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-publish.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/assign-finding-ids.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/log-phase.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/log-tokens.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/tally-subagent-tokens.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/orchestrator-tokens.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/repo-slug.sh:*), Bash(git:*), Bash(jq:*), Bash(date:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(cat:*), Bash(printf:*), Bash(tr:*), Bash(awk:*), Bash(grep:*), Bash(mktemp:*), Read, Agent
 argument-hint: "[<paste...>] [--file path --line N --claim \"...\"] [--impact <type>] [--no-dedup]"
 description: Inject externally-sourced findings (cloud /ultrareview, manual finds, etc.) into the most recent /adams-review artifact for this branch. Validates via Phase 4, re-renders, re-publishes.
 disable-model-invocation: false
@@ -789,17 +789,23 @@ phase_4_elapsed=$(( $(date +%s) - phase_4_start_epoch ))
 ### 8. Re-tally `subagent_tokens` + re-render `artifact.md`
 
 Re-tally first so the rendered report (and the downstream PR comment
-update in step 9) reflects this run's new sub-agent spend on top of
-the prior `/adams-review` baseline. The paste normalizer (§3a) and any
-Phase-4 re-validators that ran during this `/adams-review-add`
-invocation already logged their usage to `tokens.jsonl`; the helper is
-a pure readback:
+update in step 9) reflects this run's new sub-agent + orchestrator
+spend on top of the prior `/adams-review` baseline. The paste
+normalizer (§3a) and any Phase-4 re-validators that ran during this
+`/adams-review-add` invocation already logged their sub-agent usage to
+`tokens.jsonl`; the orchestrator transcript on disk captured every
+main-session turn. Both helpers are pure readbacks:
 
 ```bash
 ~/.claude/commands/_shared/tools/tally-subagent-tokens.sh \
     --tokens-log "$tokens_log_path" \
     --artifact   "$artifact_path" \
     2>>"$trace_log_path" || printf 'add_tally_failed\n' >> "$trace_log_path"
+
+~/.claude/commands/_shared/tools/orchestrator-tokens.sh \
+    --artifact "$artifact_path" \
+    --since    "$review_started_at" \
+    2>>"$trace_log_path" || printf 'add_orchestrator_tally_failed\n' >> "$trace_log_path"
 
 ~/.claude/commands/_shared/tools/artifact-render.py \
     --input "$artifact_path" \

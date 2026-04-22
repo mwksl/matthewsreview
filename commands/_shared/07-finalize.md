@@ -46,8 +46,7 @@ spend, not just the initial `/adams-review` snapshot.
 ```bash
 ~/.claude/commands/_shared/tools/orchestrator-tokens.sh \
   --artifact "$artifact_path" \
-  --since    "$review_started_at" \
-  --cwd      "$repo_root"
+  --since    "$review_started_at"
 ```
 
 Companion to the sub-agent tally. Scans every Claude Code transcript
@@ -59,13 +58,18 @@ tokens are the sub-agents' own internal API calls, orchestrator tokens
 are the main session's per-turn usage. Together they cover the full
 spend of a review.
 
-`<cwd-slug>` derivation uses `tr '/.' '-'` (both `/` and `.` map to
-`-`; Claude Code's own convention). The helper is safe to call when
-the transcript directory is absent — it emits a zero rollup rather
-than erroring. Same "cumulative across every lifecycle terminus"
-pattern as the sub-agent tally: `/adams-review-fix`,
-`/adams-review-add`, and `/adams-review-walkthrough` each re-invoke
-it before their final render.
+The helper defaults `--cwd` to `$(pwd -P)`, which is exactly the
+Claude Code session's cwd — the same path whose slugged form
+(`tr '/.' '-'`) names the transcript directory. Don't override
+`--cwd` unless testing; passing `$repo_root` would mis-point in
+worktrees where the session was started from the worktree path.
+
+The helper is safe to call when the transcript directory is absent —
+it emits a zero rollup rather than erroring. Same "cumulative across
+every lifecycle terminus" pattern as the sub-agent tally:
+`/adams-review-fix`, `/adams-review-add`, and
+`/adams-review-walkthrough` each re-invoke it before their final
+render.
 
 Soft over-count modes (unrelated same-cwd sessions, intermission chat
 between lifecycle commands) are accepted for v1 — both bias towards
