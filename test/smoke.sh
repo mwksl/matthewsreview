@@ -18,7 +18,7 @@ set -o pipefail
 
 THIS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$THIS/.." && pwd)"
-TOOLS="$REPO/commands/_shared/tools"
+TOOLS="$REPO/bin"
 FIX="$THIS/fixtures"
 
 WORK=/tmp/s1
@@ -1555,7 +1555,7 @@ fi
 # ORIGINAL FG-N as fix_group_id on a reconciled run (FG-RECON is
 # in-memory only; schema-valid FG-N lands on disk).
 
-FRAG="$REPO/commands/_shared/10-post-fix-and-commit.md"
+FRAG="$REPO/fragments/10-post-fix-and-commit.md"
 
 # FX-RECON-1: fragment offers a three-way AskUserQuestion on overlap,
 # with Abort as the default (recommended) choice.
@@ -2080,7 +2080,7 @@ fi
 # surfaces here.
 
 PROMOTE_MD="$REPO/commands/adams-review-promote.md"
-PROMOTE_CORE_MD="$REPO/commands/_shared/promote-core.md"
+PROMOTE_CORE_MD="$REPO/fragments/promote-core.md"
 
 # WT-0: promote-core precondition PROCEEDS (not no-op) for confirmed_auto +
 # curr_hc == null. Pre-existing-bug guard: a blanket no-op on that row silently
@@ -2512,7 +2512,7 @@ fi
 # run surfaced a validator that edited the working tree (F027) and two class-of-bug
 # misses whose prior fixes had scoped only to the obvious site (F032 ← F011,
 # F034 ← F037).
-VALIDATION_MD="$REPO/commands/_shared/05-validation.md"
+VALIDATION_MD="$REPO/fragments/05-validation.md"
 
 # VR-1: Phase 4a + 4b validator prompts contain a read-only preamble forbidding
 # Edit/Write. Prevents a repeat of the F027 incident where an Opus validator
@@ -2554,7 +2554,7 @@ fi
 # justified by a false inline comment (bug_007, F021) and a new scoring loop
 # whose bound drifted from every sibling scoring path in the codebase
 # (bug_001, F023).
-POSTFIX_MD="$REPO/commands/_shared/10-post-fix-and-commit.md"
+POSTFIX_MD="$REPO/fragments/10-post-fix-and-commit.md"
 
 # PF-1: Phase 9a prompt step 5a — adjacent-regression sweep kept as the local
 # ±20-lines same-file check. Split from the old combined step 5 so step 5b can
@@ -2968,9 +2968,9 @@ fi
 # L7-1: fragment presence — 01-detection.md step 1.1 table has L7 row,
 # step 1.3 has a dispatch block with the L7 header, and step 1.4's
 # lens-tag list names L7-holistic.
-if grep -qE '^\| L7 — holistic review' "$REPO/commands/_shared/01-detection.md" \
-    && grep -qF '#### L7 — holistic review (Opus' "$REPO/commands/_shared/01-detection.md" \
-    && grep -qF 'L7-holistic' "$REPO/commands/_shared/01-detection.md"; then
+if grep -qE '^\| L7 — holistic review' "$REPO/fragments/01-detection.md" \
+    && grep -qF '#### L7 — holistic review (Opus' "$REPO/fragments/01-detection.md" \
+    && grep -qF 'L7-holistic' "$REPO/fragments/01-detection.md"; then
     pass "L7-1 (§2.9.D): 01-detection.md fragment has L7 table row, dispatch block, and lens-tag"
 else
     fail "L7-1: L7 fragment wiring incomplete"
@@ -3030,9 +3030,9 @@ fi
 # UXT-1 guards the L5-ux diagnostic-message-quality addition (Stage
 # 2.9.B). Content lives in lens-ux-reference.md which L5 inlines via
 # `!`cat`` preprocessor, so grep the reference file directly.
-if grep -qF 'Diagnostic message quality' "$REPO/commands/_shared/lens-ux-reference.md" \
-    && grep -qF 'parseDate' "$REPO/commands/_shared/lens-ux-reference.md" \
-    && grep -qF 'empty-buffer' "$REPO/commands/_shared/lens-ux-reference.md"; then
+if grep -qF 'Diagnostic message quality' "$REPO/fragments/lens-ux-reference.md" \
+    && grep -qF 'parseDate' "$REPO/fragments/lens-ux-reference.md" \
+    && grep -qF 'empty-buffer' "$REPO/fragments/lens-ux-reference.md"; then
     pass "UXT-1 (§2.9.B): lens-ux-reference.md includes diagnostic-message-quality section"
 else
     fail "UXT-1: diagnostic-message-quality content missing from lens-ux-reference.md"
@@ -3043,16 +3043,16 @@ fi
 # would regress detection without failing any helper-level test.
 
 # LT-1: Outer-pass contains the consumer-surface value trace bullet.
-if grep -qF 'Consumer-surface value trace' "$REPO/commands/_shared/01-detection.md" \
-    && grep -qF '"0% APR"' "$REPO/commands/_shared/01-detection.md"; then
+if grep -qF 'Consumer-surface value trace' "$REPO/fragments/01-detection.md" \
+    && grep -qF '"0% APR"' "$REPO/fragments/01-detection.md"; then
     pass "LT-1 (§2.9.A): L2 outer pass includes consumer-surface value trace"
 else
     fail "LT-1: consumer-surface bullet missing from L2 prompt"
 fi
 
 # LT-2: Outer-pass contains the cross-provider / domain-scope bullet.
-if grep -qF 'Cross-provider / domain-scope check' "$REPO/commands/_shared/01-detection.md" \
-    && grep -qF 'recategorization pass triggered by Apple-import' "$REPO/commands/_shared/01-detection.md"; then
+if grep -qF 'Cross-provider / domain-scope check' "$REPO/fragments/01-detection.md" \
+    && grep -qF 'recategorization pass triggered by Apple-import' "$REPO/fragments/01-detection.md"; then
     pass "LT-2 (§2.9.A): L2 outer pass includes cross-provider / domain-scope check"
 else
     fail "LT-2: cross-provider bullet missing from L2 prompt"
@@ -3061,8 +3061,8 @@ fi
 # LT-3: Inner-pass item 5 is SQL-JOIN-vs-UNIQUE and item 6 is Same-
 # block adjacency (renumbered). Both anchors must be present in the
 # expected order.
-if grep -qF '5. **SQL JOIN join-key vs. target-table UNIQUE-constraint' "$REPO/commands/_shared/01-detection.md" \
-    && grep -qF '6. **Same-block adjacency.**' "$REPO/commands/_shared/01-detection.md"; then
+if grep -qF '5. **SQL JOIN join-key vs. target-table UNIQUE-constraint' "$REPO/fragments/01-detection.md" \
+    && grep -qF '6. **Same-block adjacency.**' "$REPO/fragments/01-detection.md"; then
     pass "LT-3 (§2.9.A): inner-pass item 5=SQL-JOIN-vs-UNIQUE, item 6=Same-block adjacency"
 else
     fail "LT-3: inner-pass renumbering / JOIN item missing"
@@ -3071,7 +3071,7 @@ fi
 # PFD-8: 01-detection.md contains the step 1.2b wiring block. Guards
 # against silent removal — smoke passes for the helper even if the
 # wiring is deleted, so add an explicit presence check.
-DETECTION_MD="$REPO/commands/_shared/01-detection.md"
+DETECTION_MD="$REPO/fragments/01-detection.md"
 if grep -qF '### 1.2b. Prior-fix suspect scan' "$DETECTION_MD" \
     && grep -qF 'prior-fix-diff.sh' "$DETECTION_MD" \
     && grep -qF 'prior_fix_suspects=' "$DETECTION_MD"; then

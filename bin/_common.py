@@ -1,6 +1,6 @@
 """Shared helpers for adams-review Python scripts.
 
-This module is imported by sibling scripts in the same `tools/` directory
+This module is imported by sibling scripts in the same `bin/` directory
 (notably `artifact-patch.py` and `artifact-render.py`). It is NOT a uv
 inline-script itself — callers supply the uv shebang + dep spec. When
 `uv run --script caller.py` runs, Python prepends the caller's directory
@@ -29,7 +29,7 @@ EXIT_MISSING_DEP = 5         # jsonschema import failed (shouldn't happen under 
 EXIT_USAGE = 64              # argparse / usage error (conventional)
 
 
-SCHEMA_PATH = Path(__file__).parent.parent / "schema-v1.json"
+SCHEMA_PATH = Path(__file__).parent / "schema-v1.json"
 
 
 # ----- Error-as-prompt ---------------------------------------------------
@@ -86,7 +86,7 @@ def _load_validator():
     if not SCHEMA_PATH.exists():
         err_prompt(
             f"schema file not found at {SCHEMA_PATH}",
-            action="verify ~/.claude/commands/_shared is symlinked to the repo's commands/_shared directory."
+            action="verify schema-v1.json is shipped alongside this script in the plugin's bin/ directory."
         )
         sys.exit(EXIT_VALIDATION)
     with open(SCHEMA_PATH, encoding="utf-8") as f:
