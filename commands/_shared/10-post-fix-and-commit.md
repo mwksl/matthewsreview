@@ -1013,6 +1013,8 @@ each step's outcome is logged; failures do not abort the block.
      --artifact   "$artifact_path" \
      2>>"$trace_log_path" || printf 'tally_failed\n' >> "$trace_log_path"
 
+   review_started_at=$(jq -r '.review_started_at // empty' "$artifact_path")
+
    ~/.claude/commands/_shared/tools/orchestrator-tokens.sh \
      --artifact "$artifact_path" \
      --since    "$review_started_at" \
@@ -1022,8 +1024,9 @@ each step's outcome is logged; failures do not abort the block.
    Both failures are non-fatal (observability, not correctness): the PR
    comment's totals may stay stale but the commit and state transitions
    already landed. Same fallback philosophy as §11's `tokens: null`.
-   `$review_started_at` is loaded from the artifact in Phase 7, so it's
-   in scope here.
+   `review_started_at` is loaded inline here (Phase 7 doesn't hoist it
+   into the working set by default) so this block is self-contained
+   regardless of what earlier fragments loaded.
 
 3. **Schema-validate** the mutated artifact:
 

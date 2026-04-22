@@ -802,6 +802,8 @@ main-session turn. Both helpers are pure readbacks:
     --artifact   "$artifact_path" \
     2>>"$trace_log_path" || printf 'add_tally_failed\n' >> "$trace_log_path"
 
+review_started_at=$(jq -r '.review_started_at // empty' "$artifact_path")
+
 ~/.claude/commands/_shared/tools/orchestrator-tokens.sh \
     --artifact "$artifact_path" \
     --since    "$review_started_at" \

@@ -44,6 +44,8 @@ spend, not just the initial `/adams-review` snapshot.
 ### 6.2b. Tally `orchestrator_tokens` from the session transcript(s)
 
 ```bash
+review_started_at=$(jq -r '.review_started_at // empty' "$artifact_path")
+
 ~/.claude/commands/_shared/tools/orchestrator-tokens.sh \
   --artifact "$artifact_path" \
   --since    "$review_started_at"
