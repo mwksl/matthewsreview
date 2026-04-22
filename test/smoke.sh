@@ -2079,7 +2079,7 @@ fi
 # wiring. The scope jq MUST stay in sync with Phase 8 eligibility — any drift
 # surfaces here.
 
-PROMOTE_MD="$REPO/commands/adams-review-promote.md"
+PROMOTE_MD="$REPO/commands/promote.md"
 PROMOTE_CORE_MD="$REPO/fragments/promote-core.md"
 
 # WT-0: promote-core precondition PROCEEDS (not no-op) for confirmed_auto +

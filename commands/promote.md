@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-read.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-patch.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-validate.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-render.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-publish.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/repo-slug.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(cat:*), Bash(printf:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(tr:*), Read, AskUserQuestion
+allowed-tools: Bash(artifact-read.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(repo-slug.sh:*), Bash(include:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(cat:*), Bash(printf:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(tr:*), Read, AskUserQuestion
 argument-hint: "<finding_id> [--reason \"...\"] [--fix-hint \"...\"] [--force] [--defer-publish]"
 description: Promote a finding to auto-fixable via human override. Patches artifact, re-renders, re-publishes to PR.
 disable-model-invocation: false
@@ -101,7 +101,7 @@ canned options, use the option text as `reason`. Capture the final
 reviews_root="${ADAMS_REVIEW_REVIEWS_ROOT:-$HOME/.adams-reviews}"
 head_branch=$(git rev-parse --abbrev-ref HEAD)
 repo_root=$(git rev-parse --show-toplevel)
-repo_slug=$(~/.claude/commands/_shared/tools/repo-slug.sh --repo-root "$repo_root")
+repo_slug=$(repo-slug.sh --repo-root "$repo_root")
 latest_path="$reviews_root/$repo_slug/$head_branch/latest.txt"
 ```
 
@@ -123,7 +123,7 @@ trace_log_path="$review_dir/trace.md"
 Capture paths. Schema-validate as a safety rail:
 
 ```bash
-~/.claude/commands/_shared/tools/artifact-validate.sh --path "$artifact_path"
+artifact-validate.sh --path "$artifact_path"
 ```
 
 On non-zero: surface the validator stderr and abort — a broken
@@ -141,7 +141,7 @@ entry) live in the shared fragment below. It reads `$finding_id`,
 `$curr_action`, `$curr_score`, `$curr_hc`, `$ts`, and `$reviewer` for
 use in steps 7, 8, and 10 below.
 
-!`cat ~/.claude/commands/_shared/promote-core.md`
+!`include promote-core.md`
 
 ### 7. Re-render `artifact.md`
 
@@ -150,7 +150,7 @@ Skip this step entirely when `defer_publish == true` — jump to step
 all deferred promotes have landed.
 
 ```bash
-~/.claude/commands/_shared/tools/artifact-render.py \
+artifact-render.py \
     --input "$artifact_path" \
     --output "$review_dir/artifact.md"
 ```
@@ -186,7 +186,7 @@ publish_args=(
 )
 [[ -n "$comment_id" ]] && publish_args+=(--comment-id "$comment_id")
 
-~/.claude/commands/_shared/tools/artifact-publish.sh "${publish_args[@]}"
+artifact-publish.sh "${publish_args[@]}"
 ```
 
 If `mode == "local"`: call with `--mode local --review-id "$review_id"
