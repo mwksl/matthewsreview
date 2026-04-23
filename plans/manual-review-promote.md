@@ -8,7 +8,7 @@ Related DESIGN sections to update: §5.2.1 (disposition table), §6 (artifact sc
 
 Give a human reviewer a single-command path to promote any finding to auto-fix, overriding both the validator's scoring gate and the impact_type lane restriction, with full provenance preserved in the artifact.
 
-Concrete use case: a human reads `/adams-review`'s PR comment, sees three findings in "Uncertain" or "Requires manual attention" that they want auto-fixed, runs `/adams-review-promote F003 --reason "validator was too conservative"` for each, then `/adams-review-fix` and those three get fixed alongside whatever was already confirmed_auto.
+Concrete use case: a human reads `/adams-review`'s PR comment, sees three findings in "Uncertain" or "Requires manual attention" that they want auto-fixed, runs `/adams-review-promote F003 --reason "validator was too conservative"` for each, then `/adams-review-fix` and those three get fixed alongside whatever was already confirmed_mechanical.
 
 ## 2. Non-goals / explicitly deferred
 
@@ -33,7 +33,7 @@ Rather than add a `--promote-finding` mode to `artifact-patch.py`, reuse the exi
 
 - Add `human_confirmation` to `JSON_SETTABLE_FINDING_FIELDS`.
 - The slash command issues ONE patch call that mutates four fields atomically: `disposition`, `actionability`, `human_confirmation` (+ the derived `is_actionable` from existing coupling).
-- Preconditions (refuse `confirmed_auto`/`resolved`, require `--force` on `disproven`) live in the command markdown; they're straightforward state reads, no new helper logic needed.
+- Preconditions (refuse `confirmed_mechanical`/`resolved`, require `--force` on `disproven`) live in the command markdown; they're straightforward state reads, no new helper logic needed.
 
 This matches the existing split: helpers enforce schema + coupling + state transitions; orchestrators enforce phase-specific business logic.
 
@@ -96,7 +96,7 @@ Modify the jq in step 8.1 (currently `09-fix-execution.md:15-23`) from:
 ```jq
 [.findings[]
  | select(.current_state == "open")
- | select(.disposition == "confirmed_auto" or .disposition == "partial" or .disposition == "regression")
+ | select(.disposition == "confirmed_mechanical" or .disposition == "partial" or .disposition == "regression")
  | select(.impact_type == "correctness" or .impact_type == "security")
  | select(.score_phase4 != null and .score_phase4 >= $thr)
  | .id
@@ -108,7 +108,7 @@ to:
 ```jq
 [.findings[]
  | select(.current_state == "open")
- | select(.disposition == "confirmed_auto" or .disposition == "partial" or .disposition == "regression")
+ | select(.disposition == "confirmed_mechanical" or .disposition == "partial" or .disposition == "regression")
  | select(
      (.human_confirmation != null)
      or (
@@ -130,7 +130,7 @@ DESIGN §5.2.1 and §13.1 both contain prose versions of the same rule ("Phase 8
 ---
 allowed-tools: Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-read.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-patch.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-validate.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-render.py:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/artifact-publish.sh:*), Bash(/Users/adammiller/.claude/commands/_shared/tools/repo-slug.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(cat:*), Bash(printf:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Read, AskUserQuestion
 argument-hint: "<finding_id> [--reason \"...\"] [--force]"
-description: Promote a finding to auto-fixable (human override). Sets disposition=confirmed_auto, records provenance, re-renders, re-publishes.
+description: Promote a finding to auto-fixable (human override). Sets disposition=confirmed_mechanical, records provenance, re-renders, re-publishes.
 disable-model-invocation: false
 ---
 ```
@@ -164,8 +164,8 @@ Extract `curr_disp`, `curr_action`, `curr_score`, `curr_hc` via jq.
 Preconditions:
 | current disposition | action |
 |---|---|
-| `confirmed_auto` + `human_confirmation != null` | exit 0 with "Already promoted by $reviewer; no-op" |
-| `confirmed_auto` (no human_confirmation) | exit 0 with "Already confirmed_auto by validator; no-op" |
+| `confirmed_mechanical` + `human_confirmation != null` | exit 0 with "Already promoted by $reviewer; no-op" |
+| `confirmed_mechanical` (no human_confirmation) | exit 0 with "Already confirmed_mechanical by validator; no-op" |
 | `resolved` | exit 1: "Finding resolved; cannot promote." |
 | `disproven` and no `--force` | exit 1: "Validator disproved this (score=$curr_score). Pass --force to override." |
 | `disproven` with `--force`, OR `uncertain`, `below_gate`, `pre_existing_report`, `confirmed_manual`, `confirmed_report`, `pending_validation` | proceed |
@@ -198,7 +198,7 @@ echo "$human_confirmation" > "/tmp/adams-promote-hc-$finding_id.json"
 
 ```bash
 "$TOOLS/artifact-patch.py" --path "$artifact_path" --finding-id "$finding_id" \
-    --set disposition=confirmed_auto \
+    --set disposition=confirmed_mechanical \
     --set actionability=auto_fixable \
     --set-json "human_confirmation=@/tmp/adams-promote-hc-$finding_id.json"
 rm -f "/tmp/adams-promote-hc-$finding_id.json"
@@ -241,7 +241,7 @@ Print one block summarizing what changed:
 
 ```
 Promoted F037:
-  disposition: uncertain → confirmed_auto
+  disposition: uncertain → confirmed_mechanical
   actionability: report_only → auto_fixable
   reviewer: you@example.com
   reason: validator too conservative on the off-by-one
@@ -306,7 +306,7 @@ Add `"human_confirmation": null,` to the example finding near the other field co
 
 Add a footnote row / prose paragraph under the table:
 
-> **Manual override.** `/adams-review-promote` sets `disposition=confirmed_auto`, `actionability=auto_fixable`, and `human_confirmation=<object>` on any finding except `confirmed_auto` (no-op) and `resolved` (rejected). `disproven` requires `--force`. The existing `score_phase4` is preserved (the validator's honest score); Phase 8 eligibility bypasses both gates when `human_confirmation != null` (see §5.2.1).
+> **Manual override.** `/adams-review-promote` sets `disposition=confirmed_mechanical`, `actionability=auto_fixable`, and `human_confirmation=<object>` on any finding except `confirmed_mechanical` (no-op) and `resolved` (rejected). `disproven` requires `--force`. The existing `score_phase4` is preserved (the validator's honest score); Phase 8 eligibility bypasses both gates when `human_confirmation != null` (see §5.2.1).
 
 ### §13.2 — thresholds
 
@@ -327,7 +327,7 @@ Add new `MP-*` (manual-promote) block with 6 assertions, structured like the exi
 | MP-1 | `human_confirmation` accepted as schema-valid when null | `--init` of seed with `"human_confirmation": null` on each finding passes `artifact-validate.sh` |
 | MP-2 | `human_confirmation` accepted as schema-valid when populated | `--set-json human_confirmation=<object>` on F001 passes validation |
 | MP-3 | Incomplete `human_confirmation` (missing `promoted_from`) rejected | `--set-json` with a partial object fails validation with exit 1 |
-| MP-4 | Promoted ux-finding becomes fix-eligible | Fixture: ux finding with `score_phase4=30`, `disposition=uncertain`. After `--set disposition=confirmed_auto --set actionability=auto_fixable --set-json human_confirmation=<valid>`, the Phase 8 eligibility jq returns it |
+| MP-4 | Promoted ux-finding becomes fix-eligible | Fixture: ux finding with `score_phase4=30`, `disposition=uncertain`. After `--set disposition=confirmed_mechanical --set actionability=auto_fixable --set-json human_confirmation=<valid>`, the Phase 8 eligibility jq returns it |
 | MP-5 | Unpromoted ux-finding stays fix-ineligible | Same fixture without `human_confirmation` mutation — eligibility jq returns empty |
 | MP-6 | Renderer shows "(human-confirmed)" tag | After MP-4's mutation, `artifact-render.py` output contains `(human-confirmed)` somewhere in the F00X row or details |
 
@@ -358,7 +358,7 @@ Blast radius per global CLAUDE.md:
 
 - **Every writer** of `disposition`, `actionability`, `score_phase4`: Phase 3 (04-scoring-gate), Phase 4 (05-validation via `--apply-decisions`), Phase 9 (09-fix-execution via `--apply-fix-outcomes`). None of them write `human_confirmation`; none of them read it either. Promote writes it independently. No writer collision.
 - **Every consumer** of the Phase 8 selector: `09-fix-execution.md:15-23` is the only place. The cross-cutting sub-agent (`06-cross-cutting.md:21`) filters on `is_actionable: true` — a promoted finding has `is_actionable=true` via the existing derivation, so it'll be included in cross-cutting analysis, which is what we want.
-- **Parallel paths**: `--apply-decisions` and `--set disposition=...` are two paths to setting disposition. `--apply-decisions` derives disposition from score + actionability per §13.1; it never produces `confirmed_auto` for a non-correctness/security finding (the lane filter is a separate concern there). Promote uses `--set` directly, bypassing the derivation. That's intentional — the whole point is to skip the decision table.
+- **Parallel paths**: `--apply-decisions` and `--set disposition=...` are two paths to setting disposition. `--apply-decisions` derives disposition from score + actionability per §13.1; it never produces `confirmed_mechanical` for a non-correctness/security finding (the lane filter is a separate concern there). Promote uses `--set` directly, bypassing the derivation. That's intentional — the whole point is to skip the decision table.
 - **Stale comments/docs**: §5.2.1 table, §13.1 table, §13.2 threshold table, §19.8 prompt (check — mentions impact_type filter), §21.2 (artifact-patch contract — update to note new allowlisted field), §25.2 working-set (no change, promote doesn't participate in Phase 7-9 working set).
 
 Post-execution once-over will re-read the actual diff and check these again.

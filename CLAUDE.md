@@ -10,7 +10,7 @@ Build repo for five personal Claude Code slash commands, packaged as a plugin (`
 
 - **`/adamsreview:review`** — multi-lens code review of a branch or PR (Phases 0–6).
 - **`/adamsreview:add`** — inject externally-sourced findings (cloud `/ultrareview` paste, Opus once-over, manual finds, etc.) into the most recent review's existing artifact. Free-form paste mode dispatches a Sonnet normalizer; structured `--file/--line/--claim` mode skips the normalizer; one Sonnet dedup pass against existing findings; Phase 4 validation lane-aware (Opus deep / Sonnet light) without Wave 2; re-renders + re-publishes to the existing PR comment.
-- **`/adamsreview:walkthrough`** — interactive driver that walks the reviewer through findings `/adamsreview:fix` would skip. Preflight offers a two-tier scope choice (default **Qualifying** — excludes Phase-3-demoted `below_gate`; **Full skip set** adds them back). `pre_existing_report` findings are always excluded from both walk tiers and routed exclusively to the end-of-run issue-filing phase (one-by-one draft/confirm/edit flow that calls `gh issue create`). Per-finding Sonnet briefing with an "Edit the fix hint" override path; for `confirmed_manual` / `confirmed_report` the briefer proposes best-effort hints. Closes the light-lane `confirmed_auto` gap where the default Phase 8 lane filter skips mechanically-fixable ux/policy findings.
+- **`/adamsreview:walkthrough`** — interactive driver that walks the reviewer through findings `/adamsreview:fix` would skip. Preflight offers a two-tier scope choice (default **Qualifying** — excludes Phase-3-demoted `below_gate`; **Full skip set** adds them back). `pre_existing_report` findings are always excluded from both walk tiers and routed exclusively to the end-of-run issue-filing phase (one-by-one draft/confirm/edit flow that calls `gh issue create`). Per-finding Sonnet briefing with an "Edit the fix hint" override path; for `confirmed_manual` / `confirmed_report` the briefer proposes best-effort hints. Closes the light-lane `confirmed_mechanical` gap where the default Phase 8 lane filter skips mechanically-fixable ux/policy findings.
 - **`/adamsreview:fix`** — automated fix loop for auto-fixable findings (Phases 7–9).
 - **`/adamsreview:promote`** — human override that promotes a single finding to auto-fixable, bypassing the Phase 8 impact_type lane filter and score threshold. Metadata-only; run `/adamsreview:fix` afterwards to apply. Used internally by `/adamsreview:walkthrough` via `fragments/promote-core.md` + `--defer-publish`.
 
@@ -33,7 +33,8 @@ The original four are **built and in production use** as of 2026-04-19 (Stages 1
 ├── Phase 1.5  ─┘ External PR-comment scrape (gh api → bot filter → comment-freshness →
 │                 Sonnet normalizer; ensemble mode only; joint dispatch with Phase 1)
 ├── Phase 2 — Dedup (one Sonnet call; merges equivalent candidates, unions source_families)
-├── Phase 3 — Cheap scoring + gate (Sonnet err-up rubric; ≥2 families auto-graduate)
+├── Phase 3 — Cheap scoring + gate (Sonnet err-up rubric; ≥2 families auto-graduate;
+│              logs demote_rate + score_phase3_histogram to phases.jsonl for #24 calibration)
 ├── Phase 4 — Validation (deep Opus per candidate for correctness/security;
 │              light Sonnet confirmation for ux/policy/architecture)
 ├── Phase 5 — Cross-cutting review (deep-lane only; dispatched Opus sub-agent)
@@ -81,8 +82,12 @@ the full review → fix / add / walkthrough arc:
 
 The two are non-overlapping (sub-agent internal API calls vs.
 main-session turns). Four separate orchestrator counters — fresh
-input / output / cache-read / cache-creation — are preserved because
-their $/token pricing differs by roughly an order of magnitude.
+input / output / cache-read / cache-creation — are preserved in the
+artifact because their $/token pricing differs by roughly an order of
+magnitude, but only two (output + fresh input) surface in the rendered
+PR-comment line: cache-read and cache-creation are prompt-cache
+plumbing, not user-facing signal. All four remain in
+`artifact.orchestrator_tokens` for offline cost analysis.
 
 `/adamsreview:walkthrough` re-tallies both before §6.1's re-publish;
 issue-filer agents dispatched in §6.5 (and the orchestrator turns that
@@ -124,7 +129,7 @@ Any other transition is rejected. Leftover `attempted` on a fresh `/adamsreview:
 | `pending_validation` | Gate-in parking; awaiting Phase 4 | `open` | `false` | Phase 3 |
 | `disproven` | `score_phase4 < 45` | `open` | `false` | Phase 4 |
 | `uncertain` | `score_phase4 45–59` | `open` | `false` | Phase 4 |
-| `confirmed_auto` | `score_phase4 ≥ 60`, deep lane, `actionability == auto_fixable` | `open` | `true` | Phase 4 |
+| `confirmed_mechanical` | `score_phase4 ≥ 60`, deep lane, `actionability == auto_fixable` | `open` | `true` | Phase 4 |
 | `confirmed_manual` | `score_phase4 ≥ 60`, `actionability == manual` | `open` | `false` | Phase 4 |
 | `confirmed_report` | `score_phase4 ≥ 60`, `actionability == report_only` | `open` | `false` | Phase 4 |
 | `pre_existing_report` | `origin == pre_existing` AND `origin_confidence == high` (normative override, regardless of score) | `open` | `false` | Phase 1 / re-asserted Phase 4 |
@@ -134,7 +139,7 @@ Any other transition is rejected. Leftover `attempted` on a fresh `/adamsreview:
 
 **Invariants** (enforced by writers):
 
-- `is_actionable` is derived: `true` iff `disposition ∈ {confirmed_auto, partial, regression}`. Never set it directly in conflict with `disposition`.
+- `is_actionable` is derived: `true` iff `disposition ∈ {confirmed_mechanical, partial, regression}`. Never set it directly in conflict with `disposition`.
 - `current_state == resolved` ⇔ `disposition == resolved`.
 - `human_confirmation` is absent/null unless `/adamsreview:promote` has run. Present-and-non-null is a Phase 8 bypass of both the lane filter and the threshold (see Score gates below). Promotion never mutates `score_phase4` — the validator's honest score is preserved for audit.
 
@@ -165,7 +170,7 @@ score_phase3 >= 45                           → advance to Phase 4
 score_phase4 < 45    → disposition: disproven,  is_actionable: false
 score_phase4 45–59   → disposition: uncertain,  is_actionable: false
 score_phase4 >= 60   → disposition depends on actionability set by validator:
-                         auto_fixable  → confirmed_auto   (is_actionable: true)
+                         auto_fixable  → confirmed_mechanical   (is_actionable: true)
                          manual        → confirmed_manual (is_actionable: false)
                          report_only   → confirmed_report (is_actionable: false)
                        confirmed_strength: "moderate" (60–74) or "strong" (75+)
@@ -184,7 +189,7 @@ regression  → disposition: regression, current_state: open   (retry-eligible;
 
 ```
 current_state == open
-  AND disposition ∈ {confirmed_auto, partial, regression}
+  AND disposition ∈ {confirmed_mechanical, partial, regression}
   AND (
     human_confirmation != null                                      // promote bypass
     OR (
@@ -200,14 +205,14 @@ current_state == open
 
 - **Phase 3 scoring gate (45)** — the threshold that decides which candidates enter Phase 4 validation. Candidates below it get `disposition=below_gate` and carry no `score_phase4`.
 - **Phase 4 confirmation gate (45/60/75)** — the thresholds that map `score_phase4` into `disproven` / `uncertain` / `confirmed_*` dispositions.
-- **Phase 8 fix gate (default 60)** — the composite gate governing `/adamsreview:fix`: disposition ∈ {confirmed_auto, partial, regression} **AND** deep lane **AND** `score_phase4 ≥ threshold`, with `human_confirmation` as the human-override bypass.
+- **Phase 8 fix gate (default 60)** — the composite gate governing `/adamsreview:fix`: disposition ∈ {confirmed_mechanical, partial, regression} **AND** deep lane **AND** `score_phase4 ≥ threshold`, with `human_confirmation` as the human-override bypass.
 
 `below_gate` is a *disposition name* (Phase 3), not a threshold. `/adamsreview:walkthrough` at its default **Qualifying** scope excludes `below_gate` findings because Phase 3 already judged them low-impact × low-confidence; the **Full skip set** scope includes them when a reviewer wants to sanity-check what Phase 3 demoted.
 
 ## Lanes
 
-- **Deep lane** (correctness, security): Phase 4a Opus per candidate with blast-radius tracing and a comprehensive fix proposal; passes through Phase 5 cross-cutting review. Phase 8 processes `confirmed_auto` findings here by default.
-- **Light lane** (ux, policy, architecture): Phase 4b Sonnet confirmation, report-first by default. Phase 8's lane filter excludes light-lane `confirmed_auto` unless `human_confirmation != null` (set by promote or walkthrough).
+- **Deep lane** (correctness, security): Phase 4a Opus per candidate with blast-radius tracing and a comprehensive fix proposal; passes through Phase 5 cross-cutting review. Phase 8 processes `confirmed_mechanical` findings here by default.
+- **Light lane** (ux, policy, architecture): Phase 4b Sonnet confirmation, report-first by default. Phase 8's lane filter excludes light-lane `confirmed_mechanical` unless `human_confirmation != null` (set by promote or walkthrough).
 
 That asymmetric default is what `/adamsreview:walkthrough` exists to close — the walkthrough scope is every finding the Phase 8 filter would skip at the current threshold.
 
@@ -227,7 +232,10 @@ adamsreview/
 │       ├── DESIGN.md               ← rev 8 normative design (historical)
 │       └── BUILD.md                ← stage-by-stage build journal (historical)
 ├── plans/                          ← per-stage plans (1–3 + 2.5/2.6/2.7/2.8 closed;
-│                                     plugin-conversion closed; stage-4-fragment-shrink live)
+│                                     plugin-conversion closed; post-plugin-improvements closed;
+│                                     stage-4-fragment-shrink live). Forward-looking work lives in
+│                                     `plans/backlog.md`; chronological idea log + DONE markers
+│                                     live in `plans/post-conversion-ideas.md`.
 ├── commands/                       ← bare-stem command files (D18 namespacing)
 │   ├── review.md                   ← /adamsreview:review     (Phases 0–6)
 │   ├── add.md                      ← /adamsreview:add        (inject external findings)
@@ -320,11 +328,14 @@ All scripts live under `bin/`. The plugin runtime adds `bin/` to `$PATH` on load
 | `artifact-read.sh` | Bash | `jq` wrapper. Flags: `--filter <jq>`, `--finding-id <id>`, `--summary` (emits `counts_by_disposition`). |
 | `staleness.sh` | Bash | Phase 7 file-overlap classifier. `git diff --name-only latest_known_sha..HEAD ∩ reviewed_files_all`. |
 | `claude-md-paths.sh` | Bash | Walks up from each touched file to repo root; emits deduped CLAUDE.md paths root-first. |
-| `origin-crosscheck.sh` | Bash | Phase 1 post-lens. Blame-traces each candidate; forces `pre_existing:high` if fully reachable from `$comparison_ref`; downgrades conflicting lens verdicts. |
+| `origin-crosscheck.sh` | Bash | Phase 1 post-lens. Blame-traces each candidate; forces `pre_existing:high` if fully reachable from `$comparison_ref`; downgrades conflicting lens verdicts. When the target file is PR-added (no `$comparison_ref:$file`), walks `git log --follow` to the pre-rename / pre-extraction ancestor and re-checks: if every blame SHA is either an ancestor of `$comparison_ref` or one of the file-add commits (content-preserving extraction — F038 case), forces `pre_existing:high`; PR-added lines inside an extracted file still respect the lens (`rename-follow-but-lines-modified-in-pr`). Genuinely-new files (no rename ancestor) keep the `reason=new-file` respect-lens path. |
 | `line-range-check.sh` | Bash | Phase 1 join-step sanity filter. Drops candidates whose `line_range[1]` overshoots the file at `$reviewed_sha` (lens-hallucinated ranges); emits `lens_hallucinated_line_range:` / `lens_referenced_missing_file:` audit lines. Pass-through for `file == "(unknown)"`. |
 | `comment-freshness.sh` | Bash | Phase 1.5 post-scrape. Drops bot comments whose referenced code has changed since the comment was posted (§13.13). |
 | `prior-fix-diff.sh` | Bash | Phase 1 L2 input. Deterministic prior-fix suspect scan: walks `git log -L` per hunk in the PR diff, filters to fix-intent commit subjects whose SHAs are ancestors of `$comparison_ref` (excluding the PR's own internal fix commits), emits a JSON array of suspect records for L2's prompt to judge as reverts. |
 | `repo-slug.sh` | Bash | Canonical `<repo-slug>` derivation. Single source of truth (Operational rule 7). |
+| `parse-with-repair.py` | Python | Stdin-to-stdout tolerant JSON parser. Layers: strict `json.loads` → fence-strip → `json-repair` → fence-strip+repair. Exit 0 = clean JSON on stdout, exit 1 = unrecoverable with error-as-prompt stderr. Foundation for the two normalizers below; used at the ensemble-adapter normalizer boundary (messiest external-tool output). |
+| `parse-validator-result.py` | Python | Canonicalizes Phase 4 validator output to `{score_phase4, actionability, confirmed_strength, decision, notes, validation_result, related_candidates_to_investigate}`. Handles shape drift: `{score_phase4}`, `{score:{correctness}}`, `{overall_numeric}` (1-5), `{severity: low/medium/high}`, ambiguous `{score: N}` (heuristic 1-5 / 1-10 / pass-through). `--lane deep\|light`. Exit 2 = score unrecoverable (caller routes to `uncertain` with `score_phase4: null`). Uses `parse-with-repair.py` internally. |
+| `source-family-map.py` | Python | Maps lens-emitted `source_family` to canonical (eight families: diff, structural, policy, ux, security, holistic, external-deep, external-add — the last emitted by `/adamsreview:add`). `--input <raw>` → canonical on stdout (exit 0) or `UNKNOWN_FAMILY:` on stderr (exit 3). Phase 1 join-step uses exit 3 to tag the candidate `source_family: "unknown"` + log drift — preserves the finding rather than silently dropping it. |
 
 **Writers (orchestrator-only):**
 

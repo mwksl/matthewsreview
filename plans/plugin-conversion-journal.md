@@ -164,7 +164,7 @@ Commit: c1608e3 (Phase 2: port remaining 4 commands to plugin layout)
 - No abs-path `Bash(/Users...)` grants remain
 
 **Interactive items deferred**:
-- 2.3: user runs each of 4 commands once against a real target (trivial-mode review, fix on confirmed_auto artifact, walkthrough on walkable artifact, add in structured mode).
+- 2.3: user runs each of 4 commands once against a real target (trivial-mode review, fix on confirmed_mechanical artifact, walkthrough on walkable artifact, add in structured mode).
 
 **Notes**: Build agent flagged a pre-existing gap — `review.md`'s `allowed-tools` doesn't list `line-range-check.sh`, which `01-detection.md` invokes. Not a Phase 2 regression (the helper wasn't granted previously either, just with a different path). May surface at runtime; will want fixing in a follow-up.
 
@@ -305,7 +305,7 @@ fb3876c Phase 5: docs — rewrite CLAUDE.md and README.md for plugin layout
 - **1b.4**: full-publish test — `/adams-review:promote <id> --reason "full-publish POC"` (no --defer-publish) against a throwaway test PR.
 - **2.3**: in a fresh session, invoke each of the remaining four commands once:
   - `/adams-review:review` against a docs-only PR (trivial_mode auto-detects).
-  - `/adams-review:fix` against an artifact with ≥1 `confirmed_auto`.
+  - `/adams-review:fix` against an artifact with ≥1 `confirmed_mechanical`.
   - `/adams-review:walkthrough` against an artifact with ≥1 walkable finding.
   - `/adams-review:add` in structured mode: `--file <path> --line <N> --claim "..."`.
 - **6.2**: one non-trivial `/adams-review:review` run (code PR, not docs-only) to exercise the 6-way Phase 1 fan-out. Verify tokens.jsonl shows exactly 6 phase-1 entries (7 with --ensemble).

@@ -57,6 +57,11 @@ Prompt essence (per §19.5):
 > You are a deep validator. Confirm or disprove this candidate, trace
 > its blast radius, and — if real — produce a concrete fix proposal.
 >
+> **Scoring contract.** Your `score_phase4` is a single integer 0-100
+> per the §20 rubric. Do not output a 1-5 or 1-10 scale, a float, or
+> a severity keyword — the orchestrator consumes the integer directly
+> and mis-scaled scores silently route findings to the wrong band.
+>
 > **Candidate:** `<finding JSON>`
 > **CLAUDE.md paths:** `$claude_md_paths`
 >
@@ -216,10 +221,10 @@ sees a single summary line instead of N per-finding prose blocks.
 | `null` | parse failure | `uncertain` | false | reason default: "uncertain (Phase 4 inconclusive)" |
 | `< 45` | disproven | `disproven` | false | reason default: "disproven by Phase 4" |
 | `45-59` | uncertain | `uncertain` | false | reason default: "uncertain (Phase 4 inconclusive)" |
-| `60-74` AND `actionability=auto_fixable` | | `confirmed_auto` | true | confirmed_strength: moderate |
+| `60-74` AND `actionability=auto_fixable` | | `confirmed_mechanical` | true | confirmed_strength: moderate |
 | `60-74` AND `actionability=manual` | | `confirmed_manual` | false | confirmed_strength: moderate |
 | `60-74` AND `actionability=report_only` | | `confirmed_report` | false | confirmed_strength: moderate |
-| `75+` AND `actionability=auto_fixable` | | `confirmed_auto` | true | confirmed_strength: strong |
+| `75+` AND `actionability=auto_fixable` | | `confirmed_mechanical` | true | confirmed_strength: strong |
 | `75+` AND `actionability=manual` | | `confirmed_manual` | false | confirmed_strength: strong |
 | `75+` AND `actionability=report_only` | | `confirmed_report` | false | confirmed_strength: strong |
 
@@ -228,7 +233,7 @@ automatically: derivation runs off `score_phase4 + actionability`, so
 a validator returning `decision: "confirmed", score_phase4: 40` routes
 to `disproven` via the score row; `decision: "disproven",
 score_phase4: 70, actionability: "auto_fixable"` routes to
-`confirmed_auto`. Validators shouldn't emit such mismatches, but when
+`confirmed_mechanical`. Validators shouldn't emit such mismatches, but when
 they do the structured fields win. Include the raw `decision` field
 in each tuple for audit-trail legibility — it's accepted by the helper
 but not authoritative.
@@ -242,6 +247,35 @@ one; otherwise let the helper fill the disposition-appropriate default.
 The helper writes `validation_result` only when the derived
 disposition lands in the confirmed band; pass it for every deep-lane
 tuple — uncertain / disproven tuples have it silently ignored.
+
+**Normalize validator output before tuple compose.** Sub-agent score
+shape is not deterministic across model versions / prompt drifts —
+validators have been observed emitting `{score: {correctness: 72}}`,
+`{overall_numeric: 3.5}`, `{severity: "high"}`, and `{score: 6}` instead
+of the `score_phase4` integer the §20 rubric asks for. Pipe each raw
+validator response through `parse-validator-result.py --lane
+deep|light` before composing the tuple; the helper returns a canonical
+shape (`score_phase4`, `actionability`, `confirmed_strength`,
+`decision`, `validation_result`, `notes`) with `scale_inferred:` audit
+notes when it had to guess. Exit 2 from the helper means the score was
+unrecoverable — emit `score_phase4: null` in the tuple so
+`--apply-decisions` routes to `uncertain` per §13.1 Phase-4 row 1, and
+stash the stderr in `trace.md` so the audit trail records the drift.
+
+```bash
+# For each validator response `$raw` (captured from Agent tool output):
+canon=$(printf '%s' "$raw" \
+    | parse-validator-result.py --lane deep \
+        2> >(tee -a "$trace_log_path" >&2)) \
+    || canon='{"score_phase4": null, "actionability": null, "notes": "Phase 4 parse/score unrecoverable"}'
+# `$canon` is now canonical JSON — merge it with {id: $finding_id} and
+# the sub-agent's raw `reason` (if any) to form the tuple. Do the same
+# for light lane with --lane light.
+```
+
+The helper's `notes` field flows into the tuple's `reason` when the
+validator didn't supply one — preserving the scale-inference audit
+trail in the persisted finding.
 
 **The contract is the output, not the technique.** Agent tool results
 land in orchestrator context, not a shell variable, so there's no
@@ -285,7 +319,7 @@ mkdir -p "$scratch"
 out=$(artifact-patch.py \
         --path "$artifact_path" \
         --apply-decisions "@$scratch/phase4-wave1-decisions.json")
-echo "$out"  # e.g. "applied 18 decisions (confirmed_auto=4, confirmed_manual=1, confirmed_report=0, uncertain=3, disproven=10)"
+echo "$out"  # e.g. "applied 18 decisions (confirmed_mechanical=4, confirmed_manual=1, confirmed_report=0, uncertain=3, disproven=10)"
 ```
 
 **On score parse failure** (sub-agent returned unparseable JSON even
@@ -311,14 +345,19 @@ already forbid it. This catches a prompt-override and restores the
 tree before Phase 5 so a misbehaving validator cannot poison the
 commit `/adamsreview:fix` will later produce.
 
+The `:!.claude/` pathspec excludes the worktree's `.claude/` directory
+from the sweep. Claude Code's own infrastructure (ScheduleWakeup locks,
+session state) writes there during a run — flagging those is a false
+positive, since `.claude/` is never substantive to a code review.
+
 ```bash
-dirty=$(git -C "$repo_root" status --porcelain 2>/dev/null)
+dirty=$(git -C "$repo_root" status --porcelain -- . ':!.claude/' 2>/dev/null)
 if [[ -n "$dirty" ]]; then
     printf 'phase_4_tree_dirty_reverted: %s\n' \
         "$(printf '%s\n' "$dirty" | awk '{print $2}' | paste -sd, -)" \
         >> "$trace_log_path"
-    # Restore tracked-file modifications.
-    git -C "$repo_root" checkout -- . 2>/dev/null || true
+    # Restore tracked-file modifications (respect the .claude/ exclusion).
+    git -C "$repo_root" checkout -- . ':!.claude/' 2>/dev/null || true
     # Remove anything the sub-agent created that git doesn't know about.
     printf '%s\n' "$dirty" | awk '/^\?\?/ {print $2}' \
         | while IFS= read -r p; do rm -f "$repo_root/$p"; done
@@ -453,7 +492,7 @@ log-phase.sh \
     --argjson elapsed "$phase_4_elapsed" \
     --argjson by_disp "$by_disp" \
     --argjson total_open "$(artifact-read.sh --path "$artifact_path" --filter '[.findings[] | select(.current_state == "open")] | length')" \
-    '{name:"validation", elapsed_sec:$elapsed, counts_by_state:{open:$total_open}, counts_by_disposition:$by_disp, delta:"<summarize e.g. +9 confirmed_auto, -5 disproven>"}')"
+    '{name:"validation", elapsed_sec:$elapsed, counts_by_state:{open:$total_open}, counts_by_disposition:$by_disp, delta:"<summarize e.g. +9 confirmed_mechanical, -5 disproven>"}')"
 ```
 
 ### Working-set delta after Phase 4

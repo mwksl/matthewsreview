@@ -78,8 +78,8 @@ Why "as its own sub-item" instead of one-off: the stage is called Hardening. A r
 
 `artifact-render.py`:
 
-- **Line 141–142** (deep summary iteration): `("confirmed_auto", "partial", "regression", "resolved", "confirmed_manual", "confirmed_report", "uncertain")` — includes `uncertain`. ✓
-- **Line 148** (light summary iteration): `("confirmed_auto", "confirmed_manual", "confirmed_report")` — omits `uncertain`. ✗
+- **Line 141–142** (deep summary iteration): `("confirmed_mechanical", "partial", "regression", "resolved", "confirmed_manual", "confirmed_report", "uncertain")` — includes `uncertain`. ✓
+- **Line 148** (light summary iteration): `("confirmed_mechanical", "confirmed_manual", "confirmed_report")` — omits `uncertain`. ✗
 - **Line 323** (light table iteration): same tuple as line 148. ✗
 
 Per DESIGN §13.1 Phase-4 decision rule, `score_phase4` in `45-59` yields `disposition: uncertain` **regardless of lane**. The schema and the patch script both allow light-lane `uncertain`. The renderer is the only layer that drops it.
@@ -148,7 +148,7 @@ Batch mode that consumes a JSON array of decision tuples and applies each one at
 }
 ```
 
-- `validation_result` present only when the resolved disposition (after the decision-table rule) lands in the confirmed band (`confirmed_auto` / `confirmed_manual` / `confirmed_report`). For `disproven` / `uncertain` tuples it's absent; the helper does not write the field in that case.
+- `validation_result` present only when the resolved disposition (after the decision-table rule) lands in the confirmed band (`confirmed_mechanical` / `confirmed_manual` / `confirmed_report`). For `disproven` / `uncertain` tuples it's absent; the helper does not write the field in that case.
 - Other fields optional per DESIGN §13.1; the helper applies the decision table to derive `disposition`, `is_actionable`, `confirmed_strength`, and `reason` defaults, honoring the score-wins-over-decision precedence rule already in 05-validation's prose.
 - Internally, each tuple is applied as: `--set score_phase4=…` + `--set disposition=…` + `--set confirmed_strength=…` + `--set actionability=…` + `--set reason=…` + (conditionally) `--set-json validation_result=…`. Same code paths as existing `--set` / `--set-json`; no new transition/coupling logic needed.
 - Exit-code semantics: `0` success; non-zero on first tuple failure. Already-committed tuples from earlier in the batch stay committed (no rollback). Stderr identifies the failing tuple by id so the caller can re-invoke with the remainder.
@@ -169,13 +169,13 @@ Step 4.4 changes from:
   - Computes `resolved_disposition` from score + actionability in shell.
   - Invokes `artifact-patch.py --set …` (5 flags).
   - Optionally invokes `artifact-patch.py --set-json validation_result=@…` (second call) for confirmed-band findings.
-  - Writes prose "applied F011 as confirmed_auto" per iteration.
+  - Writes prose "applied F011 as confirmed_mechanical" per iteration.
 
 …to:
 
 - Build one JSON array combining all Wave 1 (and separately all Wave 2) validator outputs into a temp file at `/tmp/adams-review-$review_id/phase4-wave1-decisions.json`.
 - One `artifact-patch.py --apply-decisions @…` call per wave.
-- One summary line: `applied N decisions (confirmed_auto=X, confirmed_manual=Y, uncertain=Z, disproven=W)`.
+- One summary line: `applied N decisions (confirmed_mechanical=X, confirmed_manual=Y, uncertain=Z, disproven=W)`.
 - Step 4.5 (Wave 2 composition) unchanged; Step 4.6 equivalent (Wave 2 decision application) reuses the same `--apply-decisions` call.
 
 The jq-extraction trick for `validation_result` (`jq -c '.validation_result // .'`) moves from shell-per-finding into the jq that composes the array — each tuple's `validation_result` is `(sub_response.validation_result // sub_response)`.
@@ -205,7 +205,7 @@ These are authoring disciplines, not enforced by tooling. Stage 3 planning appli
 
 **Step 1. `artifact-render.py` fix.**
 
-- Line 148: change `("confirmed_auto", "confirmed_manual", "confirmed_report")` → `("confirmed_auto", "confirmed_manual", "confirmed_report", "uncertain")`.
+- Line 148: change `("confirmed_mechanical", "confirmed_manual", "confirmed_report")` → `("confirmed_mechanical", "confirmed_manual", "confirmed_report", "uncertain")`.
 - Line 323: same change.
 - No other lines touched. `render_deep_other()` and its Uncertain section remain deep-only. The light lane's single-table shape (with a `Disposition` column) already accommodates mixed dispositions.
 

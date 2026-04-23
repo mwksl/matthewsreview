@@ -27,6 +27,8 @@ EXIT_DRY_RUN_INVALID = 3     # --dry-run would produce invalid artifact
 EXIT_UNEXPECTED = 4          # uncaught exception / unknown error
 EXIT_MISSING_DEP = 5         # jsonschema import failed (shouldn't happen under uv shebang)
 EXIT_USAGE = 64              # argparse / usage error (conventional)
+EXIT_SCORE_UNRECOVERABLE = 2 # also used by parse-validator-result.py for score-recovery failure
+EXIT_UNKNOWN_FAMILY = 3      # also used by source-family-map.py for unknown enum value
 
 
 SCHEMA_PATH = Path(__file__).parent / "schema-v1.json"
@@ -172,14 +174,14 @@ def is_append_only(old_list, new_list):
 
 # ----- Dispositions / state coupling (DESIGN §5.2.1, §21.2) --------------
 
-ACTIONABLE_DISPOSITIONS = frozenset({"confirmed_auto", "partial", "regression"})
+ACTIONABLE_DISPOSITIONS = frozenset({"confirmed_mechanical", "partial", "regression"})
 
 DISPOSITION_VALUES = (
     "below_gate",
     "pending_validation",
     "disproven",
     "uncertain",
-    "confirmed_auto",
+    "confirmed_mechanical",
     "confirmed_manual",
     "confirmed_report",
     "pre_existing_report",
@@ -199,7 +201,7 @@ ALLOWED_TRANSITIONS = {
 
 
 def derive_is_actionable(disposition):
-    """True iff disposition ∈ {confirmed_auto, partial, regression}."""
+    """True iff disposition ∈ {confirmed_mechanical, partial, regression}."""
     return disposition in ACTIONABLE_DISPOSITIONS
 
 

@@ -8,7 +8,7 @@ disable-model-invocation: false
 Walk the reviewer through every finding in the latest `/adamsreview:review`
 artifact that `/adamsreview:fix [threshold]` would **skip** at the
 chosen threshold: deep-manual, light-manual, light-report, light-auto
-that fails the impact_type lane filter, and any `confirmed_auto`
+that fails the impact_type lane filter, and any `confirmed_mechanical`
 below the score threshold. For each finding, dispatch a Sonnet
 briefing agent (claim → options → recommendation), ask the reviewer
 to decide, and record a promote (via the shared `promote-core.md`
@@ -23,7 +23,7 @@ for the design rationale.
 
 - `[threshold]` (optional, positional) — non-negative integer matching
   the threshold the reviewer plans to use for `/adamsreview:fix`.
-  Default: 60 (DESIGN §13.2). Determines which `confirmed_auto`
+  Default: 60 (DESIGN §13.2). Determines which `confirmed_mechanical`
   findings would "already be fixed" by the fix command and are
   therefore excluded from the walkthrough scope.
 
@@ -152,7 +152,7 @@ scope_full_ids=$(jq -r --argjson thr "$threshold" '
      # is a filter (pipe into it), not a function.
      | select(
          (
-           (.disposition == "confirmed_auto" or .disposition == "partial" or .disposition == "regression")
+           (.disposition == "confirmed_mechanical" or .disposition == "partial" or .disposition == "regression")
            and (
              (.impact_type == "correctness" or .impact_type == "security")
              and (.score_phase4 != null and .score_phase4 >= $thr)
@@ -182,7 +182,7 @@ scope_qualifying_ids=$(jq -r --argjson thr "$threshold" '
      | select(.human_confirmation == null)
      | select(
          (
-           (.disposition == "confirmed_auto" or .disposition == "partial" or .disposition == "regression")
+           (.disposition == "confirmed_mechanical" or .disposition == "partial" or .disposition == "regression")
            and (
              (.impact_type == "correctness" or .impact_type == "security")
              and (.score_phase4 != null and .score_phase4 >= $thr)
@@ -268,7 +268,7 @@ gates → Gate terminology):
 - **Phase 4 confirmation gate (45/60/75)** — maps `score_phase4` into
   `disproven` / `uncertain` / `confirmed_*`.
 - **Phase 8 fix gate (default 60)** — what `/adamsreview:fix` touches:
-  confirmed_auto + deep lane + score ≥ threshold.
+  confirmed_mechanical + deep lane + score ≥ threshold.
 
 The walkthrough surfaces what Phase 8 would SKIP. `below_gate` is a
 **disposition name**, not a threshold — Phase 3 already demoted those
@@ -513,6 +513,14 @@ log-tokens.sh \
 ```
 
 #### 5.3. Render the briefing to chat
+
+**Anti-instruction (between iterations).** Do not dispatch a spurious
+"continue / stop?" `AskUserQuestion` between per-finding iterations.
+The only `AskUserQuestion` the reviewer sees per finding is the
+decision prompt at step 5.4, which already includes an explicit "Stop
+the walkthrough" option. Adding a standalone continue/stop check
+after each iteration double-prompts the reviewer and breaks the
+single-question-per-finding rhythm.
 
 Present the briefing as a markdown block the reviewer can read at a
 glance:
@@ -1191,7 +1199,7 @@ Pre-existing issues filed: <N; list id → url pairs below, or omit section>
   F028 → <url>
 
 Cumulative sub-agent spend: <total> tokens across <invs> invocations.
-Cumulative orchestrator spend: <cache_read> cache-read / <output> output / <cache_creation> cache-creation / <input> fresh input across <turns> turns.
+Cumulative orchestrator spend: <output> output / <input> input across <turns> turns.
 
 Promoted findings are now auto-fix-eligible via the human_confirmation
 bypass (§27.6). To apply them:
@@ -1226,7 +1234,7 @@ subagent_token_line=$(jq -r '
 
 orchestrator_token_line=$(jq -r '
     if (.orchestrator_tokens.turn_count // null) != null
-    then "Cumulative orchestrator spend: \(.orchestrator_tokens.cache_read) cache-read / \(.orchestrator_tokens.total_output) output / \(.orchestrator_tokens.cache_creation) cache-creation / \(.orchestrator_tokens.total_input) fresh input across \(.orchestrator_tokens.turn_count) turns."
+    then "Cumulative orchestrator spend: \(.orchestrator_tokens.total_output) output / \(.orchestrator_tokens.total_input) input across \(.orchestrator_tokens.turn_count) turns."
     else empty end
 ' "$artifact_path")
 ```

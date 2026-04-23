@@ -6,7 +6,7 @@ disable-model-invocation: false
 ---
 
 Promote a single finding from the most recent `/adamsreview:review` on this
-branch to `disposition=confirmed_auto`, recording full provenance in
+branch to `disposition=confirmed_mechanical`, recording full provenance in
 `human_confirmation` so `/adamsreview:fix` will pick it up on its next
 run. See DESIGN §27 for the contract and §5.2.1 for how the Phase 8
 eligibility bypass works.
@@ -213,14 +213,14 @@ tool call):
 
 ```
 Promoted $finding_id:
-  disposition:    $curr_disp → confirmed_auto
+  disposition:    $curr_disp → confirmed_mechanical
   actionability:  $curr_action → auto_fixable
   score_phase4:   $curr_score (preserved)
   reviewer:       $reviewer
   reason:         $reason
 
 Next: run /adamsreview:fix to apply this and any other
-confirmed_auto/partial/regression findings.
+confirmed_mechanical/partial/regression findings.
 ```
 
 When `fix_hint` is non-empty, append one additional line to the block

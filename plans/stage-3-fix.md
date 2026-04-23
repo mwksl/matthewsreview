@@ -25,7 +25,7 @@ Build a working `/adams-review-fix` end-to-end, mirroring the Stage 2 surface fo
 
 **Done when:**
 
-1. `/adams-review-fix` runs on an artifact with ≥1 `confirmed_auto` finding at `score_phase4 >= threshold`, dispatches fix groups, commits survivors, updates artifact state, and publishes the updated report.
+1. `/adams-review-fix` runs on an artifact with ≥1 `confirmed_mechanical` finding at `score_phase4 >= threshold`, dispatches fix groups, commits survivors, updates artifact state, and publishes the updated report.
 2. Leftover-`attempted` findings from an interrupted prior run trigger the hard abort with the deterministic recovery message (§4 Phase 7 step 4).
 3. Phase-9.pre overlap guard short-circuits when fix agents touched overlapping files across groups; the no-commit branch records the state correctly; re-running triggers the leftover-`attempted` hard abort.
 4. Per-group revert runs when Phase 9 classifies a regression; the reverted files do not appear in the commit; `fix_attempts.output_sha` for regression-group findings is `null`; surviving groups still commit.
@@ -71,7 +71,7 @@ New Python helper at `commands/_shared/tools/group-fixes.py`. Implements the DES
 
 **Interface:** `group-fixes.py --artifact <path> --eligible-finding-ids <csv|@-> [--output-json]`
 
-- `--eligible-finding-ids`: comma-separated list, or `@-` to read from stdin (one id per line). The orchestrator is responsible for filtering (`current_state=="open" AND disposition ∈ {confirmed_auto,partial,regression} AND score_phase4 >= threshold`); this script does not re-derive eligibility.
+- `--eligible-finding-ids`: comma-separated list, or `@-` to read from stdin (one id per line). The orchestrator is responsible for filtering (`current_state=="open" AND disposition ∈ {confirmed_mechanical,partial,regression} AND score_phase4 >= threshold`); this script does not re-derive eligibility.
 - `--output-json`: default; emits JSON array. Kept as a flag for future forward-compat with `--output-tsv` etc.
 
 **Output:** JSON array to stdout:
@@ -130,7 +130,7 @@ Extend `commands/_shared/tools/artifact-patch.py` with two new modes. Mirrors St
 
 `run_id` field is informational — captured in trace but not persisted on findings at this stage (Phase 9d writes the `fix_attempt` entry later). Schema pattern `^fixrun_[A-Za-z0-9]+$` (matches `fix_attempts[].run_id` regex).
 
-**Behavior:** for each tuple, transition `current_state: open → attempted`. No other fields change. Disposition stays at whatever it was (`confirmed_auto`, `partial`, `regression`). `is_actionable` unchanged.
+**Behavior:** for each tuple, transition `current_state: open → attempted`. No other fields change. Disposition stays at whatever it was (`confirmed_mechanical`, `partial`, `regression`). `is_actionable` unchanged.
 
 **Error cases:** tuple with unknown id, tuple with `current_state != "open"`, malformed JSON — all error-as-prompt with EXIT codes per the §21.2 table. Per-tuple atomic writes; first failure halts.
 
@@ -358,7 +358,7 @@ New file `commands/_shared/09-fix-execution.md`. Covers DESIGN §4 Phase 8.
 eligible_finding_ids=$(jq -r --argjson thr "$threshold" '
     [.findings[]
      | select(.current_state == "open")
-     | select(.disposition == "confirmed_auto" or .disposition == "partial" or .disposition == "regression")
+     | select(.disposition == "confirmed_mechanical" or .disposition == "partial" or .disposition == "regression")
      | select(.impact_type == "correctness" or .impact_type == "security")
      | select(.score_phase4 != null and .score_phase4 >= $thr)
      | .id
@@ -611,7 +611,7 @@ Per Stage 1 close-out: "column appears automatically when any row has a `fix_att
 - `disposition: partial` → `⚠ partial` + commit link (partial fixes still commit).
 - `disposition: regression` → `✗ regression (reverted)` + no commit link.
 
-The Auto-fixable table is already filtered on `confirmed_auto` — findings that transitioned to `resolved` leave the Auto-fixable bucket (they move to their own rendered section if one exists, or just stop appearing there). Need to verify:
+The Auto-fixable table is already filtered on `confirmed_mechanical` — findings that transitioned to `resolved` leave the Auto-fixable bucket (they move to their own rendered section if one exists, or just stop appearing there). Need to verify:
 - Do we add a "Resolved" section? §7 doesn't mandate one; resolved findings surface in the Fix runs section's verified-count.
 - For `partial` / `regression` findings: they stay `current_state=open` but their disposition changes. Per §7 filter, they surface under sections filtered on `disposition in {partial, regression}`. If those sections don't exist in the current renderer, add them as a pair.
 

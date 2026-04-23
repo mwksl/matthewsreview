@@ -434,7 +434,7 @@ def _apply_finding_set(finding, pairs):
             if pair_map["is_actionable"] != derived:
                 c.err_prompt(
                     f"is_actionable={pair_map['is_actionable']} contradicts disposition='{pair_map['disposition']}' (derived: {derived})",
-                    context=f"is_actionable is derived: true iff disposition ∈ {{confirmed_auto, partial, regression}}. See DESIGN §5.2.1.",
+                    context=f"is_actionable is derived: true iff disposition ∈ {{confirmed_mechanical, partial, regression}}. See DESIGN §5.2.1.",
                     action="omit --set is_actionable; the script will derive it from disposition."
                 )
                 sys.exit(c.EXIT_VALIDATION)
@@ -587,7 +587,7 @@ def cmd_delete_finding(args):
 #   score_phase4 < 45    → disposition=disproven
 #   score_phase4 45-59   → disposition=uncertain
 #   score_phase4 >= 60   → needs actionability:
-#                            auto_fixable → confirmed_auto
+#                            auto_fixable → confirmed_mechanical
 #                            manual       → confirmed_manual
 #                            report_only  → confirmed_report
 #                          confirmed_strength: moderate (60-74) / strong (75+)
@@ -596,7 +596,7 @@ def cmd_delete_finding(args):
 # we derive disposition from score + actionability, ignoring the tuple's
 # `decision` field (which exists so the JSON is auditable but isn't
 # authoritative). A validator returning decision=disproven, score=70 with
-# actionability=auto_fixable routes to confirmed_auto.
+# actionability=auto_fixable routes to confirmed_mechanical.
 #
 # per-tuple atomic writes + first-failure-halts (plan §5.2): if tuple N
 # is invalid, tuples 0..N-1 have been written to disk; caller re-invokes
@@ -613,10 +613,10 @@ ALLOWED_DECISION_TUPLE_KEYS = frozenset({
     "related_parent_finding_id",
 })
 
-CONFIRMED_BAND = frozenset({"confirmed_auto", "confirmed_manual", "confirmed_report"})
+CONFIRMED_BAND = frozenset({"confirmed_mechanical", "confirmed_manual", "confirmed_report"})
 
 _ACTIONABILITY_TO_DISPOSITION = {
-    "auto_fixable": "confirmed_auto",
+    "auto_fixable": "confirmed_mechanical",
     "manual": "confirmed_manual",
     "report_only": "confirmed_report",
 }
@@ -682,7 +682,7 @@ def cmd_apply_decisions(args):
         )
         return c.EXIT_USAGE
 
-    counts = {"confirmed_auto": 0, "confirmed_manual": 0, "confirmed_report": 0,
+    counts = {"confirmed_mechanical": 0, "confirmed_manual": 0, "confirmed_report": 0,
               "uncertain": 0, "disproven": 0}
 
     for idx, tup in enumerate(decisions):
@@ -773,7 +773,7 @@ def cmd_apply_decisions(args):
     total = sum(counts.values())
     print(
         f"applied {total} decisions "
-        f"(confirmed_auto={counts['confirmed_auto']}, "
+        f"(confirmed_mechanical={counts['confirmed_mechanical']}, "
         f"confirmed_manual={counts['confirmed_manual']}, "
         f"confirmed_report={counts['confirmed_report']}, "
         f"uncertain={counts['uncertain']}, "

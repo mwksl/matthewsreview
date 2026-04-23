@@ -166,7 +166,7 @@ fi
 # ---------------------------------------------------------------- sidecars
 
 # A. artifact-read.sh --summary returns expected counts
-expected_counts='{"findings_total":7,"by_disposition":{"below_gate":1,"confirmed_auto":1,"confirmed_manual":1,"pre_existing_report":1,"resolved":1,"uncertain":2}}'
+expected_counts='{"findings_total":7,"by_disposition":{"below_gate":1,"confirmed_manual":1,"confirmed_mechanical":1,"pre_existing_report":1,"resolved":1,"uncertain":2}}'
 actual=$("$TOOLS/artifact-read.sh" --path "$ART" --summary \
     | jq -c '{findings_total, by_disposition: .counts_by_disposition}')
 if [[ "$actual" == "$expected_counts" ]]; then
@@ -364,6 +364,26 @@ else
     fail "E: phase_1_5=$phase_1_5_phase phase_6=$phase_6_phase; check $WORK/rev/phases.jsonl"
 fi
 
+# E2. Phase 3 telemetry payload shape (#24 calibration): demote_rate float
+# and score_phase3_histogram (10 buckets) land in phases.jsonl via --record
+# pass-through. Sanity-check that log-phase.sh carries arbitrary JSON
+# payloads through unchanged, so the fragments/04-scoring-gate.md wiring
+# doesn't need a bespoke helper.
+p3_record=$(jq -nc \
+    --argjson hist '{"0-9":1,"10-19":2,"20-29":3,"30-39":2,"40-49":4,"50-59":3,"60-69":5,"70-79":4,"80-89":2,"90-100":1}' \
+    '{name:"scoring-gate", elapsed_sec:42, demote_rate:0.6486486486486487, score_phase3_histogram:$hist}')
+"$TOOLS/log-phase.sh" --review-dir "$WORK/rev" --phase 3 --record "$p3_record"
+p3_demote=$(jq -r 'select(.name == "scoring-gate" and .phase == 3) | .demote_rate' "$WORK/rev/phases.jsonl" | head -1)
+p3_hist_keys=$(jq -r 'select(.name == "scoring-gate" and .phase == 3) | .score_phase3_histogram | keys | length' "$WORK/rev/phases.jsonl" | head -1)
+p3_bucket_90_100=$(jq -r 'select(.name == "scoring-gate" and .phase == 3) | .score_phase3_histogram["90-100"]' "$WORK/rev/phases.jsonl" | head -1)
+if [[ "$p3_demote" == "0.6486486486486487" ]] \
+        && [[ "$p3_hist_keys" == "10" ]] \
+        && [[ "$p3_bucket_90_100" == "1" ]]; then
+    pass "E2: Phase 3 phases.jsonl record carries demote_rate + score_phase3_histogram (#24 telemetry)"
+else
+    fail "E2: phase 3 telemetry shape wrong — demote_rate=$p3_demote hist_keys=$p3_hist_keys bucket_90_100=$p3_bucket_90_100"
+fi
+
 # F. Schema-invalid fixture rejected by artifact-validate.sh
 stderr=$("$TOOLS/artifact-validate.sh" --path "$FIX/invalid/bad-disposition.json" 2>&1 >/dev/null); code=$?
 if [[ "$code" != "0" ]] && echo "$stderr" | grep -q "bogus_disposition"; then
@@ -518,20 +538,20 @@ else
     fail "Q: expected coupling error; got code=$code stderr=$stderr"
 fi
 
-# R. pending_validation → confirmed_auto Phase-4 transition works (R2 flow)
-# F099 starts at below_gate; move through pending_validation → confirmed_auto
+# R. pending_validation → confirmed_mechanical Phase-4 transition works (R2 flow)
+# F099 starts at below_gate; move through pending_validation → confirmed_mechanical
 # (with is_actionable=true, confirmed_strength) simulating Phase 3→4.
 cp "$ART" "$WORK/art-p34.json"
 "$TOOLS/artifact-patch.py" --path "$WORK/art-p34.json" --finding-id F099 \
     --set disposition=pending_validation --set is_actionable=false >/dev/null
 if "$TOOLS/artifact-patch.py" --path "$WORK/art-p34.json" --finding-id F099 \
-        --set disposition=confirmed_auto \
+        --set disposition=confirmed_mechanical \
         --set is_actionable=true \
         --set confirmed_strength=strong \
         --set "score_phase4=85" >/dev/null; then
     disp=$(jq -r '.findings[] | select(.id=="F099") | .disposition' "$WORK/art-p34.json")
-    if [[ "$disp" == "confirmed_auto" ]]; then
-        pass "R: pending_validation → confirmed_auto Phase-4 transition succeeds"
+    if [[ "$disp" == "confirmed_mechanical" ]]; then
+        pass "R: pending_validation → confirmed_mechanical Phase-4 transition succeeds"
     else
         fail "R: final disposition = $disp"
     fi
@@ -649,7 +669,7 @@ fi
 
 # W. --apply-decisions: mixed batch routes via §13.1 and writes validation_result
 # only for the confirmed band (Stage 2.5.B). Build a seed with 3 findings in
-# pending_validation, run one --apply-decisions call with a confirmed_auto +
+# pending_validation, run one --apply-decisions call with a confirmed_mechanical +
 # uncertain + disproven tuple set, and check each finding's post-state.
 APPLY_DIR="$WORK/apply-decisions"
 mkdir -p "$APPLY_DIR"
@@ -719,7 +739,7 @@ F103_VR=$(jq -r '.findings[] | select(.id=="F103") | .validation_result' "$APPLY
 F103_REASON=$(jq -r '.findings[] | select(.id=="F103") | .reason' "$APPLY_DIR/art.json")
 
 if [[ "$code" == "0" ]] \
-    && [[ "$F101_DISP" == "confirmed_auto" && "$F101_IA" == "true" && "$F101_CS" == "strong" && "$F101_VR" == "object" ]] \
+    && [[ "$F101_DISP" == "confirmed_mechanical" && "$F101_IA" == "true" && "$F101_CS" == "strong" && "$F101_VR" == "object" ]] \
     && [[ "$F102_DISP" == "uncertain" && "$F102_VR" == "null" ]] \
     && [[ "$F103_DISP" == "disproven" && "$F103_VR" == "null" && "$F103_REASON" == "Phase 4: not reproducible" ]] \
     && echo "$out" | grep -q "applied 3 decisions"; then
@@ -1070,6 +1090,128 @@ else
     fail "OC-8: expected 'reason=blame-failed rc=<N>; <stderr>' + action=skipped; got: $(cat "$OC_DIR/c8.err")"
 fi
 
+# ------------------------------------------------------------------ Stage 2.6.B (rename-follow)
+# Rename- and extraction-follow (§13.11, Project G). `git cat-file -e
+# $ref:$file` fails for any PR-added file — the old helper exited with
+# reason=new-file and respected the lens, missing F038-class cases
+# where the "new" file is actually an extraction from a pre-PR
+# predecessor. origin-crosscheck.sh now walks `git log --follow` to
+# reach the pre-rename ancestor and re-checks reachability.
+
+OC_RN_DIR="$WORK/origin-crosscheck-rename"
+mkdir -p "$OC_RN_DIR/extract-repo"
+(
+    cd "$OC_RN_DIR/extract-repo"
+    git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+    git config user.email "smoke@example.com"
+    git config user.name "smoke"
+    git symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+    # main: monolith with a bug inside recategorize().
+    cat > monolith.ts <<'TS'
+export function helper() { return 1; }
+export function recategorize(x: unknown) {
+    // BUG: missing null check
+    return (x as any).kind;
+}
+export function other() { return 2; }
+TS
+    git add monolith.ts
+    git commit --quiet -m "initial main with bug in monolith"
+    git checkout --quiet -b pr
+    # PR extracts recategorize into its own file, preserving content.
+    cat > monolith.ts <<'TS'
+export function helper() { return 1; }
+export function other() { return 2; }
+export { recategorize } from "./recategorization";
+TS
+    cat > recategorization.ts <<'TS'
+export function recategorize(x: unknown) {
+    // BUG: missing null check
+    return (x as any).kind;
+}
+TS
+    git add monolith.ts recategorization.ts
+    git commit --quiet -m "extract recategorize into its own file"
+    # A follow-up PR commit adds a genuinely-new line to the extracted file.
+    cat >> recategorization.ts <<'TS'
+export const NEW_BUG_CONST = null as any;
+TS
+    git add recategorization.ts
+    git commit --quiet -m "add new buggy constant in PR"
+)
+
+# Assertion OC-9: happy path. Lines 1-3 of recategorization.ts came
+# across the extraction boundary from monolith.ts (pre-PR). `git log
+# --follow` reaches a commit on main; blame points to the file-add
+# commit. Override lens → pre_existing/high.
+out=$(cd "$OC_RN_DIR/extract-repo" && "$TOOLS/origin-crosscheck.sh" \
+    --comparison-ref main \
+    --candidates '[{"id":"RF1","file":"recategorization.ts","line_range":[1,3],"origin":"introduced_by_pr","origin_confidence":"high"}]' \
+    2> "$OC_RN_DIR/rf1.err")
+origin=$(echo "$out" | jq -r '.[0].origin')
+conf=$(echo "$out" | jq -r '.[0].origin_confidence')
+if [[ "$origin" == "pre_existing" && "$conf" == "high" ]] \
+    && grep -q 'action=overridden' "$OC_RN_DIR/rf1.err" \
+    && grep -q 'reason=rename-followed-to-preexisting' "$OC_RN_DIR/rf1.err"; then
+    pass "OC-9 (§13.11, Project G): extracted lines of PR-added file traced via git log --follow to pre-PR ancestor → override to pre_existing/high"
+else
+    fail "OC-9: expected overridden to pre_existing/high with reason=rename-followed-to-preexisting; got origin=$origin conf=$conf stderr=$(cat "$OC_RN_DIR/rf1.err")"
+fi
+
+# Assertion OC-10: regression guard. A brand-new file with no rename
+# history must still exit via reason=new-file and respect the lens.
+mkdir -p "$OC_RN_DIR/genuine-repo"
+(
+    cd "$OC_RN_DIR/genuine-repo"
+    git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+    git config user.email "smoke@example.com"
+    git config user.name "smoke"
+    git symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+    echo "baseline" > existing.txt
+    git add existing.txt
+    git commit --quiet -m "initial main"
+    git checkout --quiet -b pr
+    cat > brand-new.ts <<'TS'
+export function foo() { return 1; }
+export function bug() { return (null as any).x; }
+TS
+    git add brand-new.ts
+    git commit --quiet -m "add brand-new.ts"
+)
+out=$(cd "$OC_RN_DIR/genuine-repo" && "$TOOLS/origin-crosscheck.sh" \
+    --comparison-ref main \
+    --candidates '[{"id":"RF2","file":"brand-new.ts","line_range":[1,2],"origin":"introduced_by_pr","origin_confidence":"high"}]' \
+    2> "$OC_RN_DIR/rf2.err")
+origin=$(echo "$out" | jq -r '.[0].origin')
+conf=$(echo "$out" | jq -r '.[0].origin_confidence')
+if [[ "$origin" == "introduced_by_pr" && "$conf" == "high" ]] \
+    && grep -q 'action=respected' "$OC_RN_DIR/rf2.err" \
+    && grep -q 'reason=new-file' "$OC_RN_DIR/rf2.err"; then
+    pass "OC-10 (§13.11, Project G): genuinely-new PR file (no rename/extraction ancestor) still respects lens with reason=new-file"
+else
+    fail "OC-10: expected introduced_by_pr/high + reason=new-file; got origin=$origin conf=$conf stderr=$(cat "$OC_RN_DIR/rf2.err")"
+fi
+
+# Assertion OC-11: extraction-with-PR-additions. When an extracted file
+# also gets new lines added in a later PR commit, blame on those new
+# lines points to a non-ancestor, non-add-commit SHA. The override
+# must NOT fire — respect the lens with an audit reason that signals
+# why (so a reviewer reading trace.md can distinguish "extracted"
+# from "mixed-extracted-plus-new" findings).
+out=$(cd "$OC_RN_DIR/extract-repo" && "$TOOLS/origin-crosscheck.sh" \
+    --comparison-ref main \
+    --candidates '[{"id":"RF3","file":"recategorization.ts","line_range":[5,5],"origin":"introduced_by_pr","origin_confidence":"high"}]' \
+    2> "$OC_RN_DIR/rf3.err")
+origin=$(echo "$out" | jq -r '.[0].origin')
+conf=$(echo "$out" | jq -r '.[0].origin_confidence')
+if [[ "$origin" == "introduced_by_pr" && "$conf" == "high" ]] \
+    && grep -q 'action=respected' "$OC_RN_DIR/rf3.err" \
+    && grep -q 'reason=rename-follow-but-lines-modified-in-pr' "$OC_RN_DIR/rf3.err"; then
+    pass "OC-11 (§13.11, Project G): PR-added lines in an extracted file are NOT overridden (blame SHA not in ancestor nor file-add set) — lens respected"
+else
+    fail "OC-11: expected introduced_by_pr/high + reason=rename-follow-but-lines-modified-in-pr; got origin=$origin conf=$conf stderr=$(cat "$OC_RN_DIR/rf3.err")"
+fi
+
 # ------------------------------------------------------------------ Stage 2.6.C
 # Renderer surfaces §13.10 freshness state in the header when non-default.
 
@@ -1165,6 +1307,62 @@ if ! echo "$md" | grep -q "Base freshness:"; then
     pass "RH-7 (§13.10/§7): pre-§13.10 artifact (no base_context) renders without freshness line"
 else
     fail "RH-7: pre-§13.10 artifact should not render freshness; saw: $(echo "$md" | grep 'Base freshness')"
+fi
+
+# --- OTR-* : orchestrator-tokens render line shape (post-plugin-improvements
+# Project A). The header line used to display four counters (cache-read /
+# output / cache-creation / fresh input) which buried the signal; the four
+# values stay in the artifact for cost analysis, but the rendered line now
+# shows only the user-facing levers (output / input across N turns). See
+# CLAUDE.md §"Pipeline shape" for the rationale.
+
+OTR_DIR="$WORK/render-orch"
+mkdir -p "$OTR_DIR"
+"$TOOLS/artifact-patch.py" --init "@$FIX/artifact-seed.json" --path "$OTR_DIR/art.json" >/dev/null
+"$TOOLS/artifact-patch.py" --path "$OTR_DIR/art.json" --set-json \
+    'orchestrator_tokens={"total_input":484,"total_output":566990,"cache_read":53046666,"cache_creation":2134808,"turn_count":324,"sessions":[]}' \
+    >/dev/null
+md=$("$TOOLS/artifact-render.py" --input "$OTR_DIR/art.json")
+
+# Assertion OTR-1: rendered line is the simplified `<output> output /
+# <input> input across <N> turns` shape. Exact, because this string is the
+# whole point of the display-cleanup — regressions silently re-bury signal.
+expected_line='**Orchestrator tokens:** 566,990 output / 484 input across 324 turns'
+if echo "$md" | grep -qxF "$expected_line"; then
+    pass "OTR-1 (post-plugin-improvements A): rendered orchestrator-tokens line is '<output> output / <input> input across <N> turns'"
+else
+    fail "OTR-1: expected '$expected_line'; saw: $(echo "$md" | grep -F 'Orchestrator tokens:' || echo '(no Orchestrator tokens line)')"
+fi
+
+# Assertion OTR-2: cache-read and cache-creation must NOT appear on the
+# rendered header. The artifact still carries them (see schema-v1.json and
+# OT-* helper assertions below) — they just stay machine-facing.
+if echo "$md" | grep -F 'Orchestrator tokens:' | grep -Eq 'cache-read|cache-creation|fresh input'; then
+    fail "OTR-2: rendered header still leaks cache-read/cache-creation/'fresh input'; saw: $(echo "$md" | grep -F 'Orchestrator tokens:')"
+else
+    pass "OTR-2 (post-plugin-improvements A): cache-read/cache-creation/'fresh input' dropped from rendered header (still in artifact)"
+fi
+
+# Assertion OTR-3: all four counters still present in the stored artifact
+# — schema-v1.json still requires them; narrowing the display must not
+# collapse the internal capture.
+stored=$(jq -c '.orchestrator_tokens | {total_input, total_output, cache_read, cache_creation, turn_count}' "$OTR_DIR/art.json")
+expected_stored='{"total_input":484,"total_output":566990,"cache_read":53046666,"cache_creation":2134808,"turn_count":324}'
+if [[ "$stored" == "$expected_stored" ]]; then
+    pass "OTR-3 (post-plugin-improvements A): all four counters preserved in artifact.orchestrator_tokens after narrowed render"
+else
+    fail "OTR-3: artifact counters drifted after narrowed render; got $stored, expected $expected_stored"
+fi
+
+# Assertion OTR-4: render still guards on missing orchestrator_tokens
+# (pre-feature artifacts, interrupted runs) — the seed.json has no
+# orchestrator_tokens object, so the base $ART render from earlier
+# assertions shouldn't carry an Orchestrator line at all.
+md_base=$("$TOOLS/artifact-render.py" --input "$ART")
+if echo "$md_base" | grep -qF 'Orchestrator tokens:'; then
+    fail "OTR-4: pre-feature artifact (no orchestrator_tokens) should not render header line"
+else
+    pass "OTR-4 (post-plugin-improvements A): missing orchestrator_tokens still omits header line (backward compat)"
 fi
 
 # ------------------------------------------------------------------ Stage 2.7
@@ -1389,7 +1587,7 @@ GF_PROMOTE_HC=$(jq -nc '{
     fix_hint: "Update the docstring to match the code; do not modify the code."
 }')
 "$TOOLS/artifact-patch.py" --path "$GF_PROMOTED_ART" --finding-id F001 \
-    --set disposition=confirmed_auto \
+    --set disposition=confirmed_mechanical \
     --set current_state=open \
     --set actionability=auto_fixable \
     --set-json "human_confirmation=$GF_PROMOTE_HC" >/dev/null 2>&1 \
@@ -1499,7 +1697,7 @@ OA_ART="$WORK/af-oa.json"
   '[{"id":"F004","run_id":"fixrun_oa","fix_group_id":"FG-1","input_sha":"aaaa111","output_sha":null,"phase_9_outcome":null,"timestamp":"2026-04-18T13:00:00Z","phase_9_finding":"run aborted: overlap on src/c.ts"}]' \
   >/dev/null 2>&1
 f4=$(jq -c '.findings[] | select(.id=="F004") | {current_state,disposition,attempts:(.fix_attempts|length),last_sha:(.fix_attempts[-1].output_sha),last_outcome:(.fix_attempts[-1].phase_9_outcome),last_finding:(.fix_attempts[-1].phase_9_finding)}' "$OA_ART")
-expected='{"current_state":"attempted","disposition":"confirmed_auto","attempts":1,"last_sha":null,"last_outcome":null,"last_finding":"run aborted: overlap on src/c.ts"}'
+expected='{"current_state":"attempted","disposition":"confirmed_mechanical","attempts":1,"last_sha":null,"last_outcome":null,"last_finding":"run aborted: overlap on src/c.ts"}'
 if [[ "$f4" == "$expected" ]]; then
     pass "FX-AF-6 (§4 Phase 9.pre): overlap-abort preserves current_state=attempted, appends audit fix_attempt"
 else
@@ -1640,7 +1838,7 @@ fi
 
 RF_ART="$WORK/rf-art.json"
 
-# Build a fresh artifact with F001 open/confirmed_auto and exercise the
+# Build a fresh artifact with F001 open/confirmed_mechanical and exercise the
 # full fix cycle to produce a verified+partial+regression multi-outcome
 # run.
 "$TOOLS/artifact-patch.py" --init "@$FIX/fix-group-seed.json" --path "$RF_ART" >/dev/null
@@ -1714,7 +1912,7 @@ fi
 "$TOOLS/artifact-patch.py" --path "$WORK/rf-two.json" --apply-fix-outcomes \
   '[{"id":"F007","run_id":"fixrun_old","fix_group_id":"FG-1","input_sha":"aaaa111","output_sha":"cccc333","phase_9_outcome":"verified","timestamp":"2026-04-18T13:00:00Z"}]' >/dev/null 2>&1
 # F007 is now resolved — to run a second fix, we need a fresh open finding.
-# Use F005 (currently open/confirmed_auto) for run B at 16:00.
+# Use F005 (currently open/confirmed_mechanical) for run B at 16:00.
 "$TOOLS/artifact-patch.py" --path "$WORK/rf-two.json" --apply-fix-start '[{"id":"F005","run_id":"fixrun_new"}]' >/dev/null 2>&1
 "$TOOLS/artifact-patch.py" --path "$WORK/rf-two.json" --apply-fix-outcomes \
   '[{"id":"F005","run_id":"fixrun_new","fix_group_id":"FG-1","input_sha":"bbbb222","output_sha":"dddd444","phase_9_outcome":"verified","timestamp":"2026-04-18T16:00:00Z"}]' >/dev/null 2>&1
@@ -1954,7 +2152,7 @@ cp "$ART" "$MP_BASELINE"  # fresh copy, no MP-2 mutation
 mp4_ids=$(jq -r --argjson thr 60 '
     [.findings[]
      | select(.current_state == "open")
-     | select(.disposition == "confirmed_auto" or .disposition == "partial" or .disposition == "regression")
+     | select(.disposition == "confirmed_mechanical" or .disposition == "partial" or .disposition == "regression")
      | select(
          (.human_confirmation != null)
          or (
@@ -1971,19 +2169,19 @@ else
     fail "MP-4: F006 should be ineligible without human_confirmation; got ids=$mp4_ids"
 fi
 
-# MP-5: after promoting F006 (disposition=confirmed_auto + actionability=auto_fixable +
+# MP-5: after promoting F006 (disposition=confirmed_mechanical + actionability=auto_fixable +
 # human_confirmation set), the same Phase 8 selector DOES include it. Tests the bypass.
 MP_PROMOTED="$WORK/art-promote-done.json"
 cp "$ART" "$MP_PROMOTED"
 "$TOOLS/artifact-patch.py" --path "$MP_PROMOTED" --finding-id F006 \
-    --set disposition=confirmed_auto \
+    --set disposition=confirmed_mechanical \
     --set actionability=auto_fixable \
     --set-json "human_confirmation=$MP_HC_VALID" >/dev/null 2>&1 \
     || fail "MP-5 setup: promote patch failed"
 mp5_ids=$(jq -r --argjson thr 60 '
     [.findings[]
      | select(.current_state == "open")
-     | select(.disposition == "confirmed_auto" or .disposition == "partial" or .disposition == "regression")
+     | select(.disposition == "confirmed_mechanical" or .disposition == "partial" or .disposition == "regression")
      | select(
          (.human_confirmation != null)
          or (
@@ -2025,7 +2223,7 @@ MP_HC_WITH_HINT=$(jq -nc '{
 MP_ART_HINT="$WORK/art-promote-hint.json"
 cp "$ART" "$MP_ART_HINT"
 if "$TOOLS/artifact-patch.py" --path "$MP_ART_HINT" --finding-id F006 \
-        --set disposition=confirmed_auto \
+        --set disposition=confirmed_mechanical \
         --set actionability=auto_fixable \
         --set-json "human_confirmation=$MP_HC_WITH_HINT" >/dev/null 2>&1; then
     pass "MP-7 (§27.3, schema): human_confirmation with non-empty fix_hint accepted"
@@ -2082,18 +2280,18 @@ fi
 PROMOTE_MD="$REPO/commands/promote.md"
 PROMOTE_CORE_MD="$REPO/fragments/promote-core.md"
 
-# WT-0: promote-core precondition PROCEEDS (not no-op) for confirmed_auto +
+# WT-0: promote-core precondition PROCEEDS (not no-op) for confirmed_mechanical +
 # curr_hc == null. Pre-existing-bug guard: a blanket no-op on that row silently
 # broke promoting light-lane findings and deep-lane below-threshold findings
 # (§27.2, §27.6). If a future edit re-adds the no-op language, this surfaces.
 # Checks: (a) the precondition table contains a **Proceed.** verdict on the
-# confirmed_auto + curr_hc == null row, (b) it does NOT contain the old
-# "already confirmed_auto by validator" no-op text.
-if grep -q '`confirmed_auto` | `curr_hc == null` | \*\*Proceed' "$PROMOTE_CORE_MD" \
-   && ! grep -q "already confirmed_auto by validator.*no-op" "$PROMOTE_CORE_MD"; then
-    pass "WT-0 (§27.2, §27.6): promote-core precondition proceeds for confirmed_auto + no human_confirmation"
+# confirmed_mechanical + curr_hc == null row, (b) it does NOT contain the old
+# "already confirmed_mechanical by validator" no-op text.
+if grep -q '`confirmed_mechanical` | `curr_hc == null` | \*\*Proceed' "$PROMOTE_CORE_MD" \
+   && ! grep -q "already confirmed_mechanical by validator.*no-op" "$PROMOTE_CORE_MD"; then
+    pass "WT-0 (§27.2, §27.6): promote-core precondition proceeds for confirmed_mechanical + no human_confirmation"
 else
-    fail "WT-0: promote-core.md missing 'Proceed' verdict or still has blanket no-op for confirmed_auto + no hc"
+    fail "WT-0: promote-core.md missing 'Proceed' verdict or still has blanket no-op for confirmed_mechanical + no hc"
 fi
 
 # The walkthrough scope-filter jq — must stay in sync with the expression in
@@ -2111,7 +2309,7 @@ WT_SCOPE_JQ='
  | select(.human_confirmation == null)
  | select(
      (
-       (.disposition == "confirmed_auto" or .disposition == "partial" or .disposition == "regression")
+       (.disposition == "confirmed_mechanical" or .disposition == "partial" or .disposition == "regression")
        and (
          (.impact_type == "correctness" or .impact_type == "security")
          and (.score_phase4 != null and .score_phase4 >= $thr)
@@ -2188,37 +2386,37 @@ else
 fi
 
 # WT-3: findings the Phase 8 gate would ALREADY pass (correctness/security +
-# score >= threshold + confirmed_auto/partial/regression) are excluded — the
+# score >= threshold + confirmed_mechanical/partial/regression) are excluded — the
 # walkthrough's purpose is to surface what fix SKIPS. Fixture: deep/correctness
-# confirmed_auto at score=80 should NOT appear.
+# confirmed_mechanical at score=80 should NOT appear.
 wt3_findings=$(jq -nc \
-    --argjson a "$(wt_finding W020 correctness deep confirmed_auto 80 open null)" \
+    --argjson a "$(wt_finding W020 correctness deep confirmed_mechanical 80 open null)" \
     --argjson b "$(wt_finding W021 correctness deep confirmed_manual 80 open null)" \
     '[$a,$b]')
 wt3_fx=$(wt_build_fixture "$wt3_findings")
 wt3_ids=$(echo "$wt3_fx" | jq -r --argjson thr 60 "$WT_SCOPE_JQ")
 if [[ "$wt3_ids" == "W021" ]]; then
-    pass "WT-3 (§28, §13.1): scope excludes fix-eligible findings (correctness confirmed_auto >= threshold)"
+    pass "WT-3 (§28, §13.1): scope excludes fix-eligible findings (correctness confirmed_mechanical >= threshold)"
 else
     fail "WT-3: expected W021 only; got '$wt3_ids'"
 fi
 
-# WT-4: light-lane confirmed_auto findings (which fail the impact_type gate)
+# WT-4: light-lane confirmed_mechanical findings (which fail the impact_type gate)
 # ARE included — this is the primary gap the walkthrough exists to close.
-# Fixture: ux confirmed_auto at high score (which the fix command would skip
+# Fixture: ux confirmed_mechanical at high score (which the fix command would skip
 # due to impact_type != correctness/security) plus a below-threshold correctness
-# confirmed_auto (which the fix command would skip due to the score gate).
+# confirmed_mechanical (which the fix command would skip due to the score gate).
 wt4_findings=$(jq -nc \
-    --argjson a "$(wt_finding W030 ux light confirmed_auto 80 open null)" \
-    --argjson b "$(wt_finding W031 policy light confirmed_auto 50 open null)" \
-    --argjson c "$(wt_finding W032 correctness deep confirmed_auto 40 open null)" \
+    --argjson a "$(wt_finding W030 ux light confirmed_mechanical 80 open null)" \
+    --argjson b "$(wt_finding W031 policy light confirmed_mechanical 50 open null)" \
+    --argjson c "$(wt_finding W032 correctness deep confirmed_mechanical 40 open null)" \
     '[$a,$b,$c]')
 wt4_fx=$(wt_build_fixture "$wt4_findings")
 wt4_ids=$(echo "$wt4_fx" | jq -r --argjson thr 60 "$WT_SCOPE_JQ")
 # Order in jq output depends on array order, not a sort, so match any permutation.
 if [[ ",$wt4_ids," == *,W030,* && ",$wt4_ids," == *,W031,* && ",$wt4_ids," == *,W032,* ]] \
    && [[ $(echo "$wt4_ids" | awk -F, '{print NF}') == "3" ]]; then
-    pass "WT-4 (§28, §13.2): scope includes light-lane confirmed_auto + below-threshold deep confirmed_auto"
+    pass "WT-4 (§28, §13.2): scope includes light-lane confirmed_mechanical + below-threshold deep confirmed_mechanical"
 else
     fail "WT-4: expected W030,W031,W032 (any order); got '$wt4_ids'"
 fi
@@ -2270,7 +2468,7 @@ WT_QUALIFYING_JQ='
  | select(.human_confirmation == null)
  | select(
      (
-       (.disposition == "confirmed_auto" or .disposition == "partial" or .disposition == "regression")
+       (.disposition == "confirmed_mechanical" or .disposition == "partial" or .disposition == "regression")
        and (
          (.impact_type == "correctness" or .impact_type == "security")
          and (.score_phase4 != null and .score_phase4 >= $thr)
@@ -2283,7 +2481,7 @@ WT_QUALIFYING_JQ='
 wt7_findings=$(jq -nc \
     --argjson a "$(wt_finding W050 correctness deep below_gate null open null)" \
     --argjson b "$(wt_finding W051 correctness deep pre_existing_report null open null)" \
-    --argjson c "$(wt_finding W052 ux light confirmed_auto 80 open null)" \
+    --argjson c "$(wt_finding W052 ux light confirmed_mechanical 80 open null)" \
     --argjson d "$(wt_finding W053 correctness deep uncertain 55 open null)" \
     '[$a,$b,$c,$d]')
 wt7_fx=$(wt_build_fixture "$wt7_findings")
@@ -3029,7 +3227,7 @@ fi
 # so the addition should pass — but we verify rather than assume.
 L7_ART="$WORK/l7-schema.json"
 "$TOOLS/artifact-patch.py" --init "@$FIX/artifact-seed.json" --path "$L7_ART" >/dev/null
-F_L7='{"id":"F901","sources":["L7-holistic"],"source_families":["holistic-family"],"impact_type":"correctness","origin":"introduced_by_pr","origin_confidence":"high","actionability":"auto_fixable","validation_lane":"deep","current_state":"open","disposition":"confirmed_auto","is_actionable":true,"reason":"test","confirmed_strength":"moderate","file":"src/holistic/test.ts","line_range":[10,12],"claim":"L7 schema smoke","score_phase3":65,"score_phase4":70,"score_history":[{"phase":"phase_3","score":65},{"phase":"phase_4","score":70}],"validation_result":null,"fix_attempts":[],"introduced_in_sha":null,"suggested_follow_up":null,"related_parent_finding_id":null}'
+F_L7='{"id":"F901","sources":["L7-holistic"],"source_families":["holistic-family"],"impact_type":"correctness","origin":"introduced_by_pr","origin_confidence":"high","actionability":"auto_fixable","validation_lane":"deep","current_state":"open","disposition":"confirmed_mechanical","is_actionable":true,"reason":"test","confirmed_strength":"moderate","file":"src/holistic/test.ts","line_range":[10,12],"claim":"L7 schema smoke","score_phase3":65,"score_phase4":70,"score_history":[{"phase":"phase_3","score":65},{"phase":"phase_4","score":70}],"validation_result":null,"fix_attempts":[],"introduced_in_sha":null,"suggested_follow_up":null,"related_parent_finding_id":null}'
 if "$TOOLS/artifact-patch.py" --path "$L7_ART" --add-finding "$F_L7" >/dev/null 2>&1 \
     && "$TOOLS/artifact-validate.sh" --path "$L7_ART" >/dev/null 2>&1; then
     pass "L7-5 (§2.9.D): holistic-family source_family passes schema validation"
@@ -3405,6 +3603,269 @@ if [[ "$ot6_turns" == "1" && "$ot6_in" == "7" && "$ot6_out" == "8" ]]; then
     pass "OT-6: non-assistant line types (user/system/worktree-state/attachment) ignored"
 else
     fail "OT-6: filter let non-assistant lines through" "turns=$ot6_turns in=$ot6_in out=$ot6_out"
+fi
+
+# ------------------------------------------------------------------ Project F: LLM output normalization
+#
+# Three helpers attack three distinct LLM-output-shape problems:
+#   PR-* — parse-with-repair.py (tolerant JSON parse, foundation)
+#   VR-* — parse-validator-result.py (Phase 4 score/shape normalizer)
+#   SF-* — source-family-map.py (Phase 1 lens-family canonicalizer)
+# Plus PF-INT-* for fragment integration proof.
+
+# --- PR-* parse-with-repair.py
+
+# PR-1: trailing-comma input → repaired to valid JSON.
+pr1_out=$(echo '{"a": 1, "b": 2,}' | "$TOOLS/parse-with-repair.py" 2>&1)
+if [[ $? -eq 0 ]] && echo "$pr1_out" | jq -e '.a == 1 and .b == 2' >/dev/null; then
+    pass "PR-1: trailing-comma input repaired"
+else
+    fail "PR-1: trailing-comma repair failed" "$pr1_out"
+fi
+
+# PR-2: ```json ... ``` fence-wrapped input → fences stripped.
+pr2_out=$(printf '```json\n{"x": "y"}\n```\n' | "$TOOLS/parse-with-repair.py" 2>&1)
+if [[ $? -eq 0 ]] && echo "$pr2_out" | jq -e '.x == "y"' >/dev/null; then
+    pass 'PR-2: code-fence (```json) stripped'
+else
+    fail "PR-2: fence-strip failed" "$pr2_out"
+fi
+
+# PR-3: single-quoted strings → repaired.
+pr3_out=$(echo "{'a': 'hello'}" | "$TOOLS/parse-with-repair.py" 2>&1)
+if [[ $? -eq 0 ]] && echo "$pr3_out" | jq -e '.a == "hello"' >/dev/null; then
+    pass "PR-3: single-quoted strings repaired"
+else
+    fail "PR-3: single-quote repair failed" "$pr3_out"
+fi
+
+# PR-4: unrecoverable garbage → exit 1 with error-as-prompt.
+pr4_out=$(echo "not json at all" | "$TOOLS/parse-with-repair.py" 2>&1)
+pr4_exit=$?
+if [[ $pr4_exit -eq 1 ]] && echo "$pr4_out" | grep -qF "ERROR: could not parse"; then
+    pass "PR-4: unrecoverable input → exit 1 + error-as-prompt"
+else
+    fail "PR-4: expected exit 1 with ERROR line; exit=$pr4_exit" "$pr4_out"
+fi
+
+# PR-5: empty stdin → exit 1 (distinct from parse-failure exit 1 but same code).
+pr5_out=$(printf '' | "$TOOLS/parse-with-repair.py" 2>&1)
+if [[ $? -eq 1 ]] && echo "$pr5_out" | grep -qF "empty input on stdin"; then
+    pass "PR-5: empty stdin → exit 1 + specific error"
+else
+    fail "PR-5: empty-stdin handling" "$pr5_out"
+fi
+
+# --- VR-* parse-validator-result.py
+
+# VR-1: canonical shape — {score_phase4, actionability} passes through.
+vr1_out=$(echo '{"score_phase4": 72, "actionability": "auto_fixable", "decision": "confirmed"}' \
+    | "$TOOLS/parse-validator-result.py" --lane deep 2>&1)
+if [[ $? -eq 0 ]] \
+    && echo "$vr1_out" | jq -e '.score_phase4 == 72 and .actionability == "auto_fixable" and .confirmed_strength == "moderate"' >/dev/null; then
+    pass "VR-1: canonical {score_phase4,actionability} pass-through + strength derivation"
+else
+    fail "VR-1: canonical shape failed" "$vr1_out"
+fi
+
+# VR-2: nested shape — {score:{correctness:N}}.
+vr2_out=$(echo '{"score": {"correctness": 55}, "actionability": "manual"}' \
+    | "$TOOLS/parse-validator-result.py" --lane deep 2>&1)
+if [[ $? -eq 0 ]] \
+    && echo "$vr2_out" | jq -e '.score_phase4 == 55 and .actionability == "manual" and .confirmed_strength == "weak"' >/dev/null; then
+    pass "VR-2: nested score.correctness extracted"
+else
+    fail "VR-2: nested shape failed" "$vr2_out"
+fi
+
+# VR-3: 1-5 scale via overall_numeric.
+vr3_out=$(echo '{"overall_numeric": 3.5}' \
+    | "$TOOLS/parse-validator-result.py" --lane light 2>&1)
+if [[ $? -eq 0 ]] \
+    && echo "$vr3_out" | jq -e '.score_phase4 == 70 and (.notes | contains("scale_inferred"))' >/dev/null; then
+    pass "VR-3: 1-5 overall_numeric scaled (*20) + scale_inferred in notes"
+else
+    fail "VR-3: overall_numeric scaling failed" "$vr3_out"
+fi
+
+# VR-4: severity string maps to bucket.
+vr4_out=$(echo '{"severity": "medium", "actionability": "manual"}' \
+    | "$TOOLS/parse-validator-result.py" --lane light 2>&1)
+if [[ $? -eq 0 ]] \
+    && echo "$vr4_out" | jq -e '.score_phase4 == 60 and (.notes | contains("severity=medium"))' >/dev/null; then
+    pass "VR-4: severity=medium → 60 (scale_inferred noted)"
+else
+    fail "VR-4: severity mapping failed" "$vr4_out"
+fi
+
+# VR-5: ambiguous {score: 6} → heuristic 1-10 (*10).
+vr5_out=$(echo '{"score": 6}' \
+    | "$TOOLS/parse-validator-result.py" --lane light 2>&1)
+if [[ $? -eq 0 ]] \
+    && echo "$vr5_out" | jq -e '.score_phase4 == 60 and (.notes | contains("1-10"))' >/dev/null; then
+    pass "VR-5: ambiguous {score: 6} heuristic (1-10 *10)"
+else
+    fail "VR-5: ambiguous-score heuristic failed" "$vr5_out"
+fi
+
+# VR-6: malformed input → exit 2 (score unrecoverable).
+vr6_out=$(echo 'garbage' | "$TOOLS/parse-validator-result.py" --lane deep 2>&1)
+vr6_exit=$?
+if [[ $vr6_exit -eq 2 ]] && echo "$vr6_out" | grep -qF "ERROR:"; then
+    pass "VR-6: malformed input → exit 2 + error-as-prompt"
+else
+    fail "VR-6: expected exit 2 on malformed; got $vr6_exit" "$vr6_out"
+fi
+
+# VR-7: deep-lane validation_result passthrough.
+vr7_out=$(echo '{"score_phase4": 80, "actionability": "auto_fixable", "decision": "confirmed", "validation_result": {"evidence": ["e1"], "blast_radius": {}, "fix_proposal": {}, "verification_context": {}}}' \
+    | "$TOOLS/parse-validator-result.py" --lane deep 2>&1)
+if [[ $? -eq 0 ]] \
+    && echo "$vr7_out" | jq -e '.validation_result.evidence[0] == "e1" and .confirmed_strength == "strong"' >/dev/null; then
+    pass "VR-7: deep-lane validation_result passthrough + strong strength at 80"
+else
+    fail "VR-7: deep-lane passthrough failed" "$vr7_out"
+fi
+
+# VR-8: precedence — out-of-band score_phase4 + out-of-band overall_numeric.
+# Section A stashes the out-of-range score_phase4 (150) as the heuristic
+# candidate; Section C must NOT overwrite that with its own out-of-band
+# overall_numeric (7.5). Expected: heuristic rejects 150 → exit 2.
+# Pre-fix (bug): C silently overwrote A, heuristic scaled 7.5 → 75 and
+# exit 0 fabricated a confirmed_mechanical disposition.
+vr8_out=$(echo '{"score_phase4": 150, "overall_numeric": 7.5}' \
+    | "$TOOLS/parse-validator-result.py" --lane deep 2>&1)
+vr8_exit=$?
+if [[ $vr8_exit -eq 2 ]] && echo "$vr8_out" | grep -qF "ERROR: cannot coerce score to 0-100"; then
+    pass "VR-8: out-of-band score_phase4 + out-of-band overall_numeric → exit 2 (A precedes C)"
+else
+    fail "VR-8: expected exit 2 on double-out-of-band; got $vr8_exit" "$vr8_out"
+fi
+
+# VR-9: in-band score_phase4 still wins over out-of-band overall_numeric.
+# Section A's canonical-range return happens before Section C runs, so
+# the guard added in VR-8's fix doesn't regress the common case.
+vr9_out=$(echo '{"score_phase4": 72, "overall_numeric": 7.5}' \
+    | "$TOOLS/parse-validator-result.py" --lane deep 2>&1)
+if [[ $? -eq 0 ]] \
+    && echo "$vr9_out" | jq -e '.score_phase4 == 72 and .confirmed_strength == "moderate"' >/dev/null; then
+    pass "VR-9: in-band score_phase4 (72) wins over out-of-band overall_numeric"
+else
+    fail "VR-9: in-band score_phase4 precedence failed" "$vr9_out"
+fi
+
+# --- SF-* source-family-map.py
+
+# SF-1: canonical family pass-through.
+sf1_out=$("$TOOLS/source-family-map.py" --input security-family 2>&1)
+if [[ $? -eq 0 ]] && [[ "$sf1_out" == "security-family" ]]; then
+    pass "SF-1: canonical family (security-family) pass-through"
+else
+    fail "SF-1: canonical pass-through failed" "$sf1_out"
+fi
+
+# SF-2: known drift case maps to canonical.
+sf2_out=$("$TOOLS/source-family-map.py" --input prompt-injection 2>&1)
+if [[ $? -eq 0 ]] && [[ "$sf2_out" == "security-family" ]]; then
+    pass "SF-2: drift prompt-injection → security-family"
+else
+    fail "SF-2: drift mapping failed" "$sf2_out"
+fi
+
+# SF-3: stale-line-ref → policy-family (different canonical target).
+sf3_out=$("$TOOLS/source-family-map.py" --input stale-line-ref 2>&1)
+if [[ $? -eq 0 ]] && [[ "$sf3_out" == "policy-family" ]]; then
+    pass "SF-3: drift stale-line-ref → policy-family"
+else
+    fail "SF-3: stale-line-ref mapping failed" "$sf3_out"
+fi
+
+# SF-4: unknown family → exit 3 + UNKNOWN_FAMILY on stderr.
+sf4_out=$("$TOOLS/source-family-map.py" --input completely-made-up 2>&1)
+sf4_exit=$?
+if [[ $sf4_exit -eq 3 ]] && echo "$sf4_out" | grep -qF "UNKNOWN_FAMILY: completely-made-up"; then
+    pass "SF-4: unknown family → exit 3 + UNKNOWN_FAMILY stderr"
+else
+    fail "SF-4: expected exit 3 with UNKNOWN_FAMILY; got $sf4_exit" "$sf4_out"
+fi
+
+# SF-5: external-add-family canonical pass-through (commands/add.md emits this).
+sf5_out=$("$TOOLS/source-family-map.py" --input external-add-family 2>&1)
+if [[ $? -eq 0 ]] && [[ "$sf5_out" == "external-add-family" ]]; then
+    pass "SF-5: canonical family (external-add-family) pass-through"
+else
+    fail "SF-5: external-add-family pass-through failed" "$sf5_out"
+fi
+
+# --- PF-INT-*: fragment integration guards
+
+# PF-INT-1: middle-path ensemble-adapter migration — fragments/02-ensemble-adapter.md
+# pipes the normalizer output through parse-with-repair.py BEFORE the
+# jq schema-guard. This proves the middle-path migration landed in the
+# fragment, not just in the helper. The grep pattern is specific enough
+# that it catches the new bash block (not a stale reference).
+ENSEMBLE_MD="$REPO/fragments/02-ensemble-adapter.md"
+if grep -qF 'parse-with-repair.py' "$ENSEMBLE_MD" \
+    && grep -qF 'normalizer_clean=' "$ENSEMBLE_MD" \
+    && grep -qF 'phase_1_5_normalizer_unparseable' "$ENSEMBLE_MD"; then
+    pass "PF-INT-1: ensemble-adapter normalizer migrated to parse-with-repair.py"
+else
+    fail "PF-INT-1: ensemble-adapter migration missing markers in $ENSEMBLE_MD"
+fi
+
+# PF-INT-2: parse-with-repair.py actually handles the kind of malformed
+# JSON the ensemble normalizer emits in practice (single-quote + trailing
+# comma + fence combo). End-to-end proof, not helper-unit.
+# Write to a temp file via printf with escape codes to sidestep bash
+# backtick-in-heredoc parsing issues — the raw payload is a JSON array
+# wrapped in a markdown code fence ( triple-backtick + "json" ).
+pf2_file=$(mktemp)
+printf '\140\140\140json\n[{"file": "src/a.ts", "claim": "x'\''y",}]\n\140\140\140\n' > "$pf2_file"
+pf2_out=$("$TOOLS/parse-with-repair.py" < "$pf2_file" 2>&1)
+if [[ $? -eq 0 ]] \
+    && echo "$pf2_out" | jq -e '.[0].file == "src/a.ts"' >/dev/null; then
+    pass "PF-INT-2: ensemble-adapter-style malformed input (fence+single-quote+trailing-comma) repaired end-to-end"
+else
+    fail "PF-INT-2: ensemble-style malformed repair failed" "$pf2_out"
+fi
+rm -f "$pf2_file"
+
+# PF-INT-3: fragments/05-validation.md references parse-validator-result.py
+# for canonical shape normalization before --apply-decisions tuple compose.
+VAL_MD="$REPO/fragments/05-validation.md"
+if grep -qF 'parse-validator-result.py' "$VAL_MD" \
+    && grep -qF -e '--lane deep' "$VAL_MD" \
+    && grep -qF 'Phase 4 parse/score unrecoverable' "$VAL_MD"; then
+    pass "PF-INT-3: fragments/05-validation.md integrates parse-validator-result.py"
+else
+    fail "PF-INT-3: validation fragment integration missing markers in $VAL_MD"
+fi
+
+# PF-INT-4: fragments/01-detection.md integrates source-family-map.py at
+# the join step with "unknown"-tag escalation (not silent drop).
+DET_MD="$REPO/fragments/01-detection.md"
+if grep -qF 'source-family-map.py' "$DET_MD" \
+    && grep -qF 'canonical_family="unknown"' "$DET_MD" \
+    && grep -qF 'lens_source_family_unknown' "$DET_MD"; then
+    pass "PF-INT-4: detection fragment integrates source-family-map.py (escalate-not-drop)"
+else
+    fail "PF-INT-4: detection fragment integration missing markers in $DET_MD"
+fi
+
+# PF-INT-5: commands/review.md frontmatter grants bare-name Bash permissions
+# for the three new helpers. Catches the permissions-vs-usage drift class.
+REVIEW_CMD="$REPO/commands/review.md"
+review_front=$(awk '/^---$/{c++; next} c==1{print}' "$REVIEW_CMD")
+rh_missing=()
+for helper in parse-with-repair.py parse-validator-result.py source-family-map.py; do
+    if ! echo "$review_front" | grep -qF "Bash($helper:"; then
+        rh_missing+=("$helper")
+    fi
+done
+if [[ ${#rh_missing[@]} -eq 0 ]]; then
+    pass "PF-INT-5: commands/review.md allowed-tools grants the three new helpers"
+else
+    fail "PF-INT-5: missing Bash grants for: ${rh_missing[*]}"
 fi
 
 echo

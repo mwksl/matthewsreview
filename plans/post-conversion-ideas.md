@@ -1,5 +1,7 @@
 # Post-conversion ideas
 
+> **Historical record as of 2026-04-22.** This file is the chronological idea log for the plugin-conversion era. Eighteen items were executed in the 2026-04-22 session (see `> DONE` markers and `plans/post-plugin-improvements.md`). **For the forward-looking, prioritized view of everything still open, read [`plans/backlog.md`](./backlog.md).** This file is preserved for the original rationale / trigger wording on each item — edit it only to flip new items' scheduling markers as sessions complete them.
+
 Architectural backlog for after the plugin conversion lands. Nothing here is
 committed work. Each item has a trigger/signal for when to revisit so this
 stays a real backlog rather than a pile of "maybe someday."
@@ -11,6 +13,8 @@ discussion on the items that came from there).
 ---
 
 ## 0. [HIGH PRIORITY] Simplify orchestrator-tokens display — drop cache lines
+
+> DONE 2026-04-22: plans/post-plugin-improvements.md Project A — commit 3009c07
 
 Current rendered line (from a real run):
 
@@ -72,12 +76,16 @@ Over the next ~10 reviews, track walkthrough behavior:
 won't. Schema + fragment + doc edits, ~half-day.
 *Trigger:* whenever you've got a quiet afternoon.
 
+> DONE 2026-04-22: plans/post-plugin-improvements.md Project D.partial (#1A rename) — commit 8e3453b
+
 **B. Per-lane thresholds (better than hard filter).** Replace the lane
 filter with `score_phase4 ≥ threshold_for(impact_type)` where
 `threshold_for(correctness|security) = 60` and
 `threshold_for(ux|policy|architecture) = 75`. Smooth continuum, still
 asymmetric, more principled.
 *Trigger:* data says walkthrough sometimes earns its keep but not always.
+
+> Deferred 2026-04-22: awaiting ~10 reviews of data from Project D telemetry
 
 **C. Lift filter, trust Phase 9a (simplest).** Phase 9a Opus post-fix
 review runs on every surviving group. If it catches semantic mistakes
@@ -86,6 +94,8 @@ the intent — reworded error messages that subtly change meaning might slip
 through.
 *Trigger:* data says walkthrough rubber-stamps AND Phase 9a catches
 semantic mistakes in practice.
+
+> Deferred 2026-04-22: awaiting ~10 reviews of data from Project D telemetry
 
 **D. Move decision upstream into Phase 4b (largest refactor).** Light-lane
 validators default to `actionability=manual` unless explicit evidence of
@@ -100,6 +110,8 @@ everything. Simplest architecture, highest cost.
 ---
 
 ## 2. Stage 4 fragment-shrink (already planned, deferred)
+
+> Deferred 2026-04-22: dedicated session per plans/stage-4-fragment-shrink.md
 
 Consolidate fragments where the boundary is arbitrary. Plan exists at
 `plans/stage-4-fragment-shrink.md`. Post-conversion is a natural time to do
@@ -199,6 +211,8 @@ The items split into (A) things the orchestrator flagged mid-run, and (B) orches
 
 ### 9. Origin cross-check is rename-blind
 
+> DONE 2026-04-22: plans/post-plugin-improvements.md Project G — commit 55ea067
+
 F038's mechanism existed on main before the PR. The Phase 4 deep validator called `de004fb` the "precipitating change" because `git blame` on `recategorization.ts` lit up as PR-introduced — the file was created in the PR via code extraction from a predecessor. Pre-existing detection doesn't follow renames, so refactors that move code into a new file hide real pre-existing bugs from the crosscheck.
 
 **Fix**: teach `origin-crosscheck.sh` to follow `git log --follow` (or `--find-renames`) when the touched file is new in the PR, or have the Phase 4 deep validator explicitly `git show main:<related-file>` when a finding targets a newly-created file.
@@ -206,6 +220,8 @@ F038's mechanism existed on main before the PR. The Phase 4 deep validator calle
 *Trigger:* when a refactor-heavy PR produces a false "new bug" for code that existed before. Once is a blip; twice means fix it.
 
 ### 10. Lens `source_family` normalization is voluntary
+
+> DONE 2026-04-22: plans/post-plugin-improvements.md Project F — commit 95dc23d
 
 L4 returned `"stale-line-ref"`/`"stale-behavior-claim"`; L6 returned `"prompt-injection"`/`"input-validation"`/`"path-traversal"`/`"terminal-injection"` instead of the prescribed `policy-family`/`security-family`. The prompts spell out the canonical families but Sonnet drifts under its own taxonomic urges. The orchestrator hand-overrode both.
 
@@ -215,6 +231,8 @@ L4 returned `"stale-line-ref"`/`"stale-behavior-claim"`; L6 returned `"prompt-in
 
 ### 11. Deep-lane validators drift off the 0–100 rubric
 
+> DONE 2026-04-22: plans/post-plugin-improvements.md Project B — commit f0d7f19
+
 F018 returned `severity: "medium"`, `overall_numeric: 3.0` (1–5 scale). F024 returned `score_phase4: 6` (probably 1–10). F025 returned `score.correctness: 6`. The orchestrator had to interpret and re-score each for the `--apply-decisions` batch.
 
 **Fix**: add one explicit line to the Wave-1 deep prompt: "Your `score_phase4` is a single integer 0–100. Do not output a 1–5 or 1–10 scale." Two-word fix, huge reliability win.
@@ -223,11 +241,15 @@ F018 returned `severity: "medium"`, `overall_numeric: 3.0` (1–5 scale). F024 r
 
 ### 12. Validator output parsing should tolerate schema variance
 
+> DONE 2026-04-22: plans/post-plugin-improvements.md Project F — commit 95dc23d
+
 Related to #11 — but even with a 0–100 fence, validators return JSON with varied shapes (`score_phase4`, `score.correctness`, nested `score: {...}`, scale-encoded floats). The orchestrator compensates by interpreting. A `bin/parse-validator-result.py` helper that normalizes all known shapes into the canonical schema would remove the orchestrator's improvisation burden and make the behavior testable.
 
 *Trigger:* bundle with #11 if a fix is landing; otherwise when schema variance bites in CI-mode review runs where there's no orchestrator to compensate.
 
 ### 13. Codex companion `ready` subcommand doesn't exist
+
+> DONE 2026-04-22: plans/post-plugin-improvements.md Project B — commit f0d7f19
 
 `fragments/02-ensemble-adapter.md` says:
 ```
@@ -241,6 +263,8 @@ Actual surface is `setup --json` which returns a `{"ready": true, ...}` structur
 
 ### 14. Fragment inlining can exceed the preprocessor's capacity
 
+> Deferred 2026-04-22: dedicated session per plans/stage-4-fragment-shrink.md
+
 During the run, the command's `!`include`` preprocessor persisted Phases 0, 1.5, and 2–6 inline but truncated Phases 1 and 3 to 2 KB "previews." The orchestrator had to `Read fragments/NN.md` directly to recover the rest.
 
 **Fix options:**
@@ -252,6 +276,8 @@ During the run, the command's `!`include`` preprocessor persisted Phases 0, 1.5,
 
 ### 15. Shell subshell word-splitting bit Phase 2 on macOS zsh
 
+> DONE 2026-04-22: plans/post-plugin-improvements.md Project C — commit 10d200d
+
 ```
 for dupe in $dupes
 ```
@@ -262,6 +288,8 @@ inside a `while read` pipe didn't split on whitespace as expected (zsh under mac
 *Trigger:* now. Pre-existing bug (not conversion-introduced) but fix it while the context is fresh.
 
 ### 16. Phase 4 tree-cleanliness sweep false-positives on `.claude/`
+
+> DONE 2026-04-22: plans/post-plugin-improvements.md Project C — commit 10d200d
 
 Phase 4.4.5 flagged `.claude/scheduled_tasks.lock` as dirty-tree validator pollution — false positive from ScheduleWakeup infra writing to the repo's `.claude/` dir during the run. Already noted as `phase_4_tree_dirty_false_positive` in `trace.md`.
 
@@ -277,6 +305,8 @@ When Codex said "commands.ts:1492–1505 AND daily-sync.ts:323–337", the norma
 
 ### 18. No warning when §0.13 finds a prior artifact but the old PR comment will stick around
 
+> DONE 2026-04-22: plans/post-plugin-improvements.md Project B — commit f0d7f19
+
 §0.14 (new-comment POST vs. existing-comment PATCH decision) skips when §0.13 found a prior artifact with `current_state=open`. That's per-spec, but the prior comment (e.g., from `rev_01KPSN4D94...`) stays on the PR alongside the new one. Users running `:review` repeatedly may silently accumulate review comments.
 
 **Fix**: one-line user-facing note during §0.14: "Prior comment `<url>` will remain. Delete on GitHub if you want it gone." Purely informational.
@@ -284,6 +314,8 @@ When Codex said "commands.ts:1492–1505 AND daily-sync.ts:323–337", the norma
 *Trigger:* now. Tiny edit, prevents a "wait, why are there 4 adamsreview comments on this PR?" moment.
 
 ### 19. Codex progress goes to stderr; `.out` is empty until completion
+
+> DONE 2026-04-22: plans/post-plugin-improvements.md Project B — commit f0d7f19
 
 Mid-run diagnostic in the ensemble adapter — checking `.out` for Codex progress was misleading because Codex writes progress to stderr and stdout only fills on completion. One comment in `02-ensemble-adapter.md` next to the wait/poll loop would prevent the misread next time.
 
@@ -294,6 +326,8 @@ Mid-run diagnostic in the ensemble adapter — checking `.out` for Codex progres
 ## B. Orchestrator-side observations (from trace analysis)
 
 ### 20. JSON retry is one-shot, no repair, no model escalation
+
+> DONE 2026-04-22: plans/post-plugin-improvements.md Project F — commit 95dc23d
 
 Current pattern across every JSON-returning sub-agent site: parse → if fails, retry once with a "return only the schema" addendum → if still fails, safe-default / null+`uncertain` / drop / abort (site-dependent). No tolerant parser fallback, no model escalation on retry.
 
@@ -308,6 +342,8 @@ Current pattern across every JSON-returning sub-agent site: parse → if fails, 
 
 ### 21. `commands/review.md` missing `Bash(line-range-check.sh:*)` grant
 
+> DONE 2026-04-22: plans/post-plugin-improvements.md Project C — commit 10d200d
+
 `fragments/01-detection.md` invokes `line-range-check.sh` via bare name, but `review.md`'s `allowed-tools` doesn't include it. Pre-existing gap (not conversion-introduced — the pre-conversion review command had the same miss under its abs-path form). May cause a permission prompt during Phase 1 join.
 
 **Fix**: one-line addition to `commands/review.md` frontmatter.
@@ -315,6 +351,8 @@ Current pattern across every JSON-returning sub-agent site: parse → if fails, 
 *Trigger:* if the permission prompt interrupts a review run.
 
 ### 22. `.gitattributes` doesn't cover `bin/include`
+
+> DONE 2026-04-22: plans/post-plugin-improvements.md Project C — commit 10d200d
 
 `bin/include` has no file extension, so the `*.sh` / `*.py` / `*.json` / `*.md` patterns in `.gitattributes` don't enforce LF on it. Currently LF on disk and LF in git, so no current risk. A future editor writing CRLF would produce a silent regression.
 
@@ -324,6 +362,8 @@ Current pattern across every JSON-returning sub-agent site: parse → if fails, 
 
 ### 23. Phase 0 `run_in_background` footgun
 
+> DONE 2026-04-22: plans/post-plugin-improvements.md Project B — commit f0d7f19
+
 During the earlier stuck-session incident (before the xhigh retry), the orchestrator backgrounded Phase 0's deterministic setup script, then couldn't read its output (harness turned `cat` into a new background task, blocked leading `sleep`, `Read` saw the file as effectively empty). Self-diagnosed, not conversion-specific.
 
 **Fix**: the Phase 0 fragment could explicitly say "Run the setup script in the foreground — do NOT use `run_in_background`. You need its output inline to proceed through dirty-tree / branch-detect decisions." Prescriptive prompt edit prevents the failure mode.
@@ -331,6 +371,9 @@ During the earlier stuck-session incident (before the xhigh retry), the orchestr
 *Trigger:* now. Cheap, prevents the session-trashing hang entirely.
 
 ### 24. Phase 3 demote rate may be miscalibrated
+
+> DONE 2026-04-22: plans/post-plugin-improvements.md Project D.partial (#24 telemetry only) — commit ee81715
+> Deferred 2026-04-22: awaiting ~10 reviews of data from Project D telemetry (threshold decision)
 
 The first real review surfaced 37 findings past Phase 2 dedup; 24 landed `below_gate` (65%). Phase 3's "err-up" rubric is intentionally conservative, but a 65% demote rate means the gate is doing a lot of the work of Phase 4 prematurely. Data point of one — not conclusive.
 
@@ -340,6 +383,8 @@ The first real review surfaced 37 findings past Phase 2 dedup; 24 landed `below_
 
 ### 25. Marketplace `metadata.description` warning
 
+> DONE 2026-04-22: plans/post-plugin-improvements.md Project C — commit 10d200d
+
 `claude plugin validate .` reports one warning: `metadata.description: No marketplace description provided`. Benign; the per-plugin description in `plugins[]` is populated.
 
 **Fix** (optional): add a top-level `"description"` to `.claude-plugin/marketplace.json`. Silences the validator warning; no functional change.
@@ -347,6 +392,8 @@ The first real review surfaced 37 findings past Phase 2 dedup; 24 landed `below_
 *Trigger:* when the warning gets noisy enough to care, or when adding a second plugin to the marketplace makes the top-level description actually meaningful.
 
 ### 27. Walkthrough's spurious first-iteration continue/stop prompt
+
+> DONE 2026-04-22: plans/post-plugin-improvements.md Project B — commit f0d7f19
 
 After the user answers the first per-finding AskUserQuestion in `/adamsreview:walkthrough`, the orchestrator sometimes dispatches a spurious "continue or stop the walkthrough?" prompt before moving on. Not in the fragment spec — the per-finding AUQ at step 5.4 already includes "Stop the walkthrough" as a menu option, and step 5.6 ("Between iterations") is just meant to print a terse running-feedback line.
 
@@ -364,13 +411,10 @@ LLMs respect this class of explicit anti-instruction reliably.
 
 ## Priority ordering (all items)
 
-Taking current usage pattern as given:
+Post-2026-04-22 close-out state (see plans/post-plugin-improvements.md §6 Build Journal for session details):
 
-- **Worth doing soon (architectural):** #1A (rename for clarity)
-- **Worth doing soon (quality, one-line each):** #11 (0–100 rubric fence), #13 (codex `ready` → `setup --json`), #15 (Phase 2 word-splitting), #16 (`.claude/` tree-sweep exclusion), #18 (prior-comment notice), #19 (stderr comment), #22 (`bin/include` gitattributes), #23 (Phase 0 foreground-only guidance), #27 (walkthrough no-between-iteration-prompt)
-- **Data-driven decision over next ~10 reviews:** #1B/C, #24 (Phase 3 demote rate)
-- **Worth doing with moderate effort:** #9 (rename-aware origin crosscheck), #10 (source_family mapping table), #21 (`line-range-check.sh` grant)
-- **Already planned, forcing function now:** #2 / #14 (Stage 4 fragment shrink — item #14 is fresh evidence)
-- **Medium-effort reliability wins:** #12 (validator parsing helper), #20 (JSON parse-with-repair + model escalation)
-- **Probably leave alone:** #3, #5, #6, #7, #8, #17, #25, #26
-- **Biggest refactors, unlikely to be worth it:** #1D, #1E, #4
+- **Done 2026-04-22 (this session):** #0, #1A (rename), #9, #10, #11, #12, #13, #15, #16, #18, #19, #20, #21, #22, #23, #24 (telemetry only — decision deferred), #25, #27
+- **Data-driven decision awaiting ~10 reviews of Project D telemetry:** #1B, #1C, #24 (threshold-calibration decision portion)
+- **Deferred to dedicated Stage 4 session:** #2, #14 (see `plans/stage-4-fragment-shrink.md`)
+- **Probably leave alone** (per-item triggers say "probably never"): #3, #4, #5, #6, #7, #8, #17, #1D, #1E (item #26 was never authored — numbering jumps from #25 to #27)
+- **Follow-up surfaced during Project C** (not in scope, worth a future one-liner): `assign-finding-ids.sh` and `origin-crosscheck.sh` are invoked bare in transcluded fragments but missing from `commands/review.md` `allowed-tools` — same class of pre-existing gap as #21. Bundle with any future frontmatter touch.

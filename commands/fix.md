@@ -18,7 +18,7 @@ a single reconciled fix if Phase 9 then verifies it), or inspect
 
 Arguments (optional):
 - First positional (integer 0–100) → `threshold` (default `60`). The
-  §4 Phase 8 fix gate: `confirmed_auto`/`partial`/`regression` findings
+  §4 Phase 8 fix gate: `confirmed_mechanical`/`partial`/`regression` findings
   with `score_phase4 >= threshold` are eligible. `/adamsreview:fix 80`
   excludes moderate-strength findings from the run.
 - `--granular-commits` → one commit per surviving fix group. Default is

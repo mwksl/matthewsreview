@@ -880,7 +880,7 @@ Print a clear summary block to chat:
 
 ```
 Added N new findings to <review_id>:
-  F037 confirmed_auto    correctness  src/foo.ts:142 — early-return skips audit-log
+  F037 confirmed_mechanical    correctness  src/foo.ts:142 — early-return skips audit-log
   F038 uncertain         correctness  src/bar.ts:88  — possible race in cache invalidation
   F039 disproven         correctness  src/baz.ts:12  — (validator found positive evidence; not a real issue)
 
@@ -888,10 +888,10 @@ Deduplicated K candidates against existing findings (sources merged):
   new#2 → F003   (skipped — same underlying issue)
 
 Cumulative sub-agent spend: <total> tokens across <invs> invocations.
-Cumulative orchestrator spend: <cache_read> cache-read / <output> output / <cache_creation> cache-creation / <input> fresh input across <turns> turns.
+Cumulative orchestrator spend: <output> output / <input> input across <turns> turns.
 
 Next:
-  - /adamsreview:fix             apply newly auto-eligible findings (deep-lane confirmed_auto)
+  - /adamsreview:fix             apply newly auto-eligible findings (deep-lane confirmed_mechanical)
   - /adamsreview:walkthrough     promote any non-eligible new findings (light-lane / manual / uncertain)
 ```
 
@@ -921,7 +921,7 @@ subagent_token_line=$(jq -r '
 
 orchestrator_token_line=$(jq -r '
     if (.orchestrator_tokens.turn_count // null) != null
-    then "Cumulative orchestrator spend: \(.orchestrator_tokens.cache_read) cache-read / \(.orchestrator_tokens.total_output) output / \(.orchestrator_tokens.cache_creation) cache-creation / \(.orchestrator_tokens.total_input) fresh input across \(.orchestrator_tokens.turn_count) turns."
+    then "Cumulative orchestrator spend: \(.orchestrator_tokens.total_output) output / \(.orchestrator_tokens.total_input) input across \(.orchestrator_tokens.turn_count) turns."
     else empty end
 ' "$artifact_path")
 ```
@@ -942,7 +942,7 @@ The artifact patches stand; to republish run:
 - **No promotion.** New findings land at whatever disposition Phase 4
   produces. Run `/adamsreview:walkthrough` (or
   `/adamsreview:promote <id>`) to promote anything that didn't land
-  deep-`confirmed_auto`.
+  deep-`confirmed_mechanical`.
 - **No Phase 5 cross-cutting recompute.** Added findings are not
   retroactively grouped into existing `cross_cutting_groups`.
   Documented small loss; the rendered report still shows them in the

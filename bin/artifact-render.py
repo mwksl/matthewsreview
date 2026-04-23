@@ -33,7 +33,7 @@ MARKER = "<!-- adams-review-v1 -->"
 # the Light-lane Disposition cell. Raw enum values never appear in rendered
 # output — they stay machine-facing in artifact.json.
 SECTION_LABEL = {
-    "confirmed_auto": ("01", "Auto-fixable", "✓", "auto-fixable"),
+    "confirmed_mechanical": ("01", "Auto-fixable", "✓", "auto-fixable"),
     "confirmed_manual": ("02", "Requires manual attention", "⚠", "manual"),
     "uncertain": ("03", "Uncertain", "ℹ", "uncertain"),
     "confirmed_report": ("04", "Confirmed — informational", "ℹ", "informational"),
@@ -43,7 +43,7 @@ SECTION_LABEL = {
     "resolved": ("08", "Resolved", "✓", "resolved"),
 }
 
-DEEP_AUTO_FIX_DISPOSITIONS = ("confirmed_auto", "partial", "regression", "resolved")
+DEEP_AUTO_FIX_DISPOSITIONS = ("confirmed_mechanical", "partial", "regression", "resolved")
 
 
 # ----- Helpers ----------------------------------------------------------
@@ -167,12 +167,14 @@ def render_header(artifact):
     orch = artifact.get("orchestrator_tokens") or {}
     turn_count = orch.get("turn_count")
     if turn_count is not None:
+        # Render shows only the user-facing levers — output and fresh input.
+        # cache_read and cache_creation stay in the artifact for cost
+        # analysis but are prompt-cache plumbing, not signal in the PR
+        # comment. See CLAUDE.md §"Pipeline shape" for the rationale.
         lines.append(
             "**Orchestrator tokens:** "
-            f"{thousands(orch.get('cache_read', 0))} cache-read / "
             f"{thousands(orch.get('total_output', 0))} output / "
-            f"{thousands(orch.get('cache_creation', 0))} cache-creation / "
-            f"{thousands(orch.get('total_input', 0))} fresh input "
+            f"{thousands(orch.get('total_input', 0))} input "
             f"across {thousands(turn_count)} turns"
         )
     if artifact.get("trivial_mode"):
@@ -189,7 +191,7 @@ def render_summary(buckets):
     light = lambda k: [f for f in buckets.get(k, []) if f.get("validation_lane") == "light"]
 
     deep_bits = []
-    for disp in ("confirmed_auto", "partial", "regression", "resolved",
+    for disp in ("confirmed_mechanical", "partial", "regression", "resolved",
                  "confirmed_manual", "confirmed_report", "uncertain"):
         n = len(deep(disp))
         if n:
@@ -200,7 +202,7 @@ def render_summary(buckets):
     # regardless of lane. Light-lane uncertain findings were silently dropped
     # from both this summary and render_light_lane's table prior to Stage 2.5.D —
     # the C13 ray-finance run quietly lost 3 findings from its PR comment.
-    for disp in ("confirmed_auto", "confirmed_manual", "confirmed_report", "uncertain"):
+    for disp in ("confirmed_mechanical", "confirmed_manual", "confirmed_report", "uncertain"):
         n = len(light(disp))
         if n:
             light_bits.append(f"{n} {SECTION_LABEL[disp][3]}")
@@ -410,14 +412,14 @@ def render_light_lane(buckets):
     # existing shape; no section split needed (deep lane uses render_deep_other
     # for Uncertain, but the light lane's single-table design accommodates all
     # confirmed/uncertain dispositions in one rendering pass).
-    for disp in ("confirmed_auto", "confirmed_manual", "confirmed_report", "uncertain"):
+    for disp in ("confirmed_mechanical", "confirmed_manual", "confirmed_report", "uncertain"):
         for f in buckets.get(disp, []):
             if f.get("validation_lane") == "light":
                 rows.append(f)
     if not rows:
         return ""
     lines = ["## Light lane — ux, policy, architecture", ""]
-    if any(f.get("disposition") in ("confirmed_auto", "confirmed_manual") for f in rows):
+    if any(f.get("disposition") in ("confirmed_mechanical", "confirmed_manual") for f in rows):
         lines.append(
             "_Light-lane findings are not touched by `/adamsreview:fix` by default — "
             "including rows labeled auto-fixable. To force-apply any row as auto-fix, "
