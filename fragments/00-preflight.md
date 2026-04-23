@@ -52,118 +52,42 @@ commits ahead while `origin/$base_branch..HEAD` is genuinely non-empty.)
 
 ### 0.2a. Reconcile base-branch freshness (§13.10)
 
-This is the Phase-0 invariant that prevents stale-local-`base_branch` runs
-from silently poisoning every downstream lens and blame check. Output: a
-`comparison_ref` variable (which every later `git diff` / `git blame` /
-lens prompt uses instead of `$base_branch`) and a `base_context` record
-written into the artifact seed at step 0.15.
-
-Warnings written in this step need to land in `trace.md`, but
-`trace_log_path` isn't captured until step 0.15. Initialize a
-`preflight_warnings` Bash array at the top of this step (one string per
-entry) and flush it to `trace.md` at the end of step 0.15 once the
-review directory exists.
+Phase-0 invariant preventing stale-local-`base_branch` runs from poisoning
+downstream lenses / blame. `freshness-gate.sh` owns remote detect, fetch,
+and behind-count; orchestrator owns `AskUserQuestion`.
 
 ```bash
+# Initialize preflight_warnings ONCE — prior-call warnings must survive
+# across a --after-choice re-invocation. The jq-extraction loop below
+# runs after EACH freshness-gate.sh call (first + any --after-choice)
+# and appends; it must not reset the array.
 preflight_warnings=()
-base_freshness=""
-comparison_ref=""
-remote_sha=null
-behind_count=null
+
+fg_out=$(freshness-gate.sh --base-branch "$base_branch" --head-branch "$head_branch")
+comparison_ref=$(echo "$fg_out" | jq -r '.comparison_ref // empty')
+base_freshness=$(echo "$fg_out" | jq -r '.base_freshness')
+remote_sha=$(echo "$fg_out" | jq -r '.remote_sha // empty')
+behind_count=$(echo "$fg_out" | jq -r '.behind_count // empty')
+while IFS= read -r w; do
+    [[ -n "$w" ]] && preflight_warnings+=("$w")
+done < <(echo "$fg_out" | jq -r '.preflight_warnings[]?')
 ```
 
-**Step 1. Detect whether a remote exists, and fetch if it does.**
+First four values feed `base_context` at 0.15; `preflight_warnings` flushes
+to `trace.md` at 0.15 (after `trace_log_path` exists). If `base_freshness ==
+"pending_user_gate"`, ask the user — offer (a) Fast-forward local `$base_branch`
+[drop when `ff_available: false`], (b) Compare against `origin/$base_branch`,
+(c) Proceed with stale local `$base_branch` (discouraged), (d) Abort; include
+`behind_count` in the prompt. Re-invoke `freshness-gate.sh ... --after-choice
+<a|b|c>` and re-run the **same jq extractions** on the new `fg_out` — do NOT
+reset `preflight_warnings` (the array is initialized once above); the while
+loop appends any additional warnings to the prior-call set. A second
+`pending_user_gate` (non-FF on (a)) re-asks with only (b)/(c)/(d). (d) exits 0
+with a one-line message — no `review_dir` exists yet.
 
-```bash
-if ! git remote get-url origin >/dev/null 2>&1; then
-    # Purely local repo — nothing to reconcile. Use local base_branch
-    # directly and skip straight to step 4 (sanity check).
-    base_freshness="no_remote"
-    comparison_ref="$base_branch"
-else
-    # 30s soft timeout via GNU coreutils `timeout` if available; fall
-    # back to a background+wait pattern on macOS where `timeout` isn't
-    # default.
-    fetch_rc=0
-    if command -v timeout >/dev/null 2>&1; then
-        timeout 30 git fetch origin "$base_branch" --quiet 2>/tmp/adams_fetch_err.$$ || fetch_rc=$?
-    else
-        ( git fetch origin "$base_branch" --quiet 2>/tmp/adams_fetch_err.$$ ) &
-        fetch_pid=$!
-        ( sleep 30 && kill -TERM "$fetch_pid" 2>/dev/null ) &
-        watchdog_pid=$!
-        wait "$fetch_pid" 2>/dev/null || fetch_rc=$?
-        kill -TERM "$watchdog_pid" 2>/dev/null || true
-        wait "$watchdog_pid" 2>/dev/null || true
-    fi
-
-    if [[ $fetch_rc -ne 0 ]]; then
-        # Fetch failed (network, no upstream for this branch, timeout).
-        # Do NOT prompt; do NOT abort — offline/airgapped runs must proceed.
-        base_freshness="no_fetch"
-        comparison_ref="$base_branch"
-        preflight_warnings+=("fetch_failed origin $base_branch rc=$fetch_rc err=$(tr '\n' ' ' < /tmp/adams_fetch_err.$$ 2>/dev/null || true)")
-    fi
-    rm -f /tmp/adams_fetch_err.$$
-fi
-```
-
-**Step 2. Compute `behind_count` and route (only if fetch succeeded).**
-
-If `base_freshness` is still empty after step 1 (i.e., fetch succeeded),
-compute the behind count and branch:
-
-```bash
-if [[ -z "$base_freshness" ]]; then
-    remote_sha=$(git rev-parse "origin/$base_branch")
-    behind_count=$(git rev-list --count "$base_branch..origin/$base_branch" 2>/dev/null || echo 0)
-
-    if [[ "$behind_count" -eq 0 ]]; then
-        base_freshness="fresh"
-        comparison_ref="$base_branch"
-    fi
-    # else behind_count > 0 → Step 3 dispatches AskUserQuestion.
-fi
-```
-
-**Step 3. User gate for the behind case (orchestrator-level).**
-
-When `behind_count > 0` (i.e., `base_freshness` is still empty after
-step 2), dispatch `AskUserQuestion` with four choices.
-List `behind_count` explicitly in the prompt so the user knows how many
-commits have accumulated upstream. Suggested prompt:
-
-> Local `$base_branch` is $behind_count commits behind `origin/$base_branch`.
-> Reviewing against stale local main may flag upstream commits as
-> PR-introduced and miss pre-existing findings. Choose:
->
-> - (a) Fast-forward local `$base_branch` and compare against it (recommended)
-> - (b) Compare against `origin/$base_branch` without touching local
-> - (c) Proceed with stale local `$base_branch` (strongly discouraged)
-> - (d) Abort
-
-Branch on the user's answer:
-
-- **(a) Fast-forward local `$base_branch`**. Run
-  `git fetch origin "$base_branch:$base_branch"` — this refuses non-FF
-  updates, so a locally-diverged `$base_branch` surfaces a clear error
-  rather than silently rewriting history. On success:
-  `comparison_ref="$base_branch"`, `base_freshness="fast_forwarded"`.
-  On failure (non-FF divergence): buffer the stderr into
-  `preflight_warnings`, explain the divergence, and re-issue
-  `AskUserQuestion` with only (b), (c), (d) offered (drop (a)).
-- **(b) Compare against `origin/$base_branch`** (no local mutation).
-  `comparison_ref="origin/$base_branch"`,
-  `base_freshness="used_remote_ref"`. Local `$base_branch` stays stale
-  — fine; the review's comparison ref points at the remote.
-- **(c) Proceed with stale local `$base_branch`** (strongly discouraged).
-  `comparison_ref="$base_branch"`, `base_freshness="proceeded_stale"`.
-  Buffer the warning into `preflight_warnings` for trace.md.
-- **(d) Abort.** Exit 0 with a one-line message; do not create a
-  `review_dir` (nothing has been written yet — the artifact seed
-  hasn't landed at 0.15).
-
-**Step 4. Sanity check (against `comparison_ref`).**
+**Sanity check (against `comparison_ref`).** Phase-0-level decision, not
+a freshness decision — stays inline so the "nothing to do" message is
+user-facing:
 
 ```bash
 if [[ "$(git rev-list --count "$comparison_ref..HEAD")" -eq 0 ]]; then
@@ -175,13 +99,6 @@ fi
 Running this against `$comparison_ref` (not `$base_branch`) means a
 feature branch that looks empty vs stale local `main` but has real
 commits vs `origin/main` still reviews correctly under option (b).
-
-**Capture** `comparison_ref`, `base_freshness`, `remote_sha`, `behind_count`,
-`preflight_warnings` into the working context. The first four feed the
-`base_context` object in the artifact seed (step 0.15); `preflight_warnings`
-is flushed to `trace.md` at the end of step 0.15. `comparison_ref` is used
-by every later phase in place of `$base_branch` for diff / blame /
-lens-prompt references.
 
 ### 0.3. Derive repo slug
 
@@ -239,7 +156,10 @@ Run `gh pr view --json number,state,isDraft,url,author,headRefName,baseRefName`
     ```
   - Set `mode=pr`.
 - If it exits non-zero with "no pull requests found for branch" (or similar):
-  set `mode=local`, `pr_number=null`, `pr_state=null`, `pr_author=null`.
+  set `mode=local`, `pr_number=""`, `pr_state=""`, `pr_author=""` (empty-string
+  sentinels matching the `pr_state=""` branch above; the `${var:-}` expansions
+  at step 0.15's `artifact-seed.sh` call turn `""` into JSON null. Do NOT use
+  the literal string `null` — the helper rejects it at argument validation).
 - Any other `gh` error (auth, network): stop and surface stderr per §24.2.
 
 ### 0.5. Capture `review_started_at`
@@ -322,31 +242,15 @@ This is the staleness-envelope anchor.
 
 ### 0.11. Trivial-diff check (§13.9)
 
-If `force_full=true`, set `trivial_mode=false` and skip the rest of this
-step. Counts from 0.6 are used unchanged.
-
-Otherwise, run this Bash check against the file list from 0.6:
+If `force_full=true`, set `trivial_mode=false` and `trivial_reason=null`
+and skip the rest of this step. Otherwise delegate to `trivial-check.sh`
+(allow-list walk + count thresholds + reason emission):
 
 ```bash
-# Every changed file must match the doc/config allow-list for trivial.
-# Allow-list: *.md *.mdx *.txt *.rst *.yaml *.yml *.json *.jsonc
-#             *.toml *.ini *.cfg *.conf LICENSE LICENSE.* CHANGELOG*
-#             NOTICE* .gitignore .editorconfig .npmrc .nvmrc
-all_trivial=true
-while IFS= read -r f; do
-    [[ -z "$f" ]] && continue
-    case "$f" in
-        *.md|*.mdx|*.txt|*.rst|*.yaml|*.yml|*.json|*.jsonc|\
-        *.toml|*.ini|*.cfg|*.conf|\
-        LICENSE|LICENSE.*|CHANGELOG*|NOTICE*|\
-        .gitignore|.editorconfig|.npmrc|.nvmrc) ;;
-        *) all_trivial=false; break ;;
-    esac
-done <<<"$reviewed_files_all"
+tc_json=$(printf '%s\n' $reviewed_files_all | trivial-check.sh --num-files "$num_files" --lines-changed "$lines_changed")
+trivial_mode=$(printf '%s' "$tc_json" | jq -r '.trivial_mode')
+trivial_reason=$(printf '%s' "$tc_json" | jq -r '.reason')
 ```
-
-If `num_files <= 3 AND lines_changed <= 30 AND all_trivial == true`:
-set `trivial_mode=true`. Otherwise `trivial_mode=false`.
 
 ### 0.12. User-facing-change classifier (Sonnet — skipped in trivial mode)
 
@@ -491,12 +395,14 @@ log paths:
 - `tokens_log_path = "$review_dir/tokens.jsonl"`
 - `trace_log_path = "$review_dir/trace.md"`
 
-Build the initial seed doc. Use `jq -n` so you don't have to hand-escape JSON:
-
-`base_context` encodes the §13.10 freshness reconciliation. `remote_sha`
-and `behind_count` may be null (offline / no-remote paths); the schema
-allows that. Build the subobject separately so the null cases stay
-clean:
+Build the initial seed doc. `base_context` encodes the §13.10 freshness
+reconciliation; `remote_sha` / `behind_count` may be null on the
+offline / no-remote paths. Build that sub-object inline (jq keeps the
+null cases clean), then hand the rest of the seed shape to
+`artifact-seed.sh`, which emits schema-shaped JSON for `artifact-patch.py
+--init -` to persist. `reviewer_sources: ["internal"]` seeds as Phase
+6.3a's pre-image; Phase 6.3a recomputes the authoritative list from
+`findings[].sources[]` union per DESIGN §6.
 
 ```bash
 base_context_json=$(jq -n \
@@ -510,58 +416,17 @@ base_context_json=$(jq -n \
     remote_sha: (if $remote_sha == "" then null else $remote_sha end),
     behind_count: (if $behind_count == "" then null else ($behind_count | tonumber) end)
   }')
-```
 
-Then the main seed:
-
-```bash
-jq -n \
-  --arg review_id "$review_id" \
-  --arg generated_at "$review_started_at" \
-  --arg review_started_at "$review_started_at" \
-  --arg reviewed_sha "$reviewed_sha" \
-  --arg base_branch "$base_branch" \
-  --arg head_branch "$head_branch" \
-  --arg mode "$mode" \
-  --arg pr_state "${pr_state:-}" \
-  --argjson pr_number "${pr_number:-null}" \
-  --argjson comment_id "${existing_comment_id:-null}" \
-  --argjson trivial_mode "$trivial_mode" \
-  --argjson base_context "$base_context_json" \
-  --argjson reviewed_files_all "$(printf '%s' "$reviewed_files_all" | jq -Rn '[inputs | select(length>0)]')" \
-  --argjson claude_md_paths "$(printf '%s' "$claude_md_paths" | jq -Rn '[inputs | select(length>0)]')" \
-  --argjson files_changed "$num_files" \
-  --argjson lines_changed "$lines_changed" \
-  '{
-    schema_version: 1,
-    review_id: $review_id,
-    generated_at: $generated_at,
-    review_started_at: $review_started_at,
-    reviewed_sha: $reviewed_sha,
-    base_branch: $base_branch,
-    head_branch: $head_branch,
-    mode: $mode,
-    pr_state: (if $pr_state == "" then null else $pr_state end),
-    pr_number: $pr_number,
-    comment_id: $comment_id,
-    trivial_mode: $trivial_mode,
-    base_context: $base_context,
-    reviewer_sources: ["internal"],    # seed — Phase 6.3a recomputes the authoritative list from findings[].sources[] union per DESIGN §6
-    reviewed_files_all: $reviewed_files_all,
-    claude_md_paths: $claude_md_paths,
-    findings: [],
-    cross_cutting_groups: [],
-    subagent_tokens: {
-      total: 0, invocations: 0, by_phase: {}, by_model: {},
-      by_lens: {}, by_finding_phase4: {}
-    },
-    metrics: {
-      phase_9_verified_pct: null,
-      required_followup: null,
-      time_elapsed_seconds: null,
-      pr_size_buckets: {files_changed: $files_changed, lines_changed: $lines_changed}
-    }
-  }' \
+artifact-seed.sh \
+  --review-id "$review_id" --review-started-at "$review_started_at" \
+  --reviewed-sha "$reviewed_sha" \
+  --base-branch "$base_branch" --head-branch "$head_branch" \
+  --mode "$mode" --pr-state "${pr_state:-}" \
+  --pr-number "${pr_number:-}" --comment-id "${existing_comment_id:-}" \
+  --trivial-mode "$trivial_mode" --base-context "$base_context_json" \
+  --reviewed-files-all "$reviewed_files_all" \
+  --claude-md-paths "$claude_md_paths" \
+  --files-changed "$num_files" --lines-changed "$lines_changed" \
   | artifact-patch.py --init - --path "$artifact_path"
 ```
 

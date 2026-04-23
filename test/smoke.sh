@@ -3236,14 +3236,35 @@ else
 fi
 
 # UXT-1 guards the L5-ux diagnostic-message-quality addition (Stage
-# 2.9.B). Content lives in lens-ux-reference.md which L5 inlines via
-# `!`cat`` preprocessor, so grep the reference file directly.
+# 2.9.B). Content lives in lens-ux-reference.md, which L5's dispatch
+# Reads and embeds into its sub-agent prompt (Stage 4.C lazy load —
+# fetched only when L5 is in the lens-selection set), so grep the
+# reference file directly.
 if grep -qF 'Diagnostic message quality' "$REPO/fragments/lens-ux-reference.md" \
     && grep -qF 'parseDate' "$REPO/fragments/lens-ux-reference.md" \
     && grep -qF 'empty-buffer' "$REPO/fragments/lens-ux-reference.md"; then
     pass "UXT-1 (§2.9.B): lens-ux-reference.md includes diagnostic-message-quality section"
 else
     fail "UXT-1: diagnostic-message-quality content missing from lens-ux-reference.md"
+fi
+
+# FR-LENS-REF-INLINE-1 (formerly FR-LENS-REF-LAZY-1): the L5 and L6
+# dispatch sub-sections in fragments/01-detection.md must contain the
+# lens-reference content verbatim (inlined, not lazy-Read). F013
+# replaced the Stage 4.C lazy-Read directive with full inlining so the
+# placeholder `<contents of fragments/lens-*-reference.md>` pattern can
+# never ship to a dispatched sub-agent. Grep for a distinctive phrase
+# from each reference file; if both phrases are present the inlining is
+# intact, and a regression that deletes the inlined content (or
+# reverts to a placeholder) would fail this assertion. The reference
+# files themselves remain on disk for future delta-editing and any
+# other call sites.
+DETECT_MD="$REPO/fragments/01-detection.md"
+if grep -qF 'empty-buffer or mid-flush failure' "$DETECT_MD" \
+    && grep -qF 'Input validation & injection' "$DETECT_MD"; then
+    pass "FR-LENS-REF-INLINE-1: L5/L6 dispatch inlines lens-reference content"
+else
+    fail "FR-LENS-REF-INLINE-1: inlined lens-reference content missing from $DETECT_MD"
 fi
 
 # LT-1..LT-3 guard the L2 prompt tune (Stage 2.9.A). Stage-2.9 closes
@@ -3717,8 +3738,11 @@ else
     fail "VR-6: expected exit 2 on malformed; got $vr6_exit" "$vr6_out"
 fi
 
-# VR-7: deep-lane validation_result passthrough.
-vr7_out=$(echo '{"score_phase4": 80, "actionability": "auto_fixable", "decision": "confirmed", "validation_result": {"evidence": ["e1"], "blast_radius": {}, "fix_proposal": {}, "verification_context": {}}}' \
+# VR-7: deep-lane validation_result passthrough. Post-VR-10 the helper
+# schema-checks vr against #/$defs/validation_result, so this fixture is
+# a fully-shaped object (the old stub {"blast_radius": {}} pattern would
+# now route to vr=null — correctly — and is covered by VR-10).
+vr7_out=$(echo '{"score_phase4": 80, "actionability": "auto_fixable", "decision": "confirmed", "validation_result": {"evidence": ["e1"], "blast_radius": {"writers": [], "consumers": [], "parallel_paths": [], "invariants_at_stake": []}, "fix_proposal": {"approach": "x", "files_to_modify": []}, "verification_context": {"how_to_verify_fix": [], "edge_cases_to_preserve": [], "what_would_break_if_incomplete": []}}}' \
     | "$TOOLS/parse-validator-result.py" --lane deep 2>&1)
 if [[ $? -eq 0 ]] \
     && echo "$vr7_out" | jq -e '.validation_result.evidence[0] == "e1" and .confirmed_strength == "strong"' >/dev/null; then
@@ -3752,6 +3776,48 @@ if [[ $? -eq 0 ]] \
     pass "VR-9: in-band score_phase4 (72) wins over out-of-band overall_numeric"
 else
     fail "VR-9: in-band score_phase4 precedence failed" "$vr9_out"
+fi
+
+# VR-10: deep-lane drifted validation_result is schema-checked and dropped
+# to null with a "shape unrecoverable" note, rather than passing through
+# malformed (F005-drift case: files_planned/sketch/risk/alternative_rejected
+# instead of the schema's evidence/blast_radius/fix_proposal/verification_context
+# shape). This prevents the downstream --apply-decisions batch-halt that
+# the stage-4 regression surfaced.
+vr10_out=$(echo '{"score_phase4": 80, "actionability": "auto_fixable", "decision": "confirmed", "validation_result": {"files_planned": ["a"], "sketch": "x", "risk": "r", "alternative_rejected": "alt"}}' \
+    | "$TOOLS/parse-validator-result.py" --lane deep 2>&1)
+if [[ $? -eq 0 ]] \
+    && echo "$vr10_out" | jq -e '.validation_result == null and (.notes | contains("validation_result shape unrecoverable"))' >/dev/null; then
+    pass "VR-10: drifted deep-lane validation_result → null + shape-unrecoverable note"
+else
+    fail "VR-10: expected vr=null + note on drift" "$vr10_out"
+fi
+
+# VR-11: valid deep-lane validation_result passes schema check and
+# passes through unchanged — ensures VR-10's guard didn't break the
+# happy path. Uses fully-shaped sub-objects so every required key is
+# present per schema-v1.json#/$defs/validation_result.
+vr11_out=$(echo '{"score_phase4": 72, "actionability": "auto_fixable", "decision": "confirmed", "validation_result": {"evidence": ["file:12 — observation"], "blast_radius": {"writers": ["a.py:1"], "consumers": [], "parallel_paths": [], "invariants_at_stake": []}, "fix_proposal": {"approach": "fix x", "files_to_modify": [{"file":"a.py","what":"change","why":"required"}]}, "verification_context": {"how_to_verify_fix": ["grep x"], "edge_cases_to_preserve": [], "what_would_break_if_incomplete": []}}}' \
+    | "$TOOLS/parse-validator-result.py" --lane deep 2>&1)
+if [[ $? -eq 0 ]] \
+    && echo "$vr11_out" | jq -e '.validation_result.evidence[0] == "file:12 — observation" and .validation_result.fix_proposal.approach == "fix x" and (.notes | contains("shape unrecoverable") | not)' >/dev/null; then
+    pass "VR-11: valid deep-lane validation_result passes through unchanged"
+else
+    fail "VR-11: valid vr failed to pass through" "$vr11_out"
+fi
+
+# VR-12: top-level lift still fires when validation_result is absent but
+# the raw carries evidence/blast_radius/fix_proposal/verification_context
+# at the top level (legitimate recoverable shape drift). The lift runs
+# BEFORE the schema check, so a well-shaped lift still reaches the
+# passthrough without a "shape unrecoverable" note.
+vr12_out=$(echo '{"score_phase4": 72, "actionability": "auto_fixable", "decision": "confirmed", "evidence": ["x"], "blast_radius": {"writers": [], "consumers": [], "parallel_paths": [], "invariants_at_stake": []}, "fix_proposal": {"approach": "x", "files_to_modify": []}, "verification_context": {"how_to_verify_fix": [], "edge_cases_to_preserve": [], "what_would_break_if_incomplete": []}}' \
+    | "$TOOLS/parse-validator-result.py" --lane deep 2>&1)
+if [[ $? -eq 0 ]] \
+    && echo "$vr12_out" | jq -e '.validation_result.evidence[0] == "x" and (.notes | contains("lifted from top-level"))' >/dev/null; then
+    pass "VR-12: top-level lift still fires when validation_result absent"
+else
+    fail "VR-12: top-level lift regressed" "$vr12_out"
 fi
 
 # --- SF-* source-family-map.py
@@ -3866,6 +3932,235 @@ if [[ ${#rh_missing[@]} -eq 0 ]]; then
     pass "PF-INT-5: commands/review.md allowed-tools grants the three new helpers"
 else
     fail "PF-INT-5: missing Bash grants for: ${rh_missing[*]}"
+fi
+
+# ------------------------------------------------------------------ FG-* freshness-gate.sh
+# Stage 4.A.1 — Phase 0.2a freshness reconciliation extracted into a
+# helper. Covers happy path (clean remote, zero behind), no-remote case,
+# and fetch-failure case.
+
+FG_DIR="$WORK/freshness-gate"
+
+# FG-1: happy path — origin exists, local base is up-to-date, behind=0.
+mkdir -p "$FG_DIR/fg1/origin"
+(
+    cd "$FG_DIR/fg1/origin"
+    git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+    git symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+    git config user.email smoke@example.com
+    git config user.name smoke
+    printf 'a\n' > f.txt
+    git add f.txt && git commit --quiet -m "initial"
+)
+git clone --quiet "$FG_DIR/fg1/origin" "$FG_DIR/fg1/repo" 2>/dev/null
+(
+    cd "$FG_DIR/fg1/repo"
+    git config user.email smoke@example.com
+    git config user.name smoke
+    git checkout --quiet -b feat
+    printf 'b\n' > f.txt
+    git commit --quiet -am "feature"
+)
+out=$(cd "$FG_DIR/fg1/repo" && "$TOOLS/freshness-gate.sh" \
+    --base-branch main --head-branch feat 2>/dev/null)
+fg1_freshness=$(echo "$out" | jq -r '.base_freshness')
+fg1_compref=$(echo "$out" | jq -r '.comparison_ref')
+fg1_behind=$(echo "$out" | jq -r '.behind_count')
+fg1_warn_len=$(echo "$out" | jq '.preflight_warnings | length')
+if [[ "$fg1_freshness" == "fresh" && "$fg1_compref" == "main" \
+    && "$fg1_behind" == "0" && "$fg1_warn_len" == "0" ]]; then
+    pass "FG-1 (§13.10): happy path — origin fresh, behind=0 → base_freshness=fresh"
+else
+    fail "FG-1: expected fresh/main/0/[]; got freshness=$fg1_freshness compref=$fg1_compref behind=$fg1_behind warn_len=$fg1_warn_len"
+fi
+
+# FG-2: no-remote case — repo has no `origin` remote at all.
+mkdir -p "$FG_DIR/fg2"
+(
+    cd "$FG_DIR/fg2"
+    git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+    git symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+    git config user.email smoke@example.com
+    git config user.name smoke
+    printf 'a\n' > f.txt
+    git add f.txt && git commit --quiet -m "initial"
+    git checkout --quiet -b feat
+    printf 'b\n' > f.txt
+    git commit --quiet -am "feature"
+)
+out=$(cd "$FG_DIR/fg2" && "$TOOLS/freshness-gate.sh" \
+    --base-branch main --head-branch feat 2>/dev/null)
+fg2_freshness=$(echo "$out" | jq -r '.base_freshness')
+fg2_compref=$(echo "$out" | jq -r '.comparison_ref')
+fg2_remote_sha=$(echo "$out" | jq -r '.remote_sha')
+fg2_behind=$(echo "$out" | jq -r '.behind_count')
+if [[ "$fg2_freshness" == "no_remote" && "$fg2_compref" == "main" \
+    && "$fg2_remote_sha" == "null" && "$fg2_behind" == "null" ]]; then
+    pass "FG-2 (§13.10): no-remote case — base_freshness=no_remote, remote_sha/behind_count null"
+else
+    fail "FG-2: expected no_remote/main/null/null; got freshness=$fg2_freshness compref=$fg2_compref rsha=$fg2_remote_sha behind=$fg2_behind"
+fi
+
+# FG-3: fetch-failure case — `origin` remote points at a nonexistent path.
+mkdir -p "$FG_DIR/fg3"
+(
+    cd "$FG_DIR/fg3"
+    git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+    git symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+    git config user.email smoke@example.com
+    git config user.name smoke
+    printf 'a\n' > f.txt
+    git add f.txt && git commit --quiet -m "initial"
+    git remote add origin "$FG_DIR/fg3/nonexistent_remote_xyz"
+    git checkout --quiet -b feat
+    printf 'b\n' > f.txt
+    git commit --quiet -am "feature"
+)
+out=$(cd "$FG_DIR/fg3" && "$TOOLS/freshness-gate.sh" \
+    --base-branch main --head-branch feat 2>/dev/null)
+fg3_freshness=$(echo "$out" | jq -r '.base_freshness')
+fg3_compref=$(echo "$out" | jq -r '.comparison_ref')
+fg3_warn_len=$(echo "$out" | jq '.preflight_warnings | length')
+fg3_warn_head=$(echo "$out" | jq -r '.preflight_warnings[0] // ""')
+if [[ "$fg3_freshness" == "no_fetch" && "$fg3_compref" == "main" \
+    && "$fg3_warn_len" == "1" ]] \
+    && echo "$fg3_warn_head" | grep -q '^fetch_failed '; then
+    pass "FG-3 (§13.10): fetch-failure case — base_freshness=no_fetch, fetch_failed warning buffered"
+else
+    fail "FG-3: expected no_fetch/main/warn_len=1/'fetch_failed ...'; got freshness=$fg3_freshness compref=$fg3_compref warn_len=$fg3_warn_len warn_head='$fg3_warn_head'"
+fi
+
+# ------------------------------------------------------------------ TC-* trivial-check.sh
+# Stage 4.A.2 — Phase 0.11 trivial-diff classification extracted into a
+# helper. Covers trivial docs-only case, non-trivial mixed case, and
+# empty-diff edge case (vacuously trivial; matches pre-extraction
+# fragment behavior).
+
+# TC-1: trivial docs-only — every file in the doc/config allow-list,
+# num_files <= 3, lines_changed <= 30.
+tc1_out=$(printf '%s\n' "README.md" "CHANGELOG.md" ".gitignore" \
+    | "$TOOLS/trivial-check.sh" --num-files 3 --lines-changed 20)
+tc1_mode=$(echo "$tc1_out" | jq -r '.trivial_mode')
+tc1_reason=$(echo "$tc1_out" | jq -r '.reason')
+if [[ "$tc1_mode" == "true" && "$tc1_reason" == "docs_only" ]]; then
+    pass "TC-1 (§13.9): trivial docs-only — trivial_mode=true, reason=docs_only"
+else
+    fail "TC-1: expected true/docs_only; got mode=$tc1_mode reason=$tc1_reason"
+fi
+
+# TC-2: non-trivial mixed — one doc file + one source file fails the
+# allow-list walk; reason must be null.
+tc2_out=$(printf '%s\n' "README.md" "src/foo.ts" \
+    | "$TOOLS/trivial-check.sh" --num-files 2 --lines-changed 10)
+tc2_mode=$(echo "$tc2_out" | jq -r '.trivial_mode')
+tc2_reason=$(echo "$tc2_out" | jq -r '.reason')
+if [[ "$tc2_mode" == "false" && "$tc2_reason" == "null" ]]; then
+    pass "TC-2 (§13.9): non-trivial mixed — trivial_mode=false, reason=null"
+else
+    fail "TC-2: expected false/null; got mode=$tc2_mode reason=$tc2_reason"
+fi
+
+# TC-3: empty-diff edge case — no files on stdin, zero counts. Vacuously
+# trivial (allow-list walk never trips, 0<=3, 0<=30). Matches pre-
+# extraction fragment behavior exactly.
+tc3_out=$(printf '' | "$TOOLS/trivial-check.sh" --num-files 0 --lines-changed 0)
+tc3_mode=$(echo "$tc3_out" | jq -r '.trivial_mode')
+tc3_reason=$(echo "$tc3_out" | jq -r '.reason')
+if [[ "$tc3_mode" == "true" && "$tc3_reason" == "docs_only" ]]; then
+    pass "TC-3 (§13.9): empty-diff edge case — vacuously trivial, reason=docs_only"
+else
+    fail "TC-3: expected true/docs_only; got mode=$tc3_mode reason=$tc3_reason"
+fi
+
+# ------------------------------------------------------------------ AS-* artifact-seed.sh
+# Stage 4.A.3 — Phase 0.15 artifact seed construction extracted into a
+# helper. Covers happy-path (seed schema-validates via `artifact-patch.py
+# --init -` and carries the expected top-level shape), missing-required-
+# arg failure (error-as-prompt stderr + exit 64), and malformed
+# `--base-context` failure (error-as-prompt stderr + exit 1).
+
+AS_DIR="$WORK/artifact-seed"
+mkdir -p "$AS_DIR"
+
+# AS-1: happy-path — helper output satisfies schema-v1.json via
+# `artifact-patch.py --init -`, and the resulting artifact carries the
+# expected top-level fields (schema_version, review_id, mode, nullable
+# comment_id persisted as null, reviewer_sources seeded to ["internal"],
+# pr_size_buckets nested under metrics).
+as1_base_ctx='{"freshness":"fresh","comparison_ref":"main","remote_sha":"def5678","behind_count":0}'
+as1_art="$AS_DIR/as1.json"
+as1_err="$AS_DIR/as1.err"
+if "$TOOLS/artifact-seed.sh" \
+    --review-id "rev_01HXAS1TESTIDENTIFIER" \
+    --review-started-at "2026-04-22T12:34:56Z" \
+    --reviewed-sha "abc1234" \
+    --base-branch "main" --head-branch "feature/foo" \
+    --mode "pr" --pr-state "open" \
+    --pr-number "42" --comment-id "" \
+    --trivial-mode "false" --base-context "$as1_base_ctx" \
+    --reviewed-files-all "$(printf 'a.py\nb.py\n')" \
+    --claude-md-paths "$(printf '/CLAUDE.md\n')" \
+    --files-changed "2" --lines-changed "10" \
+    | "$TOOLS/artifact-patch.py" --init - --path "$as1_art" 2>"$as1_err" >/dev/null; then
+    as1_schema=$(jq -r '.schema_version' "$as1_art")
+    as1_rid=$(jq -r '.review_id' "$as1_art")
+    as1_mode=$(jq -r '.mode' "$as1_art")
+    as1_cid=$(jq -r '.comment_id' "$as1_art")
+    as1_rs=$(jq -r '.reviewer_sources | join(",")' "$as1_art")
+    as1_files=$(jq -r '.metrics.pr_size_buckets.files_changed' "$as1_art")
+    if [[ "$as1_schema" == "1" && "$as1_rid" == "rev_01HXAS1TESTIDENTIFIER" \
+        && "$as1_mode" == "pr" && "$as1_cid" == "null" \
+        && "$as1_rs" == "internal" && "$as1_files" == "2" ]]; then
+        pass "AS-1 (§0.15): happy-path — seed schema-validates via --init and carries expected top-level shape"
+    else
+        fail "AS-1: shape mismatch — schema=$as1_schema rid=$as1_rid mode=$as1_mode cid=$as1_cid rs=$as1_rs files=$as1_files"
+    fi
+else
+    fail "AS-1: --init rejected helper output" "$(cat "$as1_err" 2>/dev/null)"
+fi
+
+# AS-2: missing-required-arg — omit --review-started-at; expect usage
+# error (exit 64) with error-as-prompt stderr (`ERROR:` + `Usage:`).
+as2_err="$AS_DIR/as2.err"
+"$TOOLS/artifact-seed.sh" \
+    --review-id "rev_abc" \
+    --reviewed-sha "abc1234" \
+    --base-branch "main" --head-branch "hb" \
+    --mode "pr" --pr-state "" --pr-number "" --comment-id "" \
+    --trivial-mode "false" \
+    --base-context '{"freshness":"fresh","comparison_ref":"main","remote_sha":null,"behind_count":null}' \
+    --reviewed-files-all "" --claude-md-paths "" \
+    --files-changed "0" --lines-changed "0" \
+    >/dev/null 2>"$as2_err"
+as2_rc=$?
+if [[ "$as2_rc" == "64" ]] \
+    && grep -q '^ERROR: --review-started-at is required' "$as2_err" \
+    && grep -q '^Usage: ' "$as2_err"; then
+    pass "AS-2 (§0.15): missing --review-started-at → exit 64 + error-as-prompt stderr"
+else
+    fail "AS-2: expected rc=64 with ERROR/Usage stderr; got rc=$as2_rc" "$(cat "$as2_err" 2>/dev/null)"
+fi
+
+# AS-3: malformed --base-context — not JSON; expect validation error
+# (exit 1) with error-as-prompt stderr (`ERROR:` + `Action:`).
+as3_err="$AS_DIR/as3.err"
+"$TOOLS/artifact-seed.sh" \
+    --review-id "rev_abc" \
+    --review-started-at "2026-04-22T00:00:00Z" \
+    --reviewed-sha "abc1234" \
+    --base-branch "main" --head-branch "hb" \
+    --mode "pr" --pr-state "" --pr-number "" --comment-id "" \
+    --trivial-mode "false" --base-context "not-json" \
+    --reviewed-files-all "" --claude-md-paths "" \
+    --files-changed "0" --lines-changed "0" \
+    >/dev/null 2>"$as3_err"
+as3_rc=$?
+if [[ "$as3_rc" == "1" ]] \
+    && grep -q '^ERROR: --base-context must be a JSON object' "$as3_err" \
+    && grep -q '^Action: ' "$as3_err"; then
+    pass "AS-3 (§0.15): malformed --base-context → exit 1 + error-as-prompt stderr"
+else
+    fail "AS-3: expected rc=1 with ERROR/Action stderr; got rc=$as3_rc" "$(cat "$as3_err" 2>/dev/null)"
 fi
 
 echo

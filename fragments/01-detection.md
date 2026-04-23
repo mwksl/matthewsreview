@@ -54,6 +54,57 @@ For lenses that receive CLAUDE.md content (L3, L4, L5, L6), pass
 `claude_md_paths` (the list captured in Phase 0, step 0.7). Each lens
 reads only what it needs.
 
+### 1.2.1. Shared lens-prompt invariants
+
+Every lens dispatched in step 1.3 must receive the following invariants
+in its prompt (exact wording — the sub-agents need them verbatim so
+candidate shapes don't diverge across lenses). Each lens's sub-section
+below restates **only lens-specific guidance**; the orchestrator
+prepends this shared block when assembling the dispatch prompt.
+
+The orchestrator dispatches `<shared invariants from 1.2.1> + <lens
+blockquote>` as the sub-agent prompt. Prose outside the blockquote in
+each lens sub-section (headings, annotations, commentary) is for the
+fragment reader, **NOT dispatched** — any directive the sub-agent must
+follow has to live inside the blockquote.
+
+> Read the diff between `$comparison_ref` and HEAD.
+>
+> Return a JSON array of candidates. Each candidate:
+>
+> ```
+> {
+>   "file": "src/path/to/file.ts",
+>   "line_range": [start, end],
+>   "claim": "one-sentence description of the issue",
+>   "evidence_snippet": "the exact code lines implicated",
+>   "impact_type": "correctness" | "security" | "ux" | "policy" | "architecture",
+>   "origin": "introduced_by_pr" | "pre_existing" | "unknown",
+>   "origin_confidence": "high" | "medium" | "low",
+>   "source_family": "<set by lens; see lens-specific guidance>"
+> }
+> ```
+>
+> Each lens's section below specifies the `impact_type` and
+> `source_family` values to use. Other fields follow the shapes above.
+
+Lens-specific extensions the shared block does **not** cover (keep
+inline in each lens sub-section):
+
+- "ONLY the diff" vs. "diff plus surrounding files / git blame / git
+  log" — lens-specific reading scope (L1 is diff-only; L2 and L7 walk
+  outward).
+- CLAUDE.md reading — L3, L4, L5 consume `$claude_md_paths`; others
+  don't.
+- "Over-flag; Phase 3 will filter" directive — appears in L1, L2, L6,
+  L7 where over-flag is the intended posture; L3/L4/L5 don't carry it.
+- Default `origin: "introduced_by_pr"`, `origin_confidence: "high"`
+  unless the code is clearly unchanged by this diff — L1 and L7 carry
+  this explicit default; other lenses rely on `origin-crosscheck.sh`
+  (step 1.4 step 2a) to correct blame-traceable cases.
+- Lens-specific failure modes, checklist items, impact-type tags, and
+  source-family tags.
+
 ### 1.2a. Ensemble readiness gate (§13.12)
 
 This gate runs before the dispatch turn so missing-CLI prompts surface
@@ -231,27 +282,15 @@ the two `elapsed_sec` values naturally overlap in `phases.jsonl`.
 #### L1 — diff-local scan (Sonnet)
 
 Launch one `Agent` tool-use with `model: sonnet`, `subagent_type: general-purpose`.
-Prompt essence:
+Prompt essence (prepended with the shared invariants from step 1.2.1):
 
-> Read ONLY the diff between `$comparison_ref` and HEAD. Do not open other
-> files or grep the repo. Flag off-by-one errors, inverted conditions, typos
-> in identifiers, dead branches, obvious null-deref patterns, and
-> mismatched quotes or parens. **Over-flag — Phase 3 will filter.** Ignore
-> style issues; ignore anything a linter would catch.
+> Read **ONLY** the diff. Do not open other files or grep the repo. Flag
+> off-by-one errors, inverted conditions, typos in identifiers, dead
+> branches, obvious null-deref patterns, and mismatched quotes or parens.
+> **Over-flag — Phase 3 will filter.** Ignore style issues; ignore
+> anything a linter would catch.
 >
-> Return a JSON array of candidates. Each candidate:
-> ```
-> {
->   "file": "src/path/to/file.ts",
->   "line_range": [start, end],
->   "claim": "one-sentence description of the issue",
->   "evidence_snippet": "the exact code lines implicated",
->   "impact_type": "correctness",
->   "origin": "introduced_by_pr" | "pre_existing" | "unknown",
->   "origin_confidence": "high" | "medium" | "low",
->   "source_family": "diff-family"
-> }
-> ```
+> Set `impact_type: "correctness"`, `source_family: "diff-family"`.
 >
 > Default `origin: "introduced_by_pr"`, `origin_confidence: "high"` unless
 > the implicated code is clearly unchanged by this diff.
@@ -262,7 +301,8 @@ Launch one `Agent` tool-use with `model: opus`, `subagent_type: general-purpose`
 with `Read` and `Bash(git:*)` + `Bash(grep:*)` permissions (the sub-agent
 inherits the parent command's grants — this already covers it).
 
-Prompt essence:
+Prompt essence (prepended with the shared invariants from step 1.2.1; L2
+additionally reads surrounding files and uses `git blame` / `git log`):
 
 > Read like a careful human reviewer who's been handed this PR. Your
 > job is to find bugs a skilled reader would flag: the ones a linter
@@ -270,8 +310,7 @@ Prompt essence:
 > surrounding code would. Over-flag; Phase 3 filters.
 >
 > **Outer pass — cross-file blast-radius.** For every function, type,
-> field, or API the diff between `$comparison_ref` and HEAD changes,
-> trace into the rest of the repo:
+> field, or API the diff changes, trace into the rest of the repo:
 > - Who calls this? Are callers updated consistently?
 > - Who writes to this field? Enumerate the full range of values each
 >   writer can produce (NULL, zero, negative, empty, duplicate-by-key).
@@ -405,21 +444,20 @@ Prompt essence:
 > lens exists specifically to catch incomplete fixes and narrow bugs a
 > careful reader would see — be thorough.**
 >
-> Return a JSON array of candidates with `impact_type: "correctness"`,
-> `source_family: "structural-family"`, and the same field shape as L1.
+> Set `impact_type: "correctness"`, `source_family: "structural-family"`.
 
 #### L3 — CLAUDE.md compliance (Sonnet)
 
 Launch one `Agent` tool-use with `model: sonnet`.
 
-Prompt essence:
+Prompt essence (prepended with the shared invariants from step 1.2.1):
 
 > Read each CLAUDE.md file in this list (absolute paths, root-first):
 > `$claude_md_paths`
 >
-> For every rule in those files, check whether the diff between `$comparison_ref`
-> and HEAD violates it. For each violation, cite the exact CLAUDE.md file
-> and line number in `evidence_snippet`.
+> For every rule in those files, check whether the diff violates it. For
+> each violation, cite the exact CLAUDE.md file and line number in
+> `evidence_snippet`.
 >
 > **Tag each violation's `impact_type`:** `correctness` if the rule concerns
 > runtime behavior, error handling, invariants, or safety; `policy` if it
@@ -428,71 +466,166 @@ Prompt essence:
 > Skip any violation that's silenced by an explicit ignore comment on the
 > relevant code.
 >
-> Return the same candidate shape as L1 with `source_family: "policy-family"`.
+> Set `source_family: "policy-family"`.
 
 #### L4 — comment compliance (Sonnet)
 
 Launch one `Agent` tool-use with `model: sonnet`.
 
-Prompt essence:
+Prompt essence (prepended with the shared invariants from step 1.2.1; L4
+additionally reads the current content of every modified file):
 
-> Read the diff between `$comparison_ref` and HEAD, plus the current content
-> of every modified file. Focus on comments and doc strings (JSDoc, TSDoc,
-> Python docstrings, Rust doc comments, etc.) adjacent to changed code.
+> Also read the current content of every modified file (not just diff
+> hunks) so you can see the full comment / doc-string context around
+> changed code.
+>
+> Focus on comments and doc strings (JSDoc, TSDoc, Python docstrings,
+> Rust doc comments, etc.) adjacent to changed code.
 >
 > Flag when the diff contradicts a comment's claim — e.g., a docstring says
 > "returns non-null" but the change now returns null; a function comment
 > says "idempotent" but the change introduces state mutation.
 >
-> If the contradiction is runtime-impactful, upgrade `impact_type` to
-> `correctness`; otherwise `policy`.
->
-> Return the same candidate shape as L1 with `source_family: "policy-family"`.
+> If the contradiction is runtime-impactful, set `impact_type: "correctness"`;
+> otherwise `"policy"`. Set `source_family: "policy-family"`.
 
 #### L5 — UX (Sonnet; skipped if `trivial_mode` or `user_facing == false`)
 
-Launch one `Agent` tool-use with `model: sonnet`. Inline the UX reference
-content into the prompt via a preprocessor include — in the fragment as
-consumed, the reference is inlined by the top-level command file via
-`` !`include lens-ux-reference.md` `` so the
-sub-agent sees the full reference in its prompt.
+Launch one `Agent` tool-use with `model: sonnet`.
 
-Prompt essence:
+Prompt essence (prepended with the shared invariants from step 1.2.1):
 
 > UX reference:
 >
-> !`include lens-ux-reference.md`
+> # UX lens reference
 >
-> Read the diff between `$comparison_ref` and HEAD and the CLAUDE.md files in
-> `$claude_md_paths` (project-specific UX conventions take precedence over
-> the generic reference above).
+> You are reviewing whether this diff produces a good user experience —
+> distinct from whether it is technically correct.
+>
+> ## What to check (when the diff is user-facing)
+>
+> **Destructive actions.** Does confirmation match blast radius? A single-click
+> that irreversibly destroys user data is a finding. A heavyweight typed-confirm
+> on something fully reversible is also a finding (wrong direction).
+>
+> **State coverage.** Are empty, loading, error, and in-progress states handled?
+> Missing empty states; generic "Loading..." with no progress on long operations;
+> errors that silently swallow; intermediate states the UI doesn't represent.
+>
+> **Feedback.** When the user acts, is it visibly clear the action worked (or
+> clear why it failed)? Actions that complete with no visible change; errors
+> that disappear before the user can read them; async ops with no progress.
+>
+> **Affordances.** Is it obvious what's interactive vs. static? Clickable things
+> that don't look clickable; non-clickable things that do; ambiguous icons
+> without labels; buttons whose label doesn't predict the action.
+>
+> **Keyboard & accessibility.** Escape closes modals; Enter submits; focus lands
+> sensibly (not on the destructive button by default); tab order matches visual
+> order; ARIA labels for icon-only controls; sufficient color contrast.
+>
+> **Copy.** Microcopy is clear, concise, and consistent with project voice.
+> Errors say what happened AND what the user can do. Button labels are verbs
+> describing the action, not generic "OK"/"Yes".
+>
+> **Diagnostic message quality.** When the diff adds or modifies a warning,
+> error, or toast — especially ones triggered by parsing, validation, or
+> input rejection — check whether the message helps the user diagnose and
+> fix the problem:
+>
+> - Does the message reveal the expected format when input is rejected?
+>   A `parseDate` that only accepts `MM/DD/YYYY` should say so in the
+>   warning, not "Invalid date."
+> - Does the message name the specific value that failed? "Invalid amount"
+>   is weaker than `"'abc' is not a valid amount — expected a number like
+>   42.50."`
+> - When upstream context is available (file path, row number, column name,
+>   field name, source system), is it in the message? A parser error that
+>   buries line number in debug logs while showing the user "Something went
+>   wrong" is a diagnostic-quality gap.
+> - For batch / buffered operations (flush-after-N-errors, debounced save),
+>   does an empty-buffer or mid-flush failure produce a generic message
+>   when a specific one is cheap? "Save failed" on an empty buffer suggests
+>   data loss the user didn't actually experience.
+>
+> Flag as `impact_type: "ux"`. Fix proposals should include concrete message-
+> text suggestions.
+>
+> **Visual consistency.** Uses the project's existing design tokens, CSS
+> variables, or utility classes rather than ad-hoc values. CLAUDE.md and the
+> existing codebase take precedence over generic examples above.
+>
+> ## Scope guard
+>
+> If the PR has no user-facing surface, return an empty list. Do not reach for
+> UX findings that don't apply.
+>
+> Also read the CLAUDE.md files in `$claude_md_paths` (project-specific UX
+> conventions take precedence over the generic reference above).
 >
 > Focus on behavioral gaps visible from the diff: missing loading / empty /
 > error states; inadequate confirmation on destructive actions; silent
 > failures; missing keyboard / accessibility affordances; copy that doesn't
 > match existing patterns in the codebase.
 >
-> Return the same candidate shape as L1 with `impact_type: "ux"`,
-> `source_family: "ux-family"`.
+> Set `impact_type: "ux"`, `source_family: "ux-family"`.
 
 #### L6 — lightweight security (Sonnet; skipped if `trivial_mode`)
 
-Launch one `Agent` tool-use with `model: sonnet`. Inline the security
-reference via preprocessor include (same mechanism as L5).
+Launch one `Agent` tool-use with `model: sonnet`.
 
-Prompt essence:
+Prompt essence (prepended with the shared invariants from step 1.2.1):
 
 > Security reference:
 >
-> !`include lens-security-reference.md`
+> # Security lens reference
 >
-> Read the diff between `$comparison_ref` and HEAD. If structural reasoning
-> (similar to L2 — walking callers and writers) suggests a security
-> implication, flag it even when the immediate code isn't obviously a
-> security surface. **Over-flag.**
+> You are doing a **lightweight** security scan on this diff. This is not a
+> full audit — flag issues where the code change creates or worsens a security
+> risk. Over-flag; Phase 4 will filter.
 >
-> Return the same candidate shape as L1 with `impact_type: "security"`,
-> `source_family: "security-family"`.
+> ## Categories to check
+>
+> **Authorization & authentication.**
+> - New routes, API endpoints, or mutations without an auth check
+> - New fields exposed through responses that shouldn't be (e.g. internal IDs,
+>   credentials, PII)
+> - Permission checks that accept a broader role than intended
+> - Session handling changes (token lifetime, invalidation, refresh)
+>
+> **Input validation & injection.**
+> - User-controlled input concatenated into SQL, shell commands, or HTML without
+>   escaping/parameterization
+> - File paths built from user input without sanitization (path traversal)
+> - Regex or parser changes that accept previously-rejected malformed input
+>
+> **Secrets & sensitive data.**
+> - Hardcoded API keys, tokens, passwords, or connection strings
+> - Sensitive values logged (passwords, tokens, PII, auth headers)
+> - Debug output or error messages that leak internal structure or secrets
+>
+> **Cryptography.**
+> - New crypto primitives (if the project already has conventions, flag
+>   deviation; do not recommend specific algorithms beyond that)
+> - Random values used where cryptographic randomness is required
+>
+> **Cross-cutting security patterns.**
+> - Race conditions in access checks (TOCTOU)
+> - Error paths that bypass normal auth/validation flow
+> - New code that handles untrusted input and calls into a structural pattern
+>   the rest of the code assumes is trusted (structural-family reasoning)
+>
+> ## Scope guard
+>
+> If the diff touches no security-adjacent surface (pure UI tweak, pure test
+> refactor, etc.), return an empty list. Do not reach for security findings
+> that don't apply.
+>
+> If structural reasoning (similar to L2 — walking callers and writers)
+> suggests a security implication, flag it even when the immediate code
+> isn't obviously a security surface. **Over-flag.**
+>
+> Set `impact_type: "security"`, `source_family: "security-family"`.
 
 #### L7 — holistic review (Opus; `ensemble_mode` only; skipped if `trivial_mode`)
 
@@ -507,12 +640,13 @@ senior reviewer with no checklist. Ensemble-gated because it costs roughly
 findings (unioning `source_families`) so duplicates become a strengthening
 signal via Phase 3's ≥2-families auto-graduate rule, not noise.
 
-Prompt essence:
+Prompt essence (prepended with the shared invariants from step 1.2.1; L7
+additionally reads surrounding code and uses `git blame` / `git log`
+freely):
 
 > Review this PR as a skeptical, careful senior engineer who was just
 > handed it and asked to find bugs the test suite and linter will miss.
-> Read the diff between `$comparison_ref` and HEAD, plus any surrounding
-> code you need to understand it. Use `git blame` / `git log` freely.
+> Read surrounding code freely; use `git blame` / `git log` as needed.
 >
 > **No checklist — scan for anything wrong.** Other agents are running
 > in parallel with narrower prompts (L1 diff-local, L2 structural, L3
@@ -565,20 +699,9 @@ Prompt essence:
 >
 > Over-flag; Phase 3 filters. Err toward sharing a half-confident bug.
 >
-> Return a JSON array of candidates. Each candidate:
->
-> ```
-> {
->   "file": "src/path/to/file.ts",
->   "line_range": [start, end],
->   "claim": "one-sentence description of the issue",
->   "evidence_snippet": "exact code lines (or multi-file trace if cross-layer)",
->   "impact_type": "correctness" | "security" | "ux" | "policy" | "architecture",
->   "origin": "introduced_by_pr" | "pre_existing" | "unknown",
->   "origin_confidence": "high" | "medium" | "low",
->   "source_family": "holistic-family"
-> }
-> ```
+> `evidence_snippet` may be a multi-file trace when the finding spans
+> layers. Set `source_family: "holistic-family"`; `impact_type` may be
+> any of `correctness | security | ux | policy | architecture`.
 >
 > Default `origin: "introduced_by_pr"`, `origin_confidence: "high"` unless
 > the implicated code is clearly unchanged by this diff.

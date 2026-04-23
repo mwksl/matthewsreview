@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(artifact-read.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(claude-md-paths.sh:*), Bash(staleness.sh:*), Bash(external-scrape.sh:*), Bash(comment-freshness.sh:*), Bash(prior-fix-diff.sh:*), Bash(line-range-check.sh:*), Bash(parse-with-repair.py:*), Bash(parse-validator-result.py:*), Bash(source-family-map.py:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(include:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(coderabbit:*), Bash(node:*), Bash(find:*), AskUserQuestion, Agent, Read, BashOutput, KillShell
+allowed-tools: Bash(artifact-read.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(claude-md-paths.sh:*), Bash(staleness.sh:*), Bash(external-scrape.sh:*), Bash(comment-freshness.sh:*), Bash(prior-fix-diff.sh:*), Bash(line-range-check.sh:*), Bash(parse-with-repair.py:*), Bash(parse-validator-result.py:*), Bash(source-family-map.py:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(freshness-gate.sh:*), Bash(trivial-check.sh:*), Bash(artifact-seed.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(coderabbit:*), Bash(node:*), Bash(find:*), AskUserQuestion, Agent, Read, BashOutput, KillShell
 argument-hint: "[--ensemble] [--full]"
 description: Deep code review producing artifact.json, artifact.md, and (PR mode) a review comment on the PR.
 disable-model-invocation: false
@@ -17,11 +17,16 @@ Flags (optional):
 - `--full` forces `trivial_mode=false` for this run (overrides the
   §13.9 doc/config-PR early-exit).
 
+**Read `fragments/_prelude-shared.md` before proceeding — it lists
+rules that apply to every phase below (sub-agent return handling,
+helper-script error-as-prompt).**
+
 ## Execution overview — read this first
 
 This command orchestrates DESIGN §4 Phases 0–6 in order. Each phase is
-defined in a fragment under `fragments/NN-<name>.md` — the bodies are
-inlined via `!`cat`` preprocessor at the bottom of this file.
+defined in a fragment under `fragments/NN-<name>.md`. At each phase
+boundary below, read the named fragment with the `Read` tool and
+execute the instructions inside before proceeding to the next phase.
 
 **Before you start, build a TaskList that mirrors the phases below**
 (one task per phase, plus one for argument parsing). Mark each
@@ -69,26 +74,10 @@ Every Agent tool-use specifies:
 in a single orchestrator turn. Waiting a turn between each dispatch
 serializes them. Always batch within one turn.
 
-**After every sub-agent returns**, immediately (before branching on its
-content):
-
-1. Extract the token count. The Agent tool result exposes a structured
-   `usage` field when available; otherwise parse
-   `<usage>total_tokens: N</usage>` from the sub-agent's output text.
-   On parse failure, log with `--tokens null` per §11.
-2. Call `log-tokens.sh` with the
-   phase, agent_role, agent_id, model, finding_id (when applicable),
-   and the tokens value. This invariant (§24.4) ensures every agent's
-   cost is accounted even when its output fails to parse.
-3. Parse the sub-agent's structured output per the fragment's schema.
-   Light repair (strip code fences, extract JSON block) is OK.
-   One retry allowed on parse failure with a prompt addendum.
-   Drop-with-note on second failure.
-
-**Helper-script errors** follow DESIGN §8.6's error-as-prompt convention:
-ERROR → context → Valid values → Did you mean → Action. When a helper
-exits non-zero, parse the stderr, adjust your inputs per the guidance,
-retry ONCE. Only escalate to the user if the second retry also fails.
+Token extraction, `log-tokens.sh`, structured-output parse, and
+helper-script error-as-prompt behaviour are all covered by rules §1
+and §2 of `fragments/_prelude-shared.md` — apply them after every
+sub-agent returns and on every non-zero helper exit.
 
 ## Effort is session-wide (§10.1)
 
@@ -134,35 +123,44 @@ Capture both in your working context before executing Phase 0.
 
 ---
 
-!`include 00-preflight.md`
+**Phase 0 — Preflight.** Read `fragments/00-preflight.md` and execute
+the instructions inside before proceeding to Phase 1.
 
 ---
 
-!`include 01-detection.md`
+**Phase 1 — Detection.** Read `fragments/01-detection.md` and execute
+the instructions inside before proceeding to Phase 1.5.
 
 ---
 
-!`include 02-ensemble-adapter.md`
+**Phase 1.5 — External ensemble dispatch (conditional).** If
+`--ensemble` was passed, read `fragments/02-ensemble-adapter.md` and
+execute the instructions inside; otherwise skip to Phase 2.
 
 ---
 
-!`include 03-dedup.md`
+**Phase 2 — Dedup.** Read `fragments/03-dedup.md` and execute the
+instructions inside before proceeding to Phase 3.
 
 ---
 
-!`include 04-scoring-gate.md`
+**Phase 3 — Scoring gate.** Read `fragments/04-scoring-gate.md` and
+execute the instructions inside before proceeding to Phase 4.
 
 ---
 
-!`include 05-validation.md`
+**Phase 4 — Validation.** Read `fragments/05-validation.md` and execute
+the instructions inside before proceeding to Phase 5.
 
 ---
 
-!`include 06-cross-cutting.md`
+**Phase 5 — Cross-cutting.** Read `fragments/06-cross-cutting.md` and
+execute the instructions inside before proceeding to Phase 6.
 
 ---
 
-!`include 07-finalize.md`
+**Phase 6 — Finalize.** Read `fragments/07-finalize.md` and execute
+the instructions inside.
 
 ---
 

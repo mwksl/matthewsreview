@@ -6,7 +6,7 @@ Forward-looking consolidation of everything still on the adamsreview plugin's ba
 
 - **`plans/post-conversion-ideas.md`** — the chronological idea log with original rationale for each item. Items completed by the 2026-04-22 session are marked `> DONE` with commit SHAs; items still pending here carry `> Deferred` markers pointing back to this file's triggers. Read that file when you need the full original reasoning.
 - **`plans/post-plugin-improvements.md`** — the 2026-04-22 execution session (closed). Its §6 Build Journal records per-project verifier findings and three follow-ups that surfaced during execution (integrated into this backlog under §4).
-- **`plans/stage-4-fragment-shrink.md`** — existing detailed plan for the fragment-shrink work, awaiting a dedicated session.
+- **`plans/stage-4-fragment-shrink.md`** — fragment-shrink plan; closed 2026-04-23 (see Appendix B for the measurement snapshot). Execution journal at `plans/stage-4-fragment-shrink-execution.md`.
 - **`docs/archive/DESIGN.md`**, **`docs/archive/BUILD.md`** — frozen historical references for pre-2026-04-19 decisions. Consult for historical-rationale questions; do not edit.
 
 ## Quick summary
@@ -14,7 +14,7 @@ Forward-looking consolidation of everything still on the adamsreview plugin's ba
 | Class | Items | Unblocks when |
 |---|---|---|
 | **§1. Data-driven decisions** | #1B, #1C, #24 (threshold-decision portion) | ~10 reviews of Phase 3 telemetry data accumulate (instrumentation shipped 2026-04-22 in `ee81715`) |
-| **§2. Already-planned, dedicated session** | #2, #14 (Stage 4 fragment shrink) | Fragment count feels like it's costing more than it saves; see `plans/stage-4-fragment-shrink.md` for the approval round-trip |
+| **§2. Already-planned, dedicated session** | #2, #14 (Stage 4 fragment shrink) | *Closed 2026-04-23* — commit range `84c96ee..f9ccda0` (close-out commit `e1af3e9`; `f9ccda0` is a post-close self-review reconcile). Body kept for reference; Appendix B in the plan has the measurement snapshot |
 | **§3. Session / issue follow-ups** | Transcluded-fragment `allowed-tools` gap; broader `parse-with-repair.py` migration; telemetry data collection; post-fix robustness lens (GH #2); L5-ux line-range root-cause (GH #2) | Surfaced 2026-04-22 session or in GH #2 (2026-04-20); per-item triggers |
 | **§4. Probably leave alone** | #3, #4, #5, #6, #7, #8, #17 | Per-item "probably never" triggers — documented for completeness, not expected to fire |
 | **§5. Big refactors, unlikely to be worth it** | #1D, #1E | Cost becomes irrelevant / full architectural rewrite motivated |
@@ -66,25 +66,27 @@ The 2026-04-22 run had 24/37 post-dedup candidates land `below_gate` (65%). Phas
 
 ## §2. Already-planned, awaiting dedicated session
 
-### #2 — Stage 4 fragment shrink + helper externalization
+### #2 — Stage 4 fragment shrink + helper externalization *(CLOSED 2026-04-23)*
 
 Consolidate fragments where the boundary is arbitrary; extract cohesive Bash snippets into helper scripts with ~10-line contracts.
 
-**Detailed plan:** [`plans/stage-4-fragment-shrink.md`](./stage-4-fragment-shrink.md) — `Status: not started`, **plan-approval round-trip required** before execution (non-trivial representational change across many files).
+**Detailed plan:** [`plans/stage-4-fragment-shrink.md`](./stage-4-fragment-shrink.md) — executed per `plans/stage-4-fragment-shrink-execution.md` ledger. **Commit range:** `84c96ee..f9ccda0` on branch `stage-4-fragment-shrink` (21 commits; f9ccda0 is a post-close self-review reconcile). Close-out commit: `e1af3e9`.
 
-- **Baseline to beat** (per the Stage 4 plan): ~30k tokens of command + fragments alone; ~117k chars / 2876 lines at Stage 2.6 close.
-- **Trigger:** when the fragment count feels like it's costing more than it saves (confused greps, stale cross-references, or "which fragment does X live in?" moments).
+**Outcomes (see plan Appendix B for measurement detail):**
+- 4.0 investigation chose option (c): manifest-style command bodies. Every `!include X.md` in the 5 command files replaced with `Read fragments/X.md` directives — eliminating the post-v2.1.2 `<persisted-output>` silent-truncation failure mode.
+- 3 new helpers: `freshness-gate.sh` (Phase 0.2a), `trivial-check.sh` (Phase 0.11), `artifact-seed.sh` (Phase 0.15). 4.A.4 finding-builder.py SKIPPED — the jq was already decomposed by earlier Stage 2.5/2.6/2.7/2.8 helpers.
+- Prose consolidation: `fragments/_prelude-shared.md` (4.B.1), L1-L7 lens-prompt invariants moved into §1.2.1 (4.B.2), `fragments/10-post-fix-and-commit.md` compressed 10.1% (4.B.3).
+- Lens references lazy-loaded (4.C).
+- `/adamsreview:review` invocation-time prompt cost dropped ~94% (151k → 8.5k chars at invocation).
+- Smoke 236 → 246 at close, → 249 after the f9ccda0 post-close self-review reconcile (+13 total; +10 net from Stage 4 steps, +3 from the reconcile's helper-hardening coverage).
 
-### #14 — Fragment inlining capacity
+### #14 — Fragment inlining capacity *(CLOSED 2026-04-23 — resolved by Stage 4)*
 
-During the 2026-04-22 run, the `!include` preprocessor persisted Phases 0, 1.5, and 2–6 inline but truncated Phases 1 and 3 to 2 KB "previews"; the orchestrator had to `Read fragments/NN.md` directly to recover the rest. Fresh forcing-function evidence that the preprocessor ceiling is real and costs orchestrator turns.
+During the 2026-04-22 run, the `!include` preprocessor persisted Phases 0, 1.5, and 2–6 inline but truncated Phases 1 and 3 to 2 KB "previews"; the orchestrator had to `Read fragments/NN.md` directly to recover the rest. Fresh forcing-function evidence that the preprocessor ceiling was real and cost orchestrator turns.
 
-**Resolved by Stage 4** — the plan already scopes "move cohesive Bash snippets out of fragments and into helper scripts" + "split fragments further" as responses. Three paths the Stage 4 plan will pick from:
-- Smaller manifest-style command (command body lists phases with explicit `Read fragments/NN.md` instructions rather than inlining at preprocess time).
-- Split fragments further (Stage 4's direct scope).
-- Investigate the actual cap — if it's an output-size limit on bash-subprocess expansion, moving to `Read` calls sidesteps it entirely.
+**Resolution:** Stage 4 step 4.0 characterized the ceiling as Claude Code's post-v2.1.2 persist-to-disk threshold (ignores `BASH_MAX_OUTPUT_LENGTH`; substitutes a ~2 KB `<persisted-output>` preview for outputs over ~10 KB on current versions). Chosen response (c) — manifest-style command bodies — sidesteps the mechanism entirely. No top-level command uses `!include` anymore; `bin/include` remains available for small, size-safe transclusions should a future need arise. Silent-truncation failure mode eliminated.
 
-- **Trigger:** bundled with #2. Item #14 IS the forcing function — Stage 4 has been an option for a while, but the 2026-04-22 truncation makes it concrete.
+**Future:** if Anthropic exposes a `DISABLE_BASH_PERSIST` env var, `!include` + aggressive compression becomes viable again — worth revisiting at the next major Claude Code release. See `plans/stage-4-fragment-shrink.md` Appendix A.
 
 ---
 
