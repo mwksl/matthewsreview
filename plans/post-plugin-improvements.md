@@ -246,7 +246,7 @@ Fresh session: the orchestrator appends one entry per project as it goes. Keep e
   3009c07 orchestrator-tokens: simplify display to output + input only
   b7b63b5 plans/: annotate post-conversion-ideas backlog with 2026-04-22 scope decisions
   ```
-  Eight commits from baseline: 1 pre-flight annotation + 6 project commits + 1 extra for Project D.partial's rename/telemetry split. Close-out adds 2 more (CLAUDE.md drift fix + plans/ backlog DONE markers) bringing the final total to 10.
+  Eight commits from baseline: 1 pre-flight annotation + 6 project commits + 1 extra for Project D.partial's rename/telemetry split. Close-out adds 2 more (CLAUDE.md drift fix + plans/ backlog DONE markers) bringing the close-out total to 10. Post-close-out follow-up (user-requested) added 2 more — `ecb8938` creates `plans/backlog.md` as a forward-looking consolidation of open items with cross-references from CLAUDE.md §Layout + post-conversion-ideas.md header, and `521fb0c` cleans up a pre-existing phantom `#26` reference in the Priority ordering. Final session total: 12 commits.
 - CLAUDE.md drift sweep: Helper index row 335 said "seven families" for `source-family-map.py` but iteration 2 added `external-add-family` as the 8th — fixed in the drift-fix commit. All other sections (Pipeline shape, Finding state model, Score gates, Operational rules) verified clean against the session diff.
 - Blockers: NONE. All six projects completed with verifier PASS; only Project F needed a builder iteration 2 (one-line canonical-family completeness fix) and passed second-try.
 - Follow-up items surfaced during the session (not in scope, future backlog additions):
