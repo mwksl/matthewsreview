@@ -158,8 +158,10 @@ for (( i = 0; i < N; i++ )); do
 
         # Walk the history of this path WITH rename detection, looking
         # for the first commit that is an ancestor of $COMPARISON_REF.
-        # Default rename-detection threshold (50%) covers both pure
-        # renames and content-preserving extractions.
+        # Uses git rename-detection (default 50% similarity threshold).
+        # Files below that threshold are not followed — they fall
+        # through to reason=new-file, which may miss pre-existing
+        # extractions with heavy rewriting.
         pre_pr_ancestor=""
         follow_shas=$(git log --follow --format=%H HEAD -- "$file" 2>/dev/null | awk 'NF')
         for fsha in $follow_shas; do

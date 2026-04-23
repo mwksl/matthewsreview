@@ -48,11 +48,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _common import err_prompt, EXIT_OK, EXIT_USAGE  # noqa: E402
-
-# Exit 3 = unknown family (reuses EXIT_DRY_RUN_INVALID number; semantics
-# here are "unknown enum value", distinguished by stderr UNKNOWN_FAMILY line).
-EXIT_UNKNOWN_FAMILY = 3
+from _common import err_prompt, EXIT_OK, EXIT_USAGE, EXIT_UNKNOWN_FAMILY  # noqa: E402
 
 
 CANONICAL: frozenset[str] = frozenset({

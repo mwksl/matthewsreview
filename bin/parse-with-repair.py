@@ -31,10 +31,9 @@ Implementation layering (first-success wins):
 Returned output is always re-serialized via stdlib `json.dumps` with
 `indent=2` so downstream `jq` pipelines see canonical whitespace.
 
-This helper is the foundation for two higher-level normalizers
-(parse-validator-result.py, source-family-map.py) and the middle-path
-migration site at fragments/02-ensemble-adapter.md. See CLAUDE.md
-Helper index entry.
+This helper is the foundation for the higher-level normalizer
+parse-validator-result.py and the middle-path migration site at
+fragments/02-ensemble-adapter.md. See CLAUDE.md Helper index entry.
 """
 from __future__ import annotations
 

@@ -3727,6 +3727,33 @@ else
     fail "VR-7: deep-lane passthrough failed" "$vr7_out"
 fi
 
+# VR-8: precedence — out-of-band score_phase4 + out-of-band overall_numeric.
+# Section A stashes the out-of-range score_phase4 (150) as the heuristic
+# candidate; Section C must NOT overwrite that with its own out-of-band
+# overall_numeric (7.5). Expected: heuristic rejects 150 → exit 2.
+# Pre-fix (bug): C silently overwrote A, heuristic scaled 7.5 → 75 and
+# exit 0 fabricated a confirmed_mechanical disposition.
+vr8_out=$(echo '{"score_phase4": 150, "overall_numeric": 7.5}' \
+    | "$TOOLS/parse-validator-result.py" --lane deep 2>&1)
+vr8_exit=$?
+if [[ $vr8_exit -eq 2 ]] && echo "$vr8_out" | grep -qF "ERROR: cannot coerce score to 0-100"; then
+    pass "VR-8: out-of-band score_phase4 + out-of-band overall_numeric → exit 2 (A precedes C)"
+else
+    fail "VR-8: expected exit 2 on double-out-of-band; got $vr8_exit" "$vr8_out"
+fi
+
+# VR-9: in-band score_phase4 still wins over out-of-band overall_numeric.
+# Section A's canonical-range return happens before Section C runs, so
+# the guard added in VR-8's fix doesn't regress the common case.
+vr9_out=$(echo '{"score_phase4": 72, "overall_numeric": 7.5}' \
+    | "$TOOLS/parse-validator-result.py" --lane deep 2>&1)
+if [[ $? -eq 0 ]] \
+    && echo "$vr9_out" | jq -e '.score_phase4 == 72 and .confirmed_strength == "moderate"' >/dev/null; then
+    pass "VR-9: in-band score_phase4 (72) wins over out-of-band overall_numeric"
+else
+    fail "VR-9: in-band score_phase4 precedence failed" "$vr9_out"
+fi
+
 # --- SF-* source-family-map.py
 
 # SF-1: canonical family pass-through.

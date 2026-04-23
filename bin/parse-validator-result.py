@@ -73,12 +73,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _common import err_prompt, EXIT_OK, EXIT_VALIDATION  # noqa: E402
-
-# Exit 2 = "score unrecoverable" — reserves existing EXIT_INVALID_TRANSITION
-# code number but the semantics here are score-recovery failure. Callers
-# that want to distinguish should check stderr ERROR line.
-EXIT_SCORE_UNRECOVERABLE = 2
+from _common import err_prompt, EXIT_OK, EXIT_VALIDATION, EXIT_SCORE_UNRECOVERABLE  # noqa: E402
 
 
 # ----- score coercion ----------------------------------------------------
@@ -130,7 +125,7 @@ def _coerce_score(raw: dict) -> tuple[int, list[str]]:
                 # Recurse through heuristic with this numeric.
                 s = _heuristic_scale(val, notes)
                 return s, notes
-        raise ValueError("score: {} nested object has no numeric value")
+        raise ValueError(f"score: {inner!r} nested object has no numeric value")
 
     # C) 1-5 scale.
     if isinstance(raw.get("overall_numeric"), (int, float)):
@@ -138,8 +133,18 @@ def _coerce_score(raw: dict) -> tuple[int, list[str]]:
         if 1.0 <= v <= 5.0:
             notes.append("scale_inferred: 1-5 via overall_numeric (*20)")
             return int(round(v * 20)), notes
-        # Out of 1-5 band — fall through to heuristic below.
-        ambiguous = v
+        # Out of 1-5 band — fall through to heuristic below, but only if
+        # Section A didn't already stash an out-of-range score_phase4
+        # hint. Section A takes precedence (mirrors Section E's guard);
+        # otherwise an out-of-band overall_numeric would silently
+        # overwrite an out-of-band score_phase4 and apply the heuristic
+        # to the wrong number.
+        if ambiguous is None:
+            ambiguous = v
+        else:
+            notes.append(
+                f"overall_numeric {v} out of 1-5 band and score_phase4 hint already present; discarding overall_numeric"
+            )
 
     # D) Severity string.
     if isinstance(raw.get("severity"), str):

@@ -818,9 +818,9 @@ logic (DESIGN §6 shape) with `.id` already populated from the helper.
 
 **Source-family canonicalization.** Before the jq builder runs, pipe the
 candidate's raw `source_family` through `source-family-map.py`. The
-helper accepts the seven canonical families (`diff-family`,
+helper accepts the eight canonical families (`diff-family`,
 `structural-family`, `policy-family`, `ux-family`, `security-family`,
-`holistic-family`, `external-deep-family`) as pass-through and maps
+`holistic-family`, `external-deep-family`, `external-add-family`) as pass-through and maps
 known drift patterns (e.g. `prompt-injection → security-family`,
 `stale-line-ref → policy-family`) to their canonical equivalent.
 Exit 3 means "unknown family" — rather than silently drop the
