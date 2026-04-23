@@ -416,5 +416,5 @@ Post-2026-04-22 close-out state (see plans/post-plugin-improvements.md §6 Build
 - **Done 2026-04-22 (this session):** #0, #1A (rename), #9, #10, #11, #12, #13, #15, #16, #18, #19, #20, #21, #22, #23, #24 (telemetry only — decision deferred), #25, #27
 - **Data-driven decision awaiting ~10 reviews of Project D telemetry:** #1B, #1C, #24 (threshold-calibration decision portion)
 - **Deferred to dedicated Stage 4 session:** #2, #14 (see `plans/stage-4-fragment-shrink.md`)
-- **Probably leave alone** (per-item triggers say "probably never"): #3, #4, #5, #6, #7, #8, #17, #26, #1D, #1E
+- **Probably leave alone** (per-item triggers say "probably never"): #3, #4, #5, #6, #7, #8, #17, #1D, #1E (item #26 was never authored — numbering jumps from #25 to #27)
 - **Follow-up surfaced during Project C** (not in scope, worth a future one-liner): `assign-finding-ids.sh` and `origin-crosscheck.sh` are invoked bare in transcluded fragments but missing from `commands/review.md` `allowed-tools` — same class of pre-existing gap as #21. Bundle with any future frontmatter touch.
