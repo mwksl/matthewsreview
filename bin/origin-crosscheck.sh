@@ -11,14 +11,22 @@
 # section automatically.
 #
 # Decision table per candidate:
-#   file not in comparison_ref tree      → respect lens (new-file)
-#   blame fails                          → respect lens (skipped)
+#   file not in comparison_ref tree:
+#       git log --follow reveals pre-PR ancestor AND blame SHAs ⊆ {file-add
+#         commits}                         → override to pre_existing/high
+#         (file was renamed/extracted from a pre-PR ancestor and the
+#         candidate lines came in with that extraction — F038 case)
+#       git log --follow reveals pre-PR ancestor but blame sees later PR
+#         commits                          → respect lens (content was added
+#         AFTER extraction, within the PR)
+#       no pre-PR ancestor (genuinely new) → respect lens (new-file)
+#   blame fails                            → respect lens (skipped)
 #   all SHAs reachable from comparison_ref:
-#       lens already pre_existing/high   → respect (no-op)
-#       otherwise                        → override to pre_existing/high
+#       lens already pre_existing/high     → respect (no-op)
+#       otherwise                          → override to pre_existing/high
 #   any SHA NOT reachable:
-#       lens is pre_existing/high        → downgrade confidence to medium
-#       otherwise                        → respect
+#       lens is pre_existing/high          → downgrade confidence to medium
+#       otherwise                          → respect
 #
 # Usage:
 #   origin-crosscheck.sh --comparison-ref <ref> --candidates <path|@-|inline-json>
@@ -134,9 +142,101 @@ for (( i = 0; i < N; i++ )); do
         action="skipped"
         reason="missing file or line_range"
     elif ! git cat-file -e "$COMPARISON_REF:$file" 2>/dev/null; then
-        # File did not exist at the comparison ref — trivially PR-introduced.
+        # File did not exist at the comparison ref. Before defaulting to
+        # respect-lens/new-file, walk `git log --follow` to see whether
+        # the file is a rename or extraction from a pre-PR ancestor.
+        # Two sub-cases where the §13.1 override should fire:
+        #   1. Pure rename — blame carries the pre-rename SHAs through
+        #      (git blame follows renames within a single ref by default).
+        #   2. Content-preserving extraction (F038 case) — blame points
+        #      to the file-add commit, but that commit's content came
+        #      from a pre-PR ancestor that `git log --follow` can reach.
+        # Genuinely-new file (no rename / no extraction) keeps the
+        # existing respect-lens/new-file behavior.
         action="respected"
         reason="new-file"
+
+        # Walk the history of this path WITH rename detection, looking
+        # for the first commit that is an ancestor of $COMPARISON_REF.
+        # Default rename-detection threshold (50%) covers both pure
+        # renames and content-preserving extractions.
+        pre_pr_ancestor=""
+        follow_shas=$(git log --follow --format=%H HEAD -- "$file" 2>/dev/null | awk 'NF')
+        for fsha in $follow_shas; do
+            if git merge-base --is-ancestor "$fsha" "$COMPARISON_REF" 2>/dev/null; then
+                pre_pr_ancestor="$fsha"
+                break
+            fi
+        done
+
+        if [[ -n "$pre_pr_ancestor" ]]; then
+            # File is a rename/extraction. Collect file-add commits
+            # (commits in comparison_ref..HEAD that introduced this
+            # path; normally exactly one) so the extraction sub-case
+            # can recognize blame-to-add-commit as "content came
+            # across the rename boundary."
+            add_shas=$(git log --diff-filter=A --format=%H \
+                "$COMPARISON_REF..HEAD" -- "$file" 2>/dev/null \
+                | awk 'NF' | awk '!seen[$0]++')
+
+            # Blame the requested line range and classify each SHA:
+            #   ancestor of comparison_ref → pre-existing (pure rename)
+            #   equal to a file-add commit → pre-existing (extraction)
+            #   else                       → PR-modified
+            _bl_err_tmp=$(mktemp)
+            blame_rc=0
+            blame_out=$(git blame -L "$start,$end" --porcelain HEAD -- "$file" 2>"$_bl_err_tmp") || blame_rc=$?
+            blame_err=""
+            if [[ $blame_rc -ne 0 ]]; then
+                blame_err=$(head -c 200 "$_bl_err_tmp" 2>/dev/null | tr '\n' ' ' | awk '{$1=$1; print}')
+            fi
+            rm -f "$_bl_err_tmp"
+
+            if [[ $blame_rc -ne 0 ]]; then
+                action="skipped"
+                reason="blame-failed rc=$blame_rc${blame_err:+; $blame_err}"
+            else
+                shas=$(printf '%s\n' "$blame_out" \
+                    | awk '/^[0-9a-f]{40} / { print $1 }' \
+                    | awk '!seen[$0]++')
+                if [[ -n "$shas" ]]; then
+                    all_preexisting=1
+                    for bsha in $shas; do
+                        # Ancestor-of-comparison-ref branch: pure rename.
+                        if git merge-base --is-ancestor "$bsha" "$COMPARISON_REF" 2>/dev/null; then
+                            continue
+                        fi
+                        # File-add-commit branch: content-preserving extraction.
+                        is_add=0
+                        for asha in $add_shas; do
+                            if [[ "$bsha" == "$asha" ]]; then
+                                is_add=1; break
+                            fi
+                        done
+                        if [[ "$is_add" == "1" ]]; then
+                            continue
+                        fi
+                        all_preexisting=0
+                        break
+                    done
+                    if [[ "$all_preexisting" == "1" ]]; then
+                        if [[ "$lens_origin" == "pre_existing" && "$lens_conf" == "high" ]]; then
+                            action="respected"
+                            reason="rename-followed-confirms-preexisting"
+                        else
+                            new_origin="pre_existing"
+                            new_conf="high"
+                            action="overridden"
+                            reason="rename-followed-to-preexisting"
+                        fi
+                    else
+                        action="respected"
+                        reason="rename-follow-but-lines-modified-in-pr"
+                    fi
+                fi
+                # shas empty → keep default respect/new-file.
+            fi
+        fi
     else
         # Collect distinct commit SHAs from blame -L <start>,<end>.
         # Capture stderr so rc=128 is diagnosable in trace.md instead

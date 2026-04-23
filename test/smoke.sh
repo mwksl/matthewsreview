@@ -1070,6 +1070,128 @@ else
     fail "OC-8: expected 'reason=blame-failed rc=<N>; <stderr>' + action=skipped; got: $(cat "$OC_DIR/c8.err")"
 fi
 
+# ------------------------------------------------------------------ Stage 2.6.B (rename-follow)
+# Rename- and extraction-follow (§13.11, Project G). `git cat-file -e
+# $ref:$file` fails for any PR-added file — the old helper exited with
+# reason=new-file and respected the lens, missing F038-class cases
+# where the "new" file is actually an extraction from a pre-PR
+# predecessor. origin-crosscheck.sh now walks `git log --follow` to
+# reach the pre-rename ancestor and re-checks reachability.
+
+OC_RN_DIR="$WORK/origin-crosscheck-rename"
+mkdir -p "$OC_RN_DIR/extract-repo"
+(
+    cd "$OC_RN_DIR/extract-repo"
+    git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+    git config user.email "smoke@example.com"
+    git config user.name "smoke"
+    git symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+    # main: monolith with a bug inside recategorize().
+    cat > monolith.ts <<'TS'
+export function helper() { return 1; }
+export function recategorize(x: unknown) {
+    // BUG: missing null check
+    return (x as any).kind;
+}
+export function other() { return 2; }
+TS
+    git add monolith.ts
+    git commit --quiet -m "initial main with bug in monolith"
+    git checkout --quiet -b pr
+    # PR extracts recategorize into its own file, preserving content.
+    cat > monolith.ts <<'TS'
+export function helper() { return 1; }
+export function other() { return 2; }
+export { recategorize } from "./recategorization";
+TS
+    cat > recategorization.ts <<'TS'
+export function recategorize(x: unknown) {
+    // BUG: missing null check
+    return (x as any).kind;
+}
+TS
+    git add monolith.ts recategorization.ts
+    git commit --quiet -m "extract recategorize into its own file"
+    # A follow-up PR commit adds a genuinely-new line to the extracted file.
+    cat >> recategorization.ts <<'TS'
+export const NEW_BUG_CONST = null as any;
+TS
+    git add recategorization.ts
+    git commit --quiet -m "add new buggy constant in PR"
+)
+
+# Assertion OC-9: happy path. Lines 1-3 of recategorization.ts came
+# across the extraction boundary from monolith.ts (pre-PR). `git log
+# --follow` reaches a commit on main; blame points to the file-add
+# commit. Override lens → pre_existing/high.
+out=$(cd "$OC_RN_DIR/extract-repo" && "$TOOLS/origin-crosscheck.sh" \
+    --comparison-ref main \
+    --candidates '[{"id":"RF1","file":"recategorization.ts","line_range":[1,3],"origin":"introduced_by_pr","origin_confidence":"high"}]' \
+    2> "$OC_RN_DIR/rf1.err")
+origin=$(echo "$out" | jq -r '.[0].origin')
+conf=$(echo "$out" | jq -r '.[0].origin_confidence')
+if [[ "$origin" == "pre_existing" && "$conf" == "high" ]] \
+    && grep -q 'action=overridden' "$OC_RN_DIR/rf1.err" \
+    && grep -q 'reason=rename-followed-to-preexisting' "$OC_RN_DIR/rf1.err"; then
+    pass "OC-9 (§13.11, Project G): extracted lines of PR-added file traced via git log --follow to pre-PR ancestor → override to pre_existing/high"
+else
+    fail "OC-9: expected overridden to pre_existing/high with reason=rename-followed-to-preexisting; got origin=$origin conf=$conf stderr=$(cat "$OC_RN_DIR/rf1.err")"
+fi
+
+# Assertion OC-10: regression guard. A brand-new file with no rename
+# history must still exit via reason=new-file and respect the lens.
+mkdir -p "$OC_RN_DIR/genuine-repo"
+(
+    cd "$OC_RN_DIR/genuine-repo"
+    git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+    git config user.email "smoke@example.com"
+    git config user.name "smoke"
+    git symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+    echo "baseline" > existing.txt
+    git add existing.txt
+    git commit --quiet -m "initial main"
+    git checkout --quiet -b pr
+    cat > brand-new.ts <<'TS'
+export function foo() { return 1; }
+export function bug() { return (null as any).x; }
+TS
+    git add brand-new.ts
+    git commit --quiet -m "add brand-new.ts"
+)
+out=$(cd "$OC_RN_DIR/genuine-repo" && "$TOOLS/origin-crosscheck.sh" \
+    --comparison-ref main \
+    --candidates '[{"id":"RF2","file":"brand-new.ts","line_range":[1,2],"origin":"introduced_by_pr","origin_confidence":"high"}]' \
+    2> "$OC_RN_DIR/rf2.err")
+origin=$(echo "$out" | jq -r '.[0].origin')
+conf=$(echo "$out" | jq -r '.[0].origin_confidence')
+if [[ "$origin" == "introduced_by_pr" && "$conf" == "high" ]] \
+    && grep -q 'action=respected' "$OC_RN_DIR/rf2.err" \
+    && grep -q 'reason=new-file' "$OC_RN_DIR/rf2.err"; then
+    pass "OC-10 (§13.11, Project G): genuinely-new PR file (no rename/extraction ancestor) still respects lens with reason=new-file"
+else
+    fail "OC-10: expected introduced_by_pr/high + reason=new-file; got origin=$origin conf=$conf stderr=$(cat "$OC_RN_DIR/rf2.err")"
+fi
+
+# Assertion OC-11: extraction-with-PR-additions. When an extracted file
+# also gets new lines added in a later PR commit, blame on those new
+# lines points to a non-ancestor, non-add-commit SHA. The override
+# must NOT fire — respect the lens with an audit reason that signals
+# why (so a reviewer reading trace.md can distinguish "extracted"
+# from "mixed-extracted-plus-new" findings).
+out=$(cd "$OC_RN_DIR/extract-repo" && "$TOOLS/origin-crosscheck.sh" \
+    --comparison-ref main \
+    --candidates '[{"id":"RF3","file":"recategorization.ts","line_range":[5,5],"origin":"introduced_by_pr","origin_confidence":"high"}]' \
+    2> "$OC_RN_DIR/rf3.err")
+origin=$(echo "$out" | jq -r '.[0].origin')
+conf=$(echo "$out" | jq -r '.[0].origin_confidence')
+if [[ "$origin" == "introduced_by_pr" && "$conf" == "high" ]] \
+    && grep -q 'action=respected' "$OC_RN_DIR/rf3.err" \
+    && grep -q 'reason=rename-follow-but-lines-modified-in-pr' "$OC_RN_DIR/rf3.err"; then
+    pass "OC-11 (§13.11, Project G): PR-added lines in an extracted file are NOT overridden (blame SHA not in ancestor nor file-add set) — lens respected"
+else
+    fail "OC-11: expected introduced_by_pr/high + reason=rename-follow-but-lines-modified-in-pr; got origin=$origin conf=$conf stderr=$(cat "$OC_RN_DIR/rf3.err")"
+fi
+
 # ------------------------------------------------------------------ Stage 2.6.C
 # Renderer surfaces §13.10 freshness state in the header when non-default.
 

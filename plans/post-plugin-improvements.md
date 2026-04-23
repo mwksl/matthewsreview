@@ -190,10 +190,21 @@ Fresh session: the orchestrator appends one entry per project as it goes. Keep e
 - Ended: 2026-04-23T01:31:27Z
 - Builder iterations: 1
 - Smoke assertions: baseline 208 → post 208
-- Commit: <filled below after commit>
+- Commit: 10d200d
 - Summary: Five infra one-liners — Phase 2 dedup `jq -r '.[1:][]' | xargs -n 1` replaces shell word-splitting (#15, `fragments/03-dedup.md`); Phase 4.4.5 tree sweep excludes `.claude/` in BOTH probe and restore clauses (#16, `fragments/05-validation.md` — restore needs the same pathspec or it un-does files the probe ignored); `Bash(line-range-check.sh:*)` added to `commands/review.md` allowed-tools (#21); `bin/include text eol=lf` added to `.gitattributes` (#22); `metadata.description` added to `.claude-plugin/marketplace.json` (#25 — plan said top-level `description` but validator only accepts `metadata.description`; `claude plugin validate .` now passes with zero warnings).
 - Verifier findings: PASS first-try. All five greps confirmed.
 - Follow-up observation (out of Project C scope): `assign-finding-ids.sh` and `origin-crosscheck.sh` are also invoked bare in `fragments/01-detection.md` / `fragments/02-ensemble-adapter.md` and missing from `commands/review.md` allowed-tools — same class of pre-existing gap as #21. Flag for future backlog addition.
+- Inter-project sanity smoke (post-C, pre-G): PASS (208 assertions).
+
+### Project G — Origin crosscheck rename-following
+- Status: COMPLETE
+- Started: 2026-04-23T01:31:27Z
+- Ended: 2026-04-23T01:43:30Z
+- Builder iterations: 1
+- Smoke assertions: baseline 208 → post 211
+- Commit: <filled below after commit>
+- Summary: Taught `bin/origin-crosscheck.sh` to walk `git log --follow` when the candidate's target file is PR-added (`git cat-file -e $comparison_ref:$file` fails). Builds the file-add SHA set with `git log --diff-filter=A $comparison_ref..HEAD -- $file`; for each blame SHA on the candidate lines, classifies as pre-existing (ancestor of `$comparison_ref` OR equal to a file-add SHA → content-preserving extraction, the F038 case) or PR-modified. Override fires only when ALL blame SHAs are pre-existing; any PR-modified line suppresses the override with `reason=rename-follow-but-lines-modified-in-pr`. Genuinely-new files (no rename ancestor) keep the existing `reason=new-file` respect-lens path untouched. Three new OC-* assertions (OC-9/10/11) with inline scratch-repo fixtures; CLAUDE.md Helper index row updated.
+- Verifier findings: PASS first-try. Verifier independently scratch-reproduced all three fixture cases end-to-end and confirmed the classification decisions. Caller contract preserved: only callsite (`fragments/01-detection.md:692`) consumes stdout JSON array unchanged (same `.origin` / `.origin_confidence` fields, no new keys) and stderr audit format (`origin_crosscheck: id=… action=…[ reason=…]`) unchanged.
 
 ---
 
