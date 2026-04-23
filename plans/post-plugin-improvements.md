@@ -225,10 +225,35 @@ Fresh session: the orchestrator appends one entry per project as it goes. Keep e
 - Ended: 2026-04-23T02:16:12Z
 - Builder iterations: 1
 - Smoke assertions: baseline 233 → post 234 (+1 for the new E2 Phase 3 telemetry assertion; rename alone is label-only and assertion count unchanged there)
-- Commits: 8e3453b (rename) + `<telemetry-sha>` (telemetry) — split into TWO commits per plan §Project D verifier checklist ("Commits are two separate ones — rename + telemetry — so either can be reverted independently"). Split executed via temp-file stash of telemetry-specific changes (fragments/04-scoring-gate.md fully reverted; CLAUDE.md Phase 3 telemetry hunk reverted; test/smoke.sh E2 block removed), rename commit taken, then telemetry restored and second commit taken.
+- Commits: 8e3453b (rename) + ee81715 (telemetry) — split into TWO commits per plan §Project D verifier checklist ("Commits are two separate ones — rename + telemetry — so either can be reverted independently"). Split executed via temp-file stash of telemetry-specific changes (fragments/04-scoring-gate.md fully reverted; CLAUDE.md Phase 3 telemetry hunk reverted; test/smoke.sh E2 block removed), rename commit taken, then telemetry restored and second commit taken.
 - Summary (rename commit): `confirmed_auto` → `confirmed_mechanical` across 26 files — schema enum, bin/* helpers + their error-as-prompt messages, fragments that assign/filter on disposition, all five commands, CLAUDE.md Finding state model disposition table + Phase 8 fix gate pseudocode + lanes description, README, smoke FR-*/FX-* expected strings, artifact/fix-group fixtures, and 9 closed historical plans under `plans/` (the archive principle in CLAUDE.md applies only to `docs/archive/`, not `plans/`; builder brief excluded only the two live session plans). Zero behavior change — `is_actionable` derivation, Phase 8 gate composite, Phase 4 decision mapping all unchanged modulo label.
 - Summary (telemetry commit): Phase 3 close in `fragments/04-scoring-gate.md` now computes `demote_rate = below_gate_count / total_candidates` (0.0 when total is zero to avoid NaN) and a `score_phase3_histogram` of 10 buckets over `[0,100]` (`90-100` inclusive of 100), and passes both into `log-phase.sh --record` as additive payload. `bin/log-phase.sh` unchanged — it already accepts arbitrary JSON payloads. One new E2 smoke assertion confirms the payload round-trips through `phases.jsonl`. CLAUDE.md Pipeline shape Phase 3 row updated with a parenthetical about the new telemetry.
 - Verifier findings: PASS first-try. Verifier independently reviewed the closed-plans judgment call and accepted the builder's reading ("`plans/` is not directory-level frozen per CLAUDE.md; builder brief only excluded the two live session plans"). All 45 remaining `confirmed_auto` hits post-rename are in expected-allowed locations (`docs/archive/`, `docs/case-studies/`, `plans/post-conversion-ideas.md` for backlog rationale, `plans/post-plugin-improvements.md` for the session plan itself). Zero misses in active code.
+- Inter-project sanity smoke (post-D.partial): PASS (234 assertions) — final session state.
+
+### Session close-out (2026-04-22)
+
+- Session end: 2026-04-23T02:16:12Z
+- Final smoke: `smoke: PASS (234 assertions)` — baseline 204 → +30 new assertions across the session (A: 4 OTR-*; G: 3 OC-*; F: 22 PR-*/VR-*/SF-*/PF-INT-* including the iteration-2 SF-5 fix; D.partial: 1 E2).
+- Session commit stack (newest first, `git log --oneline e3b7573..HEAD`):
+  ```
+  ee81715 fragments/04-scoring-gate: log Phase 3 demote rate + score histogram
+  8e3453b schema: rename disposition confirmed_auto → confirmed_mechanical
+  95dc23d bin/parse-*.py + source-family-map.py: LLM output variance normalization
+  55ea067 origin-crosscheck: follow renames when target file is new in PR
+  10d200d infra: housekeeping one-liners from 2026-04-22 run
+  f0d7f19 fragments: bundle of prompt/fragment one-liners from 2026-04-22 run
+  3009c07 orchestrator-tokens: simplify display to output + input only
+  b7b63b5 plans/: annotate post-conversion-ideas backlog with 2026-04-22 scope decisions
+  ```
+  Eight commits from baseline: 1 pre-flight annotation + 6 project commits + 1 extra for Project D.partial's rename/telemetry split. Close-out adds 2 more (CLAUDE.md drift fix + plans/ backlog DONE markers) bringing the final total to 10.
+- CLAUDE.md drift sweep: Helper index row 335 said "seven families" for `source-family-map.py` but iteration 2 added `external-add-family` as the 8th — fixed in the drift-fix commit. All other sections (Pipeline shape, Finding state model, Score gates, Operational rules) verified clean against the session diff.
+- Blockers: NONE. All six projects completed with verifier PASS; only Project F needed a builder iteration 2 (one-line canonical-family completeness fix) and passed second-try.
+- Follow-up items surfaced during the session (not in scope, future backlog additions):
+  - Project C noted `assign-finding-ids.sh` + `origin-crosscheck.sh` are invoked bare in transcluded fragments but missing from `commands/review.md` `allowed-tools` — same class as #21.
+  - Project F's middle-path call-site migration bounded to ensemble-adapter; other legacy ad-hoc JSON parse sites across fragments stay unmigrated pending real-world validation of `parse-with-repair.py`'s contract.
+  - Project D.partial telemetry's `demote_rate` / `score_phase3_histogram` are now ready to collect; once ~10 reviews accumulate, the #1B/#1C/#24-decision cohort is unblocked.
+- PR: NOT auto-opened per plan §7 step 6. User will review commits locally and open the PR manually.
 
 ---
 
