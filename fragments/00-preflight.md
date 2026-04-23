@@ -6,6 +6,13 @@ trivial-diff gate, prior-review detection, and the initial `artifact.json`.
 This phase is mostly deterministic shell — the only LLM call is the Sonnet
 user-facing-change classifier (step 0.9), and that's skipped in trivial mode.
 
+**Run every Bash command in this phase in the foreground — do NOT use
+`run_in_background`.** Phase 0's output (branch detection, dirty-tree
+status, freshness prompts) is consumed inline by later steps and by
+`AskUserQuestion` dispatches; backgrounded shells leave the orchestrator
+unable to read the output and the session stalls on a variable that
+never gets assigned.
+
 Work through the steps below in order. Capture each named variable into
 your working context — later phases will reference them by name ("the
 `review_id` captured in Phase 0").
@@ -410,6 +417,14 @@ If you want the prior comment gone, delete it on GitHub first.
 If `latest.txt` is missing: skip this step.
 
 ### 0.14. Prior-PR-comment detection (PR mode, even without local artifact)
+
+**Note on repeat `:review` runs.** When step 0.13 found a prior local
+artifact with `current_state=open`, §0.14 is skipped — the prior PR
+comment stays on the PR untouched and this run posts a fresh comment
+alongside it. Mention the prior comment's URL to the user so they can
+delete it manually on GitHub if they don't want it lingering. Running
+`:review` repeatedly on the same branch otherwise silently accumulates
+review comments.
 
 If `mode=pr` AND step 0.13 found no prior local artifact, run:
 

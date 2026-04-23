@@ -168,9 +168,20 @@ Fresh session: the orchestrator appends one entry per project as it goes. Keep e
 - Ended: 2026-04-23T01:18:30Z
 - Builder iterations: 1
 - Smoke assertions: baseline 204 → post 208
-- Commit: <filled below after commit>
+- Commit: 3009c07
 - Summary: Narrowed `bin/artifact-render.py`'s orchestrator-tokens header to `<output> output / <input> input across <N> turns`; propagated the narrowing to the `Cumulative orchestrator spend:` lines in `commands/add.md` + `commands/walkthrough.md` (both template + jq builder); updated `CLAUDE.md` pipeline-shape prose; schema retains all four counters. 4 new OTR-* assertions.
 - Verifier findings: PASS first-try. Manual sum of `cache_read_input_tokens` over the real-run transcript (`rev_01KPVDH50WY7JSTEXFWYDNGQNH`, 3 sessions) matched helper exactly at 53,046,666 — helper is sound, no fix needed; the 53M/324-turn number is genuine (three same-cwd sessions within window).
+- Inter-project sanity smoke (post-A, pre-B): PASS (208 assertions).
+
+### Project B — Prompt/fragment one-liners
+- Status: COMPLETE
+- Started: 2026-04-23T01:18:30Z
+- Ended: 2026-04-23T01:25:10Z
+- Builder iterations: 1
+- Smoke assertions: baseline 208 → post 208 (no new assertions for prose-only edits)
+- Commit: <filled below after commit>
+- Summary: Six prose one-liners from the 2026-04-22 run — Phase 4a 0–100 rubric fence (#11, `fragments/05-validation.md`), Codex `ready` → `setup --json` JSON-parsed readiness gate (#13, `fragments/01-detection.md` — the baseline pattern actually lived here, not in `02-ensemble-adapter.md` as the plan's file-list guessed), prior-PR-comment retention notice in §0.14 (#18, `fragments/00-preflight.md`), Codex stderr-vs-stdout comment near the poll loop (#19, `fragments/02-ensemble-adapter.md`), Phase 0 foreground-only prescription (#23, `fragments/00-preflight.md`), walkthrough between-iteration anti-instruction (#27, `commands/walkthrough.md` step 5.3).
+- Verifier findings: PASS first-try. All six greps confirmed, zero remaining `node "$CODEX_COMPANION" ready` hits in source tree, smoke held at 208.
 
 ---
 

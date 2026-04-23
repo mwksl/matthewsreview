@@ -514,6 +514,14 @@ log-tokens.sh \
 
 #### 5.3. Render the briefing to chat
 
+**Anti-instruction (between iterations).** Do not dispatch a spurious
+"continue / stop?" `AskUserQuestion` between per-finding iterations.
+The only `AskUserQuestion` the reviewer sees per finding is the
+decision prompt at step 5.4, which already includes an explicit "Stop
+the walkthrough" option. Adding a standalone continue/stop check
+after each iteration double-prompts the reviewer and breaks the
+single-question-per-finding rhythm.
+
 Present the briefing as a markdown block the reviewer can read at a
 glance:
 

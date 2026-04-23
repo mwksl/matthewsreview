@@ -57,6 +57,11 @@ Prompt essence (per §19.5):
 > You are a deep validator. Confirm or disprove this candidate, trace
 > its blast radius, and — if real — produce a concrete fix proposal.
 >
+> **Scoring contract.** Your `score_phase4` is a single integer 0-100
+> per the §20 rubric. Do not output a 1-5 or 1-10 scale, a float, or
+> a severity keyword — the orchestrator consumes the integer directly
+> and mis-scaled scores silently route findings to the wrong band.
+>
 > **Candidate:** `<finding JSON>`
 > **CLAUDE.md paths:** `$claude_md_paths`
 >

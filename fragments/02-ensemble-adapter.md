@@ -181,6 +181,12 @@ non-blocking read-current-output mechanism granted in
 `review.md`'s `allowed-tools` block. Do not wait serially — check
 both concurrently so one slow reviewer doesn't hold up the other.
 
+**Note on Codex stream shape.** The Codex CLI writes progress lines to
+stderr (captured in `codex.err`); `codex.out` remains empty until the
+run completes and the final structured report is flushed. A zero-byte
+`codex.out` mid-run is normal, not a failure signal — do not
+short-circuit polling based on it.
+
 Apply a reasonable timeout (e.g., 10 minutes — ensemble reviewers can be
 slow on large diffs). On timeout, capture whatever output exists, mark the
 reviewer as `timed_out`, and continue.

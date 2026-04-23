@@ -102,11 +102,15 @@ if [[ -z "$CODEX_COMPANION" ]]; then
     codex_available=false
     codex_reason="companion script not found — run /codex:setup"
 else
-    if node "$CODEX_COMPANION" ready 2>&1 | grep -q ready; then
+    # Companion CLI surface: `setup --json` emits {"ready": true|false, ...}.
+    # The older `ready` subcommand does not exist — parse the JSON's
+    # `.ready` boolean instead of grep-matching a literal string.
+    codex_setup_json=$(node "$CODEX_COMPANION" setup --json 2>&1)
+    if [[ "$(jq -r '.ready // false' <<<"$codex_setup_json" 2>/dev/null)" == "true" ]]; then
         codex_available=true
     else
         codex_available=false
-        codex_reason="ready check failed — run /codex:setup to diagnose"
+        codex_reason="setup --json reported not-ready — run /codex:setup to diagnose"
     fi
 fi
 ```
