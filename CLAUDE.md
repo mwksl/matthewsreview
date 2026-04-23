@@ -232,7 +232,10 @@ adamsreview/
 │       ├── DESIGN.md               ← rev 8 normative design (historical)
 │       └── BUILD.md                ← stage-by-stage build journal (historical)
 ├── plans/                          ← per-stage plans (1–3 + 2.5/2.6/2.7/2.8 closed;
-│                                     plugin-conversion closed; stage-4-fragment-shrink live)
+│                                     plugin-conversion closed; post-plugin-improvements closed;
+│                                     stage-4-fragment-shrink live). Forward-looking work lives in
+│                                     `plans/backlog.md`; chronological idea log + DONE markers
+│                                     live in `plans/post-conversion-ideas.md`.
 ├── commands/                       ← bare-stem command files (D18 namespacing)
 │   ├── review.md                   ← /adamsreview:review     (Phases 0–6)
 │   ├── add.md                      ← /adamsreview:add        (inject external findings)
