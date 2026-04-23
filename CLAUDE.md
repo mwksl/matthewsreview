@@ -33,7 +33,8 @@ The original four are **built and in production use** as of 2026-04-19 (Stages 1
 ├── Phase 1.5  ─┘ External PR-comment scrape (gh api → bot filter → comment-freshness →
 │                 Sonnet normalizer; ensemble mode only; joint dispatch with Phase 1)
 ├── Phase 2 — Dedup (one Sonnet call; merges equivalent candidates, unions source_families)
-├── Phase 3 — Cheap scoring + gate (Sonnet err-up rubric; ≥2 families auto-graduate)
+├── Phase 3 — Cheap scoring + gate (Sonnet err-up rubric; ≥2 families auto-graduate;
+│              logs demote_rate + score_phase3_histogram to phases.jsonl for #24 calibration)
 ├── Phase 4 — Validation (deep Opus per candidate for correctness/security;
 │              light Sonnet confirmation for ux/policy/architecture)
 ├── Phase 5 — Cross-cutting review (deep-lane only; dispatched Opus sub-agent)

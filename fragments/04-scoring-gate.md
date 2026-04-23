@@ -189,9 +189,36 @@ log-phase.sh \
 # with the Phase-3 table. (Phase 1 + Phase 2 parked every finding at
 # pending_validation; this phase is where below_gate / pre_existing_report
 # first appear on gate-fail / override findings respectively.)
+#
+# Telemetry for post-conversion-ideas #24 calibration: demote_rate (fraction
+# gated out of the Phase-3-scored candidates) and score_phase3_histogram
+# (10 buckets of width 10 over [0, 100]). These feed the decision on
+# whether to tune the Phase 3 err-up rubric. demote_rate is a float in
+# [0.0, 1.0]; when no candidates were scored (all routed to pre_existing_report
+# in step 3.1) the denominator is zero and we emit 0.0 explicitly.
 by_disp=$(artifact-read.sh \
   --path "$artifact_path" --summary \
   | jq -c '.counts_by_disposition')
+
+score_total=$(( gate_pass + gate_fail ))
+if [[ "$score_total" -eq 0 ]]; then
+    demote_rate="0.0"
+else
+    demote_rate=$(jq -nc --argjson f "$gate_fail" --argjson t "$score_total" '$f / $t')
+fi
+
+# Histogram over the Phase-3-scored population (excludes pre_existing_report
+# overrides and null scores from parse failures). Buckets are 0-9, 10-19,
+# ..., 80-89, 90-100 (the top bucket is inclusive of 100).
+score_phase3_histogram=$(artifact-read.sh \
+  --path "$artifact_path" \
+  --filter '[.findings[] | select(.score_phase3 != null) | .score_phase3]' \
+  | jq -c '
+      . as $scores
+      | (reduce range(0;10) as $b ({}; .["\($b*10)-\(if $b==9 then 100 else $b*10+9 end)"] = 0)) as $empty
+      | reduce $scores[] as $s ($empty;
+          ($s | if . >= 100 then 9 elif . < 0 then 0 else (. / 10 | floor) end) as $b
+          | .["\($b*10)-\(if $b==9 then 100 else $b*10+9 end)"] += 1)')
 
 log-phase.sh \
   --review-dir "$review_dir" --phase 3 --record "$(jq -nc \
@@ -199,7 +226,9 @@ log-phase.sh \
     --argjson pass "$gate_pass" \
     --argjson fail "$gate_fail" \
     --argjson by_disp "$by_disp" \
-    '{name:"scoring-gate", elapsed_sec:$elapsed, counts_by_state:{open:($pass+$fail)}, counts_by_disposition:$by_disp, delta:"\($fail) gated below, \($pass) advanced"}')"
+    --argjson demote_rate "$demote_rate" \
+    --argjson histogram "$score_phase3_histogram" \
+    '{name:"scoring-gate", elapsed_sec:$elapsed, counts_by_state:{open:($pass+$fail)}, counts_by_disposition:$by_disp, demote_rate:$demote_rate, score_phase3_histogram:$histogram, delta:"\($fail) gated below, \($pass) advanced"}')"
 ```
 
 ### Working-set delta after Phase 3
@@ -210,4 +239,6 @@ log-phase.sh \
 - Gate-passing findings have `disposition=pending_validation` (the
   §5.2.1 gate-in parking state); Phase 4 overwrites.
 - `tokens.jsonl` + one entry per scored finding.
-- `phases.jsonl` + Phase 3 record with `counts_by_disposition`.
+- `phases.jsonl` + Phase 3 record with `counts_by_disposition`,
+  `demote_rate` (float), and `score_phase3_histogram` (10 buckets)
+  — telemetry for post-conversion-ideas #24 rubric calibration.

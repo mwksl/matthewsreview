@@ -364,6 +364,26 @@ else
     fail "E: phase_1_5=$phase_1_5_phase phase_6=$phase_6_phase; check $WORK/rev/phases.jsonl"
 fi
 
+# E2. Phase 3 telemetry payload shape (#24 calibration): demote_rate float
+# and score_phase3_histogram (10 buckets) land in phases.jsonl via --record
+# pass-through. Sanity-check that log-phase.sh carries arbitrary JSON
+# payloads through unchanged, so the fragments/04-scoring-gate.md wiring
+# doesn't need a bespoke helper.
+p3_record=$(jq -nc \
+    --argjson hist '{"0-9":1,"10-19":2,"20-29":3,"30-39":2,"40-49":4,"50-59":3,"60-69":5,"70-79":4,"80-89":2,"90-100":1}' \
+    '{name:"scoring-gate", elapsed_sec:42, demote_rate:0.6486486486486487, score_phase3_histogram:$hist}')
+"$TOOLS/log-phase.sh" --review-dir "$WORK/rev" --phase 3 --record "$p3_record"
+p3_demote=$(jq -r 'select(.name == "scoring-gate" and .phase == 3) | .demote_rate' "$WORK/rev/phases.jsonl" | head -1)
+p3_hist_keys=$(jq -r 'select(.name == "scoring-gate" and .phase == 3) | .score_phase3_histogram | keys | length' "$WORK/rev/phases.jsonl" | head -1)
+p3_bucket_90_100=$(jq -r 'select(.name == "scoring-gate" and .phase == 3) | .score_phase3_histogram["90-100"]' "$WORK/rev/phases.jsonl" | head -1)
+if [[ "$p3_demote" == "0.6486486486486487" ]] \
+        && [[ "$p3_hist_keys" == "10" ]] \
+        && [[ "$p3_bucket_90_100" == "1" ]]; then
+    pass "E2: Phase 3 phases.jsonl record carries demote_rate + score_phase3_histogram (#24 telemetry)"
+else
+    fail "E2: phase 3 telemetry shape wrong — demote_rate=$p3_demote hist_keys=$p3_hist_keys bucket_90_100=$p3_bucket_90_100"
+fi
+
 # F. Schema-invalid fixture rejected by artifact-validate.sh
 stderr=$("$TOOLS/artifact-validate.sh" --path "$FIX/invalid/bad-disposition.json" 2>&1 >/dev/null); code=$?
 if [[ "$code" != "0" ]] && echo "$stderr" | grep -q "bogus_disposition"; then
