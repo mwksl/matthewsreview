@@ -166,7 +166,7 @@ fi
 # ---------------------------------------------------------------- sidecars
 
 # A. artifact-read.sh --summary returns expected counts
-expected_counts='{"findings_total":7,"by_disposition":{"below_gate":1,"confirmed_auto":1,"confirmed_manual":1,"pre_existing_report":1,"resolved":1,"uncertain":2}}'
+expected_counts='{"findings_total":7,"by_disposition":{"below_gate":1,"confirmed_manual":1,"confirmed_mechanical":1,"pre_existing_report":1,"resolved":1,"uncertain":2}}'
 actual=$("$TOOLS/artifact-read.sh" --path "$ART" --summary \
     | jq -c '{findings_total, by_disposition: .counts_by_disposition}')
 if [[ "$actual" == "$expected_counts" ]]; then
@@ -518,20 +518,20 @@ else
     fail "Q: expected coupling error; got code=$code stderr=$stderr"
 fi
 
-# R. pending_validation → confirmed_auto Phase-4 transition works (R2 flow)
-# F099 starts at below_gate; move through pending_validation → confirmed_auto
+# R. pending_validation → confirmed_mechanical Phase-4 transition works (R2 flow)
+# F099 starts at below_gate; move through pending_validation → confirmed_mechanical
 # (with is_actionable=true, confirmed_strength) simulating Phase 3→4.
 cp "$ART" "$WORK/art-p34.json"
 "$TOOLS/artifact-patch.py" --path "$WORK/art-p34.json" --finding-id F099 \
     --set disposition=pending_validation --set is_actionable=false >/dev/null
 if "$TOOLS/artifact-patch.py" --path "$WORK/art-p34.json" --finding-id F099 \
-        --set disposition=confirmed_auto \
+        --set disposition=confirmed_mechanical \
         --set is_actionable=true \
         --set confirmed_strength=strong \
         --set "score_phase4=85" >/dev/null; then
     disp=$(jq -r '.findings[] | select(.id=="F099") | .disposition' "$WORK/art-p34.json")
-    if [[ "$disp" == "confirmed_auto" ]]; then
-        pass "R: pending_validation → confirmed_auto Phase-4 transition succeeds"
+    if [[ "$disp" == "confirmed_mechanical" ]]; then
+        pass "R: pending_validation → confirmed_mechanical Phase-4 transition succeeds"
     else
         fail "R: final disposition = $disp"
     fi
@@ -649,7 +649,7 @@ fi
 
 # W. --apply-decisions: mixed batch routes via §13.1 and writes validation_result
 # only for the confirmed band (Stage 2.5.B). Build a seed with 3 findings in
-# pending_validation, run one --apply-decisions call with a confirmed_auto +
+# pending_validation, run one --apply-decisions call with a confirmed_mechanical +
 # uncertain + disproven tuple set, and check each finding's post-state.
 APPLY_DIR="$WORK/apply-decisions"
 mkdir -p "$APPLY_DIR"
@@ -719,7 +719,7 @@ F103_VR=$(jq -r '.findings[] | select(.id=="F103") | .validation_result' "$APPLY
 F103_REASON=$(jq -r '.findings[] | select(.id=="F103") | .reason' "$APPLY_DIR/art.json")
 
 if [[ "$code" == "0" ]] \
-    && [[ "$F101_DISP" == "confirmed_auto" && "$F101_IA" == "true" && "$F101_CS" == "strong" && "$F101_VR" == "object" ]] \
+    && [[ "$F101_DISP" == "confirmed_mechanical" && "$F101_IA" == "true" && "$F101_CS" == "strong" && "$F101_VR" == "object" ]] \
     && [[ "$F102_DISP" == "uncertain" && "$F102_VR" == "null" ]] \
     && [[ "$F103_DISP" == "disproven" && "$F103_VR" == "null" && "$F103_REASON" == "Phase 4: not reproducible" ]] \
     && echo "$out" | grep -q "applied 3 decisions"; then
@@ -1567,7 +1567,7 @@ GF_PROMOTE_HC=$(jq -nc '{
     fix_hint: "Update the docstring to match the code; do not modify the code."
 }')
 "$TOOLS/artifact-patch.py" --path "$GF_PROMOTED_ART" --finding-id F001 \
-    --set disposition=confirmed_auto \
+    --set disposition=confirmed_mechanical \
     --set current_state=open \
     --set actionability=auto_fixable \
     --set-json "human_confirmation=$GF_PROMOTE_HC" >/dev/null 2>&1 \
@@ -1677,7 +1677,7 @@ OA_ART="$WORK/af-oa.json"
   '[{"id":"F004","run_id":"fixrun_oa","fix_group_id":"FG-1","input_sha":"aaaa111","output_sha":null,"phase_9_outcome":null,"timestamp":"2026-04-18T13:00:00Z","phase_9_finding":"run aborted: overlap on src/c.ts"}]' \
   >/dev/null 2>&1
 f4=$(jq -c '.findings[] | select(.id=="F004") | {current_state,disposition,attempts:(.fix_attempts|length),last_sha:(.fix_attempts[-1].output_sha),last_outcome:(.fix_attempts[-1].phase_9_outcome),last_finding:(.fix_attempts[-1].phase_9_finding)}' "$OA_ART")
-expected='{"current_state":"attempted","disposition":"confirmed_auto","attempts":1,"last_sha":null,"last_outcome":null,"last_finding":"run aborted: overlap on src/c.ts"}'
+expected='{"current_state":"attempted","disposition":"confirmed_mechanical","attempts":1,"last_sha":null,"last_outcome":null,"last_finding":"run aborted: overlap on src/c.ts"}'
 if [[ "$f4" == "$expected" ]]; then
     pass "FX-AF-6 (§4 Phase 9.pre): overlap-abort preserves current_state=attempted, appends audit fix_attempt"
 else
@@ -1818,7 +1818,7 @@ fi
 
 RF_ART="$WORK/rf-art.json"
 
-# Build a fresh artifact with F001 open/confirmed_auto and exercise the
+# Build a fresh artifact with F001 open/confirmed_mechanical and exercise the
 # full fix cycle to produce a verified+partial+regression multi-outcome
 # run.
 "$TOOLS/artifact-patch.py" --init "@$FIX/fix-group-seed.json" --path "$RF_ART" >/dev/null
@@ -1892,7 +1892,7 @@ fi
 "$TOOLS/artifact-patch.py" --path "$WORK/rf-two.json" --apply-fix-outcomes \
   '[{"id":"F007","run_id":"fixrun_old","fix_group_id":"FG-1","input_sha":"aaaa111","output_sha":"cccc333","phase_9_outcome":"verified","timestamp":"2026-04-18T13:00:00Z"}]' >/dev/null 2>&1
 # F007 is now resolved — to run a second fix, we need a fresh open finding.
-# Use F005 (currently open/confirmed_auto) for run B at 16:00.
+# Use F005 (currently open/confirmed_mechanical) for run B at 16:00.
 "$TOOLS/artifact-patch.py" --path "$WORK/rf-two.json" --apply-fix-start '[{"id":"F005","run_id":"fixrun_new"}]' >/dev/null 2>&1
 "$TOOLS/artifact-patch.py" --path "$WORK/rf-two.json" --apply-fix-outcomes \
   '[{"id":"F005","run_id":"fixrun_new","fix_group_id":"FG-1","input_sha":"bbbb222","output_sha":"dddd444","phase_9_outcome":"verified","timestamp":"2026-04-18T16:00:00Z"}]' >/dev/null 2>&1
@@ -2132,7 +2132,7 @@ cp "$ART" "$MP_BASELINE"  # fresh copy, no MP-2 mutation
 mp4_ids=$(jq -r --argjson thr 60 '
     [.findings[]
      | select(.current_state == "open")
-     | select(.disposition == "confirmed_auto" or .disposition == "partial" or .disposition == "regression")
+     | select(.disposition == "confirmed_mechanical" or .disposition == "partial" or .disposition == "regression")
      | select(
          (.human_confirmation != null)
          or (
@@ -2149,19 +2149,19 @@ else
     fail "MP-4: F006 should be ineligible without human_confirmation; got ids=$mp4_ids"
 fi
 
-# MP-5: after promoting F006 (disposition=confirmed_auto + actionability=auto_fixable +
+# MP-5: after promoting F006 (disposition=confirmed_mechanical + actionability=auto_fixable +
 # human_confirmation set), the same Phase 8 selector DOES include it. Tests the bypass.
 MP_PROMOTED="$WORK/art-promote-done.json"
 cp "$ART" "$MP_PROMOTED"
 "$TOOLS/artifact-patch.py" --path "$MP_PROMOTED" --finding-id F006 \
-    --set disposition=confirmed_auto \
+    --set disposition=confirmed_mechanical \
     --set actionability=auto_fixable \
     --set-json "human_confirmation=$MP_HC_VALID" >/dev/null 2>&1 \
     || fail "MP-5 setup: promote patch failed"
 mp5_ids=$(jq -r --argjson thr 60 '
     [.findings[]
      | select(.current_state == "open")
-     | select(.disposition == "confirmed_auto" or .disposition == "partial" or .disposition == "regression")
+     | select(.disposition == "confirmed_mechanical" or .disposition == "partial" or .disposition == "regression")
      | select(
          (.human_confirmation != null)
          or (
@@ -2203,7 +2203,7 @@ MP_HC_WITH_HINT=$(jq -nc '{
 MP_ART_HINT="$WORK/art-promote-hint.json"
 cp "$ART" "$MP_ART_HINT"
 if "$TOOLS/artifact-patch.py" --path "$MP_ART_HINT" --finding-id F006 \
-        --set disposition=confirmed_auto \
+        --set disposition=confirmed_mechanical \
         --set actionability=auto_fixable \
         --set-json "human_confirmation=$MP_HC_WITH_HINT" >/dev/null 2>&1; then
     pass "MP-7 (§27.3, schema): human_confirmation with non-empty fix_hint accepted"
@@ -2260,18 +2260,18 @@ fi
 PROMOTE_MD="$REPO/commands/promote.md"
 PROMOTE_CORE_MD="$REPO/fragments/promote-core.md"
 
-# WT-0: promote-core precondition PROCEEDS (not no-op) for confirmed_auto +
+# WT-0: promote-core precondition PROCEEDS (not no-op) for confirmed_mechanical +
 # curr_hc == null. Pre-existing-bug guard: a blanket no-op on that row silently
 # broke promoting light-lane findings and deep-lane below-threshold findings
 # (§27.2, §27.6). If a future edit re-adds the no-op language, this surfaces.
 # Checks: (a) the precondition table contains a **Proceed.** verdict on the
-# confirmed_auto + curr_hc == null row, (b) it does NOT contain the old
-# "already confirmed_auto by validator" no-op text.
-if grep -q '`confirmed_auto` | `curr_hc == null` | \*\*Proceed' "$PROMOTE_CORE_MD" \
-   && ! grep -q "already confirmed_auto by validator.*no-op" "$PROMOTE_CORE_MD"; then
-    pass "WT-0 (§27.2, §27.6): promote-core precondition proceeds for confirmed_auto + no human_confirmation"
+# confirmed_mechanical + curr_hc == null row, (b) it does NOT contain the old
+# "already confirmed_mechanical by validator" no-op text.
+if grep -q '`confirmed_mechanical` | `curr_hc == null` | \*\*Proceed' "$PROMOTE_CORE_MD" \
+   && ! grep -q "already confirmed_mechanical by validator.*no-op" "$PROMOTE_CORE_MD"; then
+    pass "WT-0 (§27.2, §27.6): promote-core precondition proceeds for confirmed_mechanical + no human_confirmation"
 else
-    fail "WT-0: promote-core.md missing 'Proceed' verdict or still has blanket no-op for confirmed_auto + no hc"
+    fail "WT-0: promote-core.md missing 'Proceed' verdict or still has blanket no-op for confirmed_mechanical + no hc"
 fi
 
 # The walkthrough scope-filter jq — must stay in sync with the expression in
@@ -2289,7 +2289,7 @@ WT_SCOPE_JQ='
  | select(.human_confirmation == null)
  | select(
      (
-       (.disposition == "confirmed_auto" or .disposition == "partial" or .disposition == "regression")
+       (.disposition == "confirmed_mechanical" or .disposition == "partial" or .disposition == "regression")
        and (
          (.impact_type == "correctness" or .impact_type == "security")
          and (.score_phase4 != null and .score_phase4 >= $thr)
@@ -2366,37 +2366,37 @@ else
 fi
 
 # WT-3: findings the Phase 8 gate would ALREADY pass (correctness/security +
-# score >= threshold + confirmed_auto/partial/regression) are excluded — the
+# score >= threshold + confirmed_mechanical/partial/regression) are excluded — the
 # walkthrough's purpose is to surface what fix SKIPS. Fixture: deep/correctness
-# confirmed_auto at score=80 should NOT appear.
+# confirmed_mechanical at score=80 should NOT appear.
 wt3_findings=$(jq -nc \
-    --argjson a "$(wt_finding W020 correctness deep confirmed_auto 80 open null)" \
+    --argjson a "$(wt_finding W020 correctness deep confirmed_mechanical 80 open null)" \
     --argjson b "$(wt_finding W021 correctness deep confirmed_manual 80 open null)" \
     '[$a,$b]')
 wt3_fx=$(wt_build_fixture "$wt3_findings")
 wt3_ids=$(echo "$wt3_fx" | jq -r --argjson thr 60 "$WT_SCOPE_JQ")
 if [[ "$wt3_ids" == "W021" ]]; then
-    pass "WT-3 (§28, §13.1): scope excludes fix-eligible findings (correctness confirmed_auto >= threshold)"
+    pass "WT-3 (§28, §13.1): scope excludes fix-eligible findings (correctness confirmed_mechanical >= threshold)"
 else
     fail "WT-3: expected W021 only; got '$wt3_ids'"
 fi
 
-# WT-4: light-lane confirmed_auto findings (which fail the impact_type gate)
+# WT-4: light-lane confirmed_mechanical findings (which fail the impact_type gate)
 # ARE included — this is the primary gap the walkthrough exists to close.
-# Fixture: ux confirmed_auto at high score (which the fix command would skip
+# Fixture: ux confirmed_mechanical at high score (which the fix command would skip
 # due to impact_type != correctness/security) plus a below-threshold correctness
-# confirmed_auto (which the fix command would skip due to the score gate).
+# confirmed_mechanical (which the fix command would skip due to the score gate).
 wt4_findings=$(jq -nc \
-    --argjson a "$(wt_finding W030 ux light confirmed_auto 80 open null)" \
-    --argjson b "$(wt_finding W031 policy light confirmed_auto 50 open null)" \
-    --argjson c "$(wt_finding W032 correctness deep confirmed_auto 40 open null)" \
+    --argjson a "$(wt_finding W030 ux light confirmed_mechanical 80 open null)" \
+    --argjson b "$(wt_finding W031 policy light confirmed_mechanical 50 open null)" \
+    --argjson c "$(wt_finding W032 correctness deep confirmed_mechanical 40 open null)" \
     '[$a,$b,$c]')
 wt4_fx=$(wt_build_fixture "$wt4_findings")
 wt4_ids=$(echo "$wt4_fx" | jq -r --argjson thr 60 "$WT_SCOPE_JQ")
 # Order in jq output depends on array order, not a sort, so match any permutation.
 if [[ ",$wt4_ids," == *,W030,* && ",$wt4_ids," == *,W031,* && ",$wt4_ids," == *,W032,* ]] \
    && [[ $(echo "$wt4_ids" | awk -F, '{print NF}') == "3" ]]; then
-    pass "WT-4 (§28, §13.2): scope includes light-lane confirmed_auto + below-threshold deep confirmed_auto"
+    pass "WT-4 (§28, §13.2): scope includes light-lane confirmed_mechanical + below-threshold deep confirmed_mechanical"
 else
     fail "WT-4: expected W030,W031,W032 (any order); got '$wt4_ids'"
 fi
@@ -2448,7 +2448,7 @@ WT_QUALIFYING_JQ='
  | select(.human_confirmation == null)
  | select(
      (
-       (.disposition == "confirmed_auto" or .disposition == "partial" or .disposition == "regression")
+       (.disposition == "confirmed_mechanical" or .disposition == "partial" or .disposition == "regression")
        and (
          (.impact_type == "correctness" or .impact_type == "security")
          and (.score_phase4 != null and .score_phase4 >= $thr)
@@ -2461,7 +2461,7 @@ WT_QUALIFYING_JQ='
 wt7_findings=$(jq -nc \
     --argjson a "$(wt_finding W050 correctness deep below_gate null open null)" \
     --argjson b "$(wt_finding W051 correctness deep pre_existing_report null open null)" \
-    --argjson c "$(wt_finding W052 ux light confirmed_auto 80 open null)" \
+    --argjson c "$(wt_finding W052 ux light confirmed_mechanical 80 open null)" \
     --argjson d "$(wt_finding W053 correctness deep uncertain 55 open null)" \
     '[$a,$b,$c,$d]')
 wt7_fx=$(wt_build_fixture "$wt7_findings")
@@ -3207,7 +3207,7 @@ fi
 # so the addition should pass — but we verify rather than assume.
 L7_ART="$WORK/l7-schema.json"
 "$TOOLS/artifact-patch.py" --init "@$FIX/artifact-seed.json" --path "$L7_ART" >/dev/null
-F_L7='{"id":"F901","sources":["L7-holistic"],"source_families":["holistic-family"],"impact_type":"correctness","origin":"introduced_by_pr","origin_confidence":"high","actionability":"auto_fixable","validation_lane":"deep","current_state":"open","disposition":"confirmed_auto","is_actionable":true,"reason":"test","confirmed_strength":"moderate","file":"src/holistic/test.ts","line_range":[10,12],"claim":"L7 schema smoke","score_phase3":65,"score_phase4":70,"score_history":[{"phase":"phase_3","score":65},{"phase":"phase_4","score":70}],"validation_result":null,"fix_attempts":[],"introduced_in_sha":null,"suggested_follow_up":null,"related_parent_finding_id":null}'
+F_L7='{"id":"F901","sources":["L7-holistic"],"source_families":["holistic-family"],"impact_type":"correctness","origin":"introduced_by_pr","origin_confidence":"high","actionability":"auto_fixable","validation_lane":"deep","current_state":"open","disposition":"confirmed_mechanical","is_actionable":true,"reason":"test","confirmed_strength":"moderate","file":"src/holistic/test.ts","line_range":[10,12],"claim":"L7 schema smoke","score_phase3":65,"score_phase4":70,"score_history":[{"phase":"phase_3","score":65},{"phase":"phase_4","score":70}],"validation_result":null,"fix_attempts":[],"introduced_in_sha":null,"suggested_follow_up":null,"related_parent_finding_id":null}'
 if "$TOOLS/artifact-patch.py" --path "$L7_ART" --add-finding "$F_L7" >/dev/null 2>&1 \
     && "$TOOLS/artifact-validate.sh" --path "$L7_ART" >/dev/null 2>&1; then
     pass "L7-5 (§2.9.D): holistic-family source_family passes schema validation"

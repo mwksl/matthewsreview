@@ -7,7 +7,7 @@
 
 Input: a validated artifact + a list of eligible finding ids (the
 orchestrator is responsible for filtering per §4 Phase 8: current_state
-== "open", disposition ∈ {confirmed_auto, partial, regression},
+== "open", disposition ∈ {confirmed_mechanical, partial, regression},
 impact_type ∈ {correctness, security}, score_phase4 >= threshold).
 This helper does NOT re-derive eligibility — it validates that the ids
 it was given satisfy the prerequisites for grouping and then merges
@@ -33,7 +33,7 @@ Output invariants:
 Error cases (all via error-as-prompt per DESIGN §8.6):
   - Unknown eligible id → EXIT_VALIDATION (1).
   - Eligible finding has current_state != "open" or disposition outside
-    {confirmed_auto, partial, regression} → EXIT_VALIDATION (1).
+    {confirmed_mechanical, partial, regression} → EXIT_VALIDATION (1).
   - Eligible finding missing validation_result.fix_proposal.files_to_modify
     → EXIT_VALIDATION (1).
   - Malformed artifact (schema violation) → EXIT_VALIDATION (1).
@@ -58,7 +58,7 @@ import _common as c  # noqa: E402
 
 # ----- Input parsing -----------------------------------------------------
 
-_ELIGIBLE_DISPOSITIONS = frozenset({"confirmed_auto", "partial", "regression"})
+_ELIGIBLE_DISPOSITIONS = frozenset({"confirmed_mechanical", "partial", "regression"})
 
 
 def _parse_eligible_ids(value):
@@ -140,7 +140,7 @@ def _check_eligible(finding, fid):
         c.err_prompt(
             f"finding {fid}: disposition='{disp}' is not eligible for Phase 8 grouping",
             valid_values=sorted(_ELIGIBLE_DISPOSITIONS),
-            action="only {confirmed_auto, partial, regression} findings participate in fix groups."
+            action="only {confirmed_mechanical, partial, regression} findings participate in fix groups."
         )
         sys.exit(c.EXIT_VALIDATION)
 
@@ -156,7 +156,7 @@ def _check_eligible(finding, fid):
             return
         c.err_prompt(
             f"finding {fid}: validation_result is required for fix grouping (got {type(vr).__name__ if vr is not None else 'null'})",
-            context="Phase 4 deep-lane validators populate validation_result. confirmed_auto findings without one would have failed schema validation earlier — so this usually means a fixture or a stale patch.",
+            context="Phase 4 deep-lane validators populate validation_result. confirmed_mechanical findings without one would have failed schema validation earlier — so this usually means a fixture or a stale patch.",
             action="re-run /adamsreview:review to refresh validation_result, or exclude this finding from --eligible-finding-ids. (Promoted findings with null validation_result are accepted — this one is not promoted.)"
         )
         sys.exit(c.EXIT_VALIDATION)

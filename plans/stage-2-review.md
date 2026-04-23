@@ -475,7 +475,7 @@ All three are clarification-level per BUILD.md protocol. They get BUILD.md cross
 End-to-end verification happens in Commit 13. Target:
 
 1. **Subject repo:** `adams-review` itself, on a throwaway branch.
-2. **Seeded bugs:** 1-2 intentional findings — e.g., a Python file with a null-deref pattern and a TypeScript file missing an await, or a CLAUDE.md violation if we add a test CLAUDE.md. Just enough for at least one confirmed_auto + one disproven to exercise the report sections.
+2. **Seeded bugs:** 1-2 intentional findings — e.g., a Python file with a null-deref pattern and a TypeScript file missing an await, or a CLAUDE.md violation if we add a test CLAUDE.md. Just enough for at least one confirmed_mechanical + one disproven to exercise the report sections.
 3. **Runs:**
    - `/adams-review --local` (no PR)
    - `/adams-review` on a draft PR against main

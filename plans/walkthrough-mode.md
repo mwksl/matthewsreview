@@ -70,11 +70,11 @@ Walkthrough iterates findings where:
 .findings[]
 | select(.current_state == "open")
 | select(.human_confirmation == null)
-| select(.disposition | IN("confirmed_manual", "confirmed_report", "confirmed_auto", "uncertain", "partial", "regression", "below_gate", "pre_existing_report"))
+| select(.disposition | IN("confirmed_manual", "confirmed_report", "confirmed_mechanical", "uncertain", "partial", "regression", "below_gate", "pre_existing_report"))
 | select(
     (.human_confirmation != null)                 # already promoted → excluded (redundant with above, kept for clarity)
     or not (
-      (.disposition == "confirmed_auto" or .disposition == "partial" or .disposition == "regression")
+      (.disposition == "confirmed_mechanical" or .disposition == "partial" or .disposition == "regression")
       and (
         (.impact_type == "correctness" or .impact_type == "security")
         and (.score_phase4 != null and .score_phase4 >= $thr)
@@ -86,7 +86,7 @@ Walkthrough iterates findings where:
 
 Explicitly **excluded**: `resolved`, `disproven`, `pending_validation`. The exclusion of disproven is deliberate — the validator found positive evidence it's wrong; promoting those is `--force` territory. The exclusion of `human_confirmation != null` means partially-walked sessions resume cleanly.
 
-Critical included case: light-lane `confirmed_auto` (fails `impact_type` gate) AND below-threshold `confirmed_auto` (fails score gate). These are findings the validator believes are mechanically-fixable but the Phase 8 default gates skip. This was the F012/F013/F015/F017/F019 case in the ray-finance session that surfaced the need for this command.
+Critical included case: light-lane `confirmed_mechanical` (fails `impact_type` gate) AND below-threshold `confirmed_mechanical` (fails score gate). These are findings the validator believes are mechanically-fixable but the Phase 8 default gates skip. This was the F012/F013/F015/F017/F019 case in the ray-finance session that surfaced the need for this command.
 
 ### 3.6 Threshold from positional arg, default 60
 
@@ -300,11 +300,11 @@ per §18):
 
 | # | Label | Checks |
 |---|---|---|
-| WT-0 | promote-core precondition proceeds on `confirmed_auto` + `curr_hc == null` | Structural grep: "**Proceed.**" verdict present; "already confirmed_auto by validator…no-op" absent (§18, §27.2, §27.6) |
+| WT-0 | promote-core precondition proceeds on `confirmed_mechanical` + `curr_hc == null` | Structural grep: "**Proceed.**" verdict present; "already confirmed_mechanical by validator…no-op" absent (§18, §27.2, §27.6) |
 | WT-1 | scope filter excludes resolved/disproven/pending | Fixture with mixed dispositions; scope jq returns only the in-scope ids |
 | WT-2 | scope filter excludes already-promoted findings | Fixture with `human_confirmation != null` on F001; F001 not returned |
-| WT-3 | scope filter excludes fix-eligible findings (correctness, score ≥ threshold) | Deep finding at score 80 / confirmed_auto / correctness → not in scope |
-| WT-4 | scope filter includes light-lane confirmed_auto | ux / confirmed_auto / score 80 → IS in scope |
+| WT-3 | scope filter excludes fix-eligible findings (correctness, score ≥ threshold) | Deep finding at score 80 / confirmed_mechanical / correctness → not in scope |
+| WT-4 | scope filter includes light-lane confirmed_mechanical | ux / confirmed_mechanical / score 80 → IS in scope |
 | WT-5 | promote `--defer-publish` flag + promote-core include are wired | Structural grep on `commands/adams-review-promote.md` for `--defer-publish`, `defer_publish.*true`, `promote-core.md` |
 | WT-6 | decisions-log markdown template has required structural markers | Grep on walkthrough.md for `adams-review-walkthrough-v1`, `### Walkthrough decisions`, `#### Promoted/Skipped/Stopped` |
 
@@ -351,13 +351,13 @@ Post-execution once-over re-reads the extracted `promote-core.md` against the or
 
 ## 18. Pre-existing bug surfaced during execution
 
-The once-over caught that promote's `confirmed_auto` + `curr_hc == null` precondition was a blanket no-op ("already confirmed_auto by validator; no-op"). The bug predates this stage (present in the original `/adams-review-promote` since commit de54b4b) but silently broke promoting two classes of findings:
+The once-over caught that promote's `confirmed_mechanical` + `curr_hc == null` precondition was a blanket no-op ("already confirmed_mechanical by validator; no-op"). The bug predates this stage (present in the original `/adams-review-promote` since commit de54b4b) but silently broke promoting two classes of findings:
 
-- **Light-lane `confirmed_auto`** (impact_type ∈ ux/policy/architecture) — fails the Phase 8 impact_type filter; needs `human_confirmation` to bypass (§27.6). This is the F017/F012/F013/F015/F019 class in the ray-finance session that motivated the walkthrough.
-- **Deep-lane `confirmed_auto` below the user's planned `/adams-review-fix` threshold** — fails the score gate; needs `human_confirmation` to bypass the score gate. Not specific to the walkthrough but still wrong.
+- **Light-lane `confirmed_mechanical`** (impact_type ∈ ux/policy/architecture) — fails the Phase 8 impact_type filter; needs `human_confirmation` to bypass (§27.6). This is the F017/F012/F013/F015/F019 class in the ray-finance session that motivated the walkthrough.
+- **Deep-lane `confirmed_mechanical` below the user's planned `/adams-review-fix` threshold** — fails the score gate; needs `human_confirmation` to bypass the score gate. Not specific to the walkthrough but still wrong.
 
 First fix attempt split the precondition row by `impact_type` (deep-lane → no-op; light-lane → proceed). That was still wrong because promote doesn't know the user's planned `/adams-review-fix` threshold — a deep-lane finding at score 55 is NOT eligible if the user runs fix at threshold 70, but my first-pass split would have declared it eligible and no-op'd the promote.
 
-Correct fix (landed): **always proceed** when `confirmed_auto` + `curr_hc == null`, regardless of impact_type or score. Always setting `human_confirmation` is strictly necessary in the two broken cases above and harmlessly redundant for deep-lane above-threshold findings (adds audit metadata; doesn't change behavior because Phase 8 would have picked it up either way).
+Correct fix (landed): **always proceed** when `confirmed_mechanical` + `curr_hc == null`, regardless of impact_type or score. Always setting `human_confirmation` is strictly necessary in the two broken cases above and harmlessly redundant for deep-lane above-threshold findings (adds audit metadata; doesn't change behavior because Phase 8 would have picked it up either way).
 
-Applied to `commands/_shared/promote-core.md` step 4 + DESIGN §27.2. Smoke assertion WT-0 guards against regression: checks the "Proceed" verdict is present on the row AND the old "already confirmed_auto by validator; no-op" text is absent.
+Applied to `commands/_shared/promote-core.md` step 4 + DESIGN §27.2. Smoke assertion WT-0 guards against regression: checks the "Proceed" verdict is present on the row AND the old "already confirmed_mechanical by validator; no-op" text is absent.

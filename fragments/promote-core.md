@@ -75,28 +75,28 @@ both the integer and null cases via `--argjson`).
 
 | `curr_disp` | Additional condition | Action |
 |---|---|---|
-| `confirmed_auto` | `curr_hc != null` | Exit 0 with: "F$N already promoted by @$(jq -r '.reviewer' <<<"$curr_hc") on $(jq -r '.ts' <<<"$curr_hc"); no-op." — pulling reviewer and timestamp from the existing `human_confirmation` object (the bash `$reviewer` / `$ts` vars are not yet set in step 4). |
-| `confirmed_auto` | `curr_hc == null` | **Proceed.** Set `human_confirmation` to record the human override. May be strictly necessary (light-lane `confirmed_auto` fails the Phase 8 impact_type filter, deep-lane below-threshold `confirmed_auto` fails the score gate) or redundant-but-harmless audit (deep-lane above-threshold `confirmed_auto` was already eligible). Promote can't know the user's planned `/adamsreview:fix` threshold, so always proceed. |
+| `confirmed_mechanical` | `curr_hc != null` | Exit 0 with: "F$N already promoted by @$(jq -r '.reviewer' <<<"$curr_hc") on $(jq -r '.ts' <<<"$curr_hc"); no-op." — pulling reviewer and timestamp from the existing `human_confirmation` object (the bash `$reviewer` / `$ts` vars are not yet set in step 4). |
+| `confirmed_mechanical` | `curr_hc == null` | **Proceed.** Set `human_confirmation` to record the human override. May be strictly necessary (light-lane `confirmed_mechanical` fails the Phase 8 impact_type filter, deep-lane below-threshold `confirmed_mechanical` fails the score gate) or redundant-but-harmless audit (deep-lane above-threshold `confirmed_mechanical` was already eligible). Promote can't know the user's planned `/adamsreview:fix` threshold, so always proceed. |
 | `resolved` | — | Exit 1: "F$N is resolved (fix already ran); cannot promote." |
 | `disproven` | `force == false` | Exit 1: "F$N was disproven by Phase 4 (score=$curr_score). Validator found positive evidence this isn't a real issue. Re-run with --force to override." |
-| `disproven` | `force == true` | Proceed with a warning line in trace.md: `disproven→confirmed_auto via --force`. |
+| `disproven` | `force == true` | Proceed with a warning line in trace.md: `disproven→confirmed_mechanical via --force`. |
 | `uncertain`, `below_gate`, `pre_existing_report`, `confirmed_manual`, `confirmed_report`, `pending_validation`, `partial`, `regression` | — | Proceed. |
 
 For each exit-1 case, print a clear user message AND emit a one-line
 `## promote (<ts>) — rejected` block to `trace.md` so rejections are
 auditable.
 
-**Note on the `confirmed_auto` + `curr_hc == null` row.** Previously a
-blanket no-op ("already confirmed_auto by validator"). That was correct
+**Note on the `confirmed_mechanical` + `curr_hc == null` row.** Previously a
+blanket no-op ("already confirmed_mechanical by validator"). That was correct
 only when the finding would also pass the §13.1 eligibility gate at
 the threshold the user plans to fix at — which promote can't know.
 Examples where the old no-op silently broke promote:
 
-- Light-lane `confirmed_auto` (impact_type ∈ ux/policy/architecture) —
+- Light-lane `confirmed_mechanical` (impact_type ∈ ux/policy/architecture) —
   fails the Phase 8 impact_type filter; needs `human_confirmation` to
   bypass (§27.6). This is the case `/adamsreview:walkthrough`
   exists to address.
-- Deep-lane `confirmed_auto` below the user's planned threshold — the
+- Deep-lane `confirmed_mechanical` below the user's planned threshold — the
   user may run `/adamsreview:fix 70` on a finding scored 55, which
   fails the score gate; needs `human_confirmation` to bypass the
   score gate.
@@ -196,7 +196,7 @@ write. The helper enforces `is_actionable` coupling automatically:
 artifact-patch.py \
     --path "$artifact_path" \
     --finding-id "$finding_id" \
-    --set disposition=confirmed_auto \
+    --set disposition=confirmed_mechanical \
     --set actionability=auto_fixable \
     --set-json "human_confirmation=@$hc_tmp"
 rm -f "$hc_tmp"

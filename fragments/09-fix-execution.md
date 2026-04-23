@@ -23,7 +23,7 @@ below must mirror into the walkthrough's scope jq.
 eligible_finding_ids=$(jq -r --argjson thr "$threshold" '
     [.findings[]
      | select(.current_state == "open")
-     | select(.disposition == "confirmed_auto" or .disposition == "partial" or .disposition == "regression")
+     | select(.disposition == "confirmed_mechanical" or .disposition == "partial" or .disposition == "regression")
      | select(
          (.human_confirmation != null)
          or (
@@ -43,7 +43,7 @@ qualifies). Also capture counts for trace:
 eligible_count=$(jq -r --argjson thr "$threshold" '
     [.findings[]
      | select(.current_state == "open")
-     | select(.disposition == "confirmed_auto" or .disposition == "partial" or .disposition == "regression")
+     | select(.disposition == "confirmed_mechanical" or .disposition == "partial" or .disposition == "regression")
      | select(
          (.human_confirmation != null)
          or (

@@ -172,14 +172,14 @@ def is_append_only(old_list, new_list):
 
 # ----- Dispositions / state coupling (DESIGN §5.2.1, §21.2) --------------
 
-ACTIONABLE_DISPOSITIONS = frozenset({"confirmed_auto", "partial", "regression"})
+ACTIONABLE_DISPOSITIONS = frozenset({"confirmed_mechanical", "partial", "regression"})
 
 DISPOSITION_VALUES = (
     "below_gate",
     "pending_validation",
     "disproven",
     "uncertain",
-    "confirmed_auto",
+    "confirmed_mechanical",
     "confirmed_manual",
     "confirmed_report",
     "pre_existing_report",
@@ -199,7 +199,7 @@ ALLOWED_TRANSITIONS = {
 
 
 def derive_is_actionable(disposition):
-    """True iff disposition ∈ {confirmed_auto, partial, regression}."""
+    """True iff disposition ∈ {confirmed_mechanical, partial, regression}."""
     return disposition in ACTIONABLE_DISPOSITIONS
 
 

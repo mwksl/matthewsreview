@@ -10,7 +10,7 @@ Build repo for five personal Claude Code slash commands, packaged as a plugin (`
 
 - **`/adamsreview:review`** — multi-lens code review of a branch or PR (Phases 0–6).
 - **`/adamsreview:add`** — inject externally-sourced findings (cloud `/ultrareview` paste, Opus once-over, manual finds, etc.) into the most recent review's existing artifact. Free-form paste mode dispatches a Sonnet normalizer; structured `--file/--line/--claim` mode skips the normalizer; one Sonnet dedup pass against existing findings; Phase 4 validation lane-aware (Opus deep / Sonnet light) without Wave 2; re-renders + re-publishes to the existing PR comment.
-- **`/adamsreview:walkthrough`** — interactive driver that walks the reviewer through findings `/adamsreview:fix` would skip. Preflight offers a two-tier scope choice (default **Qualifying** — excludes Phase-3-demoted `below_gate`; **Full skip set** adds them back). `pre_existing_report` findings are always excluded from both walk tiers and routed exclusively to the end-of-run issue-filing phase (one-by-one draft/confirm/edit flow that calls `gh issue create`). Per-finding Sonnet briefing with an "Edit the fix hint" override path; for `confirmed_manual` / `confirmed_report` the briefer proposes best-effort hints. Closes the light-lane `confirmed_auto` gap where the default Phase 8 lane filter skips mechanically-fixable ux/policy findings.
+- **`/adamsreview:walkthrough`** — interactive driver that walks the reviewer through findings `/adamsreview:fix` would skip. Preflight offers a two-tier scope choice (default **Qualifying** — excludes Phase-3-demoted `below_gate`; **Full skip set** adds them back). `pre_existing_report` findings are always excluded from both walk tiers and routed exclusively to the end-of-run issue-filing phase (one-by-one draft/confirm/edit flow that calls `gh issue create`). Per-finding Sonnet briefing with an "Edit the fix hint" override path; for `confirmed_manual` / `confirmed_report` the briefer proposes best-effort hints. Closes the light-lane `confirmed_mechanical` gap where the default Phase 8 lane filter skips mechanically-fixable ux/policy findings.
 - **`/adamsreview:fix`** — automated fix loop for auto-fixable findings (Phases 7–9).
 - **`/adamsreview:promote`** — human override that promotes a single finding to auto-fixable, bypassing the Phase 8 impact_type lane filter and score threshold. Metadata-only; run `/adamsreview:fix` afterwards to apply. Used internally by `/adamsreview:walkthrough` via `fragments/promote-core.md` + `--defer-publish`.
 
@@ -128,7 +128,7 @@ Any other transition is rejected. Leftover `attempted` on a fresh `/adamsreview:
 | `pending_validation` | Gate-in parking; awaiting Phase 4 | `open` | `false` | Phase 3 |
 | `disproven` | `score_phase4 < 45` | `open` | `false` | Phase 4 |
 | `uncertain` | `score_phase4 45–59` | `open` | `false` | Phase 4 |
-| `confirmed_auto` | `score_phase4 ≥ 60`, deep lane, `actionability == auto_fixable` | `open` | `true` | Phase 4 |
+| `confirmed_mechanical` | `score_phase4 ≥ 60`, deep lane, `actionability == auto_fixable` | `open` | `true` | Phase 4 |
 | `confirmed_manual` | `score_phase4 ≥ 60`, `actionability == manual` | `open` | `false` | Phase 4 |
 | `confirmed_report` | `score_phase4 ≥ 60`, `actionability == report_only` | `open` | `false` | Phase 4 |
 | `pre_existing_report` | `origin == pre_existing` AND `origin_confidence == high` (normative override, regardless of score) | `open` | `false` | Phase 1 / re-asserted Phase 4 |
@@ -138,7 +138,7 @@ Any other transition is rejected. Leftover `attempted` on a fresh `/adamsreview:
 
 **Invariants** (enforced by writers):
 
-- `is_actionable` is derived: `true` iff `disposition ∈ {confirmed_auto, partial, regression}`. Never set it directly in conflict with `disposition`.
+- `is_actionable` is derived: `true` iff `disposition ∈ {confirmed_mechanical, partial, regression}`. Never set it directly in conflict with `disposition`.
 - `current_state == resolved` ⇔ `disposition == resolved`.
 - `human_confirmation` is absent/null unless `/adamsreview:promote` has run. Present-and-non-null is a Phase 8 bypass of both the lane filter and the threshold (see Score gates below). Promotion never mutates `score_phase4` — the validator's honest score is preserved for audit.
 
@@ -169,7 +169,7 @@ score_phase3 >= 45                           → advance to Phase 4
 score_phase4 < 45    → disposition: disproven,  is_actionable: false
 score_phase4 45–59   → disposition: uncertain,  is_actionable: false
 score_phase4 >= 60   → disposition depends on actionability set by validator:
-                         auto_fixable  → confirmed_auto   (is_actionable: true)
+                         auto_fixable  → confirmed_mechanical   (is_actionable: true)
                          manual        → confirmed_manual (is_actionable: false)
                          report_only   → confirmed_report (is_actionable: false)
                        confirmed_strength: "moderate" (60–74) or "strong" (75+)
@@ -188,7 +188,7 @@ regression  → disposition: regression, current_state: open   (retry-eligible;
 
 ```
 current_state == open
-  AND disposition ∈ {confirmed_auto, partial, regression}
+  AND disposition ∈ {confirmed_mechanical, partial, regression}
   AND (
     human_confirmation != null                                      // promote bypass
     OR (
@@ -204,14 +204,14 @@ current_state == open
 
 - **Phase 3 scoring gate (45)** — the threshold that decides which candidates enter Phase 4 validation. Candidates below it get `disposition=below_gate` and carry no `score_phase4`.
 - **Phase 4 confirmation gate (45/60/75)** — the thresholds that map `score_phase4` into `disproven` / `uncertain` / `confirmed_*` dispositions.
-- **Phase 8 fix gate (default 60)** — the composite gate governing `/adamsreview:fix`: disposition ∈ {confirmed_auto, partial, regression} **AND** deep lane **AND** `score_phase4 ≥ threshold`, with `human_confirmation` as the human-override bypass.
+- **Phase 8 fix gate (default 60)** — the composite gate governing `/adamsreview:fix`: disposition ∈ {confirmed_mechanical, partial, regression} **AND** deep lane **AND** `score_phase4 ≥ threshold`, with `human_confirmation` as the human-override bypass.
 
 `below_gate` is a *disposition name* (Phase 3), not a threshold. `/adamsreview:walkthrough` at its default **Qualifying** scope excludes `below_gate` findings because Phase 3 already judged them low-impact × low-confidence; the **Full skip set** scope includes them when a reviewer wants to sanity-check what Phase 3 demoted.
 
 ## Lanes
 
-- **Deep lane** (correctness, security): Phase 4a Opus per candidate with blast-radius tracing and a comprehensive fix proposal; passes through Phase 5 cross-cutting review. Phase 8 processes `confirmed_auto` findings here by default.
-- **Light lane** (ux, policy, architecture): Phase 4b Sonnet confirmation, report-first by default. Phase 8's lane filter excludes light-lane `confirmed_auto` unless `human_confirmation != null` (set by promote or walkthrough).
+- **Deep lane** (correctness, security): Phase 4a Opus per candidate with blast-radius tracing and a comprehensive fix proposal; passes through Phase 5 cross-cutting review. Phase 8 processes `confirmed_mechanical` findings here by default.
+- **Light lane** (ux, policy, architecture): Phase 4b Sonnet confirmation, report-first by default. Phase 8's lane filter excludes light-lane `confirmed_mechanical` unless `human_confirmation != null` (set by promote or walkthrough).
 
 That asymmetric default is what `/adamsreview:walkthrough` exists to close — the walkthrough scope is every finding the Phase 8 filter would skip at the current threshold.
 

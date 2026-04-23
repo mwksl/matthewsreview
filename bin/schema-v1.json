@@ -125,7 +125,7 @@
         "pending_validation",
         "disproven",
         "uncertain",
-        "confirmed_auto",
+        "confirmed_mechanical",
         "confirmed_manual",
         "confirmed_report",
         "pre_existing_report",

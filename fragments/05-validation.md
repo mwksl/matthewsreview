@@ -221,10 +221,10 @@ sees a single summary line instead of N per-finding prose blocks.
 | `null` | parse failure | `uncertain` | false | reason default: "uncertain (Phase 4 inconclusive)" |
 | `< 45` | disproven | `disproven` | false | reason default: "disproven by Phase 4" |
 | `45-59` | uncertain | `uncertain` | false | reason default: "uncertain (Phase 4 inconclusive)" |
-| `60-74` AND `actionability=auto_fixable` | | `confirmed_auto` | true | confirmed_strength: moderate |
+| `60-74` AND `actionability=auto_fixable` | | `confirmed_mechanical` | true | confirmed_strength: moderate |
 | `60-74` AND `actionability=manual` | | `confirmed_manual` | false | confirmed_strength: moderate |
 | `60-74` AND `actionability=report_only` | | `confirmed_report` | false | confirmed_strength: moderate |
-| `75+` AND `actionability=auto_fixable` | | `confirmed_auto` | true | confirmed_strength: strong |
+| `75+` AND `actionability=auto_fixable` | | `confirmed_mechanical` | true | confirmed_strength: strong |
 | `75+` AND `actionability=manual` | | `confirmed_manual` | false | confirmed_strength: strong |
 | `75+` AND `actionability=report_only` | | `confirmed_report` | false | confirmed_strength: strong |
 
@@ -233,7 +233,7 @@ automatically: derivation runs off `score_phase4 + actionability`, so
 a validator returning `decision: "confirmed", score_phase4: 40` routes
 to `disproven` via the score row; `decision: "disproven",
 score_phase4: 70, actionability: "auto_fixable"` routes to
-`confirmed_auto`. Validators shouldn't emit such mismatches, but when
+`confirmed_mechanical`. Validators shouldn't emit such mismatches, but when
 they do the structured fields win. Include the raw `decision` field
 in each tuple for audit-trail legibility — it's accepted by the helper
 but not authoritative.
@@ -319,7 +319,7 @@ mkdir -p "$scratch"
 out=$(artifact-patch.py \
         --path "$artifact_path" \
         --apply-decisions "@$scratch/phase4-wave1-decisions.json")
-echo "$out"  # e.g. "applied 18 decisions (confirmed_auto=4, confirmed_manual=1, confirmed_report=0, uncertain=3, disproven=10)"
+echo "$out"  # e.g. "applied 18 decisions (confirmed_mechanical=4, confirmed_manual=1, confirmed_report=0, uncertain=3, disproven=10)"
 ```
 
 **On score parse failure** (sub-agent returned unparseable JSON even
@@ -492,7 +492,7 @@ log-phase.sh \
     --argjson elapsed "$phase_4_elapsed" \
     --argjson by_disp "$by_disp" \
     --argjson total_open "$(artifact-read.sh --path "$artifact_path" --filter '[.findings[] | select(.current_state == "open")] | length')" \
-    '{name:"validation", elapsed_sec:$elapsed, counts_by_state:{open:$total_open}, counts_by_disposition:$by_disp, delta:"<summarize e.g. +9 confirmed_auto, -5 disproven>"}')"
+    '{name:"validation", elapsed_sec:$elapsed, counts_by_state:{open:$total_open}, counts_by_disposition:$by_disp, delta:"<summarize e.g. +9 confirmed_mechanical, -5 disproven>"}')"
 ```
 
 ### Working-set delta after Phase 4

@@ -11,7 +11,7 @@ Convert the `adams-review` slash-command suite into a Claude Code plugin distrib
 1. **This plan** (`plugin-conversion-execution.md`) — what we're going to do.
 2. **`plugin-conversion.md`** — the decisions doc. Every D-ID citation in this plan (D1, D5, D17, etc.) resolves here. Without it, you can't tell *why* one strategy was picked over alternatives.
 3. **`plugin-conversion-checklist.md`** — the original third-party audit input. Tells you what universe of considerations was on the table, so you can spot what was dropped.
-4. **`CLAUDE.md`** — the codebase guide. Defines the vocabulary this plan uses without explaining (`disposition`, `human_confirmation`, `confirmed_auto`, `fix_groups`, `trivial_mode`, deep/light lanes, helper index, operational rules).
+4. **`CLAUDE.md`** — the codebase guide. Defines the vocabulary this plan uses without explaining (`disposition`, `human_confirmation`, `confirmed_mechanical`, `fix_groups`, `trivial_mode`, deep/light lanes, helper index, operational rules).
 
 ### Helpful for deep critique
 
@@ -247,7 +247,7 @@ Two documented local-dev paths, each used in a specific sub-phase below:
   - [ ] `bin/` scripts resolved (no "command not found" from helper invocations).
   - [ ] `!include promote-core.md` expanded (the body of promote-core ran).
   - [ ] AskUserQuestion fired (or was correctly skipped because `--reason` was passed).
-  - [ ] `artifact.json` was patched: re-read the finding and confirm `human_confirmation` is populated, `disposition: confirmed_auto`.
+  - [ ] `artifact.json` was patched: re-read the finding and confirm `human_confirmation` is populated, `disposition: confirmed_mechanical`.
   - [ ] No `gh api` call was made (defer-publish honored — `promote_publish_failed` absent from trace.md).
 
 ### 1b.4 Test full publish against throwaway test PR
@@ -311,7 +311,7 @@ Fragments reference helpers by absolute path AND reference each other by `!cat`.
 - [ ] Run `bash test/smoke.sh` after porting all four. Same assertion count as baseline. (Phase 3's install-script assertion fix hasn't happened yet — but Phase 1a already scrubbed fragment paths, so smoke should still pass if install.sh/uninstall.sh still exist.)
 - [ ] In a fresh Claude Code session, invoke each command at least once against a real target:
   - [ ] `/adams-review:review` against a docs-only PR so `trivial_mode` auto-detects and the run skips Phases 1–5 (cheapest smoke). **Note**: this does NOT exercise the 6-way fan-out — the non-trivial exercise lives in Phase 6.
-  - [ ] `/adams-review:fix` against an artifact with at least one `confirmed_auto` finding.
+  - [ ] `/adams-review:fix` against an artifact with at least one `confirmed_mechanical` finding.
   - [ ] `/adams-review:walkthrough` against an artifact with at least one walkable finding.
   - [ ] `/adams-review:add` in structured mode (`--file path --line N --claim "..."`) against an existing artifact.
 

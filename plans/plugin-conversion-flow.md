@@ -82,15 +82,15 @@ flowchart TD
         G3 -- yes --> P4["Phase 4 Validation<br/>PARALLEL FAN-OUT per candidate<br/>4a Opus deep (correctness, sec)<br/>4b Sonnet light (ux, policy, arch)"]:::phase
 
         P4 --> G4{"score_phase4 +<br/>actionability?"}
-        G4 -- "≥60 auto, deep" --> CA["confirmed_auto<br/>is_actionable=true"]:::stateNode
-        G4 -- "≥60 auto, light" --> CAL["confirmed_auto (light)<br/>Phase 8 skips unless promoted"]:::stateNode
+        G4 -- "≥60 auto, deep" --> CA["confirmed_mechanical<br/>is_actionable=true"]:::stateNode
+        G4 -- "≥60 auto, light" --> CAL["confirmed_mechanical (light)<br/>Phase 8 skips unless promoted"]:::stateNode
         G4 -- "≥60 manual" --> CM["confirmed_manual"]:::stateNode
         G4 -- "≥60 report" --> CR["confirmed_report"]:::stateNode
         G4 -- "45–59" --> UNC["uncertain"]:::stateNode
         G4 -- "< 45" --> DIS["disproven"]:::stateNode
         G4 -. origin=pre_existing, high .-> PER["pre_existing_report<br/>normative override"]:::stateNode
 
-        CA --> P5["Phase 5 Cross-cutting<br/>one deep-lane Opus<br/>(confirmed_auto deep only)"]:::phase
+        CA --> P5["Phase 5 Cross-cutting<br/>one deep-lane Opus<br/>(confirmed_mechanical deep only)"]:::phase
         P5 --> FIN
         CAL --> FIN
         CM --> FIN
@@ -213,7 +213,7 @@ flowchart LR
 
     P4V -- "<45" --> DIS["disproven"]:::stateNode
     P4V -- "45–59" --> UNC["uncertain"]:::stateNode
-    P4V -- "≥60, auto_fixable" --> CA["confirmed_auto<br/>is_actionable=TRUE"]:::active
+    P4V -- "≥60, auto_fixable" --> CA["confirmed_mechanical<br/>is_actionable=TRUE"]:::active
     P4V -- "≥60, manual" --> CM["confirmed_manual"]:::stateNode
     P4V -- "≥60, report_only" --> CR["confirmed_report"]:::stateNode
 
@@ -372,7 +372,7 @@ re-walk of the architecture, and if anything here is going to change,
 
 ### Behavioral — architectural asymmetries worth a sanity check
 
-5. **Light-lane asymmetry.** Phase 4b light-lane `confirmed_auto` findings
+5. **Light-lane asymmetry.** Phase 4b light-lane `confirmed_mechanical` findings
    are excluded from Phase 8 by the lane filter, and
    `/adams-review:walkthrough` exists specifically to close that gap. Most
    confusing shape in the pipeline. If you've gained confidence in Phase

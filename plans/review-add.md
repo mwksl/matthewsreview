@@ -157,7 +157,7 @@ Body steps:
 12. **User-visible summary.** Print a concise block:
     ```
     Added N new findings to rev_<id>:
-      F037 confirmed_auto    correctness  src/foo.ts:142 — early-return skips audit-log
+      F037 confirmed_mechanical    correctness  src/foo.ts:142 — early-return skips audit-log
       F038 uncertain         correctness  src/bar.ts:88  — possible race in cache invalidation
       F039 disproven         correctness  src/baz.ts:12  — (validator found positive evidence; not a real issue)
     Deduplicated 1 candidate against existing F003 (sources merged).
@@ -297,12 +297,12 @@ normalizer_emitted: 4
 dedup_matched: 1 (new#2 → F003 sources merged)
 surviving: 3
 new_finding_ids: F037, F038, F039
-phase_4_dispositions: F037=confirmed_auto F038=uncertain F039=disproven
+phase_4_dispositions: F037=confirmed_mechanical F038=uncertain F039=disproven
 ```
 
 The raw paste body is NOT logged in full (could be large; could contain sensitive context). Just length + the normalized candidates. If the user wants the original input recorded, they include it in the trace themselves.
 
-`phases.jsonl` record: `{name: "add", elapsed_sec: N, counts_by_disposition: {confirmed_auto: 1, uncertain: 1, disproven: 1}, delta: "+3 findings"}`.
+`phases.jsonl` record: `{name: "add", elapsed_sec: N, counts_by_disposition: {confirmed_mechanical: 1, uncertain: 1, disproven: 1}, delta: "+3 findings"}`.
 
 ## 11. Edge cases / preconditions
 
@@ -318,7 +318,7 @@ The raw paste body is NOT logged in full (could be large; could contain sensitiv
 | Paste contains a file path not in `reviewed_files_all` | Allow the candidate through with the user-supplied path. The validator will surface the discrepancy. (Mirrors Phase 1.5's permissive behavior.) |
 | `cli_impact` is not in the enum | Error-as-prompt with the valid values. |
 | Phase 4 validator returns unparseable JSON | Helper routes that finding to `uncertain` per §4.4 default; user sees it as `uncertain` in the summary. |
-| User runs `/adams-review-add` against an artifact that already had `/adams-review-fix` run on it | Allowed. New findings get fresh IDs after the highest existing one (which may include resolved ones). They go through Phase 4 normally; if `confirmed_auto`, the next `/adams-review-fix` picks them up. |
+| User runs `/adams-review-add` against an artifact that already had `/adams-review-fix` run on it | Allowed. New findings get fresh IDs after the highest existing one (which may include resolved ones). They go through Phase 4 normally; if `confirmed_mechanical`, the next `/adams-review-fix` picks them up. |
 
 ## 12. Smoke assertions (test/smoke.sh)
 
@@ -329,7 +329,7 @@ New assertion family `RA-*` (review-add):
 - `RA-3` leftover-`attempted` finding → hard abort with §3.7 message; no artifact mutation.
 - `RA-4` empty input → error-as-prompt mentioning both invocation shapes; no artifact mutation.
 - `RA-5` dedup matches a new candidate against existing F### → no new finding added; existing finding's `sources[]` gains the new entry.
-- `RA-6` Phase 4 confirmed_auto disposition → finding is eligible for `/adams-review-fix` at default threshold.
+- `RA-6` Phase 4 confirmed_mechanical disposition → finding is eligible for `/adams-review-fix` at default threshold.
 - `RA-7` PR-mode publish PATCHes the existing comment_id (no second comment posted).
 - `RA-8` `assign-finding-ids.sh --start-from F037` emits `F037, F038, ...` (new helper assertion).
 
@@ -355,7 +355,7 @@ Helper index needs no changes (no new helpers; only an additive flag on `assign-
 ## 14. Open questions / risks
 
 - **Q: Should the dedup pass also offer to merge two new candidates against each other** (e.g., a paste that lists the same bug twice in different words)? Currently §3.3 explicitly only does new-vs-existing. Probably fine — a conservative second pass adds cost without much value at typical input sizes (1–5 candidates).
-- **Q: Should `/adams-review-add` invoke `/adams-review-fix` automatically when all new findings land as `confirmed_auto`?** Decision: no, mirror promote's "metadata only" philosophy. The user runs `/adams-review-fix` explicitly.
+- **Q: Should `/adams-review-add` invoke `/adams-review-fix` automatically when all new findings land as `confirmed_mechanical`?** Decision: no, mirror promote's "metadata only" philosophy. The user runs `/adams-review-fix` explicitly.
 - **R: Renderer handling of new sources strings.** Need to spot-check `artifact-render.py` during implementation that nothing keys off a closed source list. Existing `external-pr:*`, `codex`, `coderabbit` precedent suggests it doesn't, but worth verifying before claiming "no renderer change."
 - **R: Token cost on a large paste.** A 5000-token paste through the normalizer + 5 deep-lane Opus validations is ~50k tokens. Acceptable but worth noting in the user-visible "next steps" doc.
 - **R: Phase 5 cross-cutting drift.** Skipping Phase 5 means added findings never appear in `cross_cutting_groups`. If a user adds 3 findings that obviously share a root cause with 2 existing findings, the renderer won't surface the grouping. Acceptable for v1 — documented limitation; future flag `--rerun-cross-cutting` could be added if it becomes a pain point.
