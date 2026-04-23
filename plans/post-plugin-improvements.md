@@ -157,9 +157,20 @@ Fresh session: the orchestrator appends one entry per project as it goes. Keep e
 
 ### Pre-flight record
 
-- BASELINE_ASSERTIONS: <fill in>
-- BASELINE_SHA: <fill in>
-- Session start: <ISO-8601>
+- BASELINE_ASSERTIONS: 204
+- BASELINE_SHA: e3b757349ba14f295acf02cfb3b264af332630fc
+- Session start: 2026-04-23T01:11:13Z
+- Backlog-annotation commit: b7b63b5
+
+### Project A — Orchestrator-tokens display cleanup
+- Status: COMPLETE
+- Started: 2026-04-23T01:11:13Z
+- Ended: 2026-04-23T01:18:30Z
+- Builder iterations: 1
+- Smoke assertions: baseline 204 → post 208
+- Commit: <filled below after commit>
+- Summary: Narrowed `bin/artifact-render.py`'s orchestrator-tokens header to `<output> output / <input> input across <N> turns`; propagated the narrowing to the `Cumulative orchestrator spend:` lines in `commands/add.md` + `commands/walkthrough.md` (both template + jq builder); updated `CLAUDE.md` pipeline-shape prose; schema retains all four counters. 4 new OTR-* assertions.
+- Verifier findings: PASS first-try. Manual sum of `cache_read_input_tokens` over the real-run transcript (`rev_01KPVDH50WY7JSTEXFWYDNGQNH`, 3 sessions) matched helper exactly at 53,046,666 — helper is sound, no fix needed; the 53M/324-turn number is genuine (three same-cwd sessions within window).
 
 ---
 

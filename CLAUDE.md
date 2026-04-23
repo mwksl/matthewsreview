@@ -81,8 +81,12 @@ the full review → fix / add / walkthrough arc:
 
 The two are non-overlapping (sub-agent internal API calls vs.
 main-session turns). Four separate orchestrator counters — fresh
-input / output / cache-read / cache-creation — are preserved because
-their $/token pricing differs by roughly an order of magnitude.
+input / output / cache-read / cache-creation — are preserved in the
+artifact because their $/token pricing differs by roughly an order of
+magnitude, but only two (output + fresh input) surface in the rendered
+PR-comment line: cache-read and cache-creation are prompt-cache
+plumbing, not user-facing signal. All four remain in
+`artifact.orchestrator_tokens` for offline cost analysis.
 
 `/adamsreview:walkthrough` re-tallies both before §6.1's re-publish;
 issue-filer agents dispatched in §6.5 (and the orchestrator turns that

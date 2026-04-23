@@ -888,7 +888,7 @@ Deduplicated K candidates against existing findings (sources merged):
   new#2 → F003   (skipped — same underlying issue)
 
 Cumulative sub-agent spend: <total> tokens across <invs> invocations.
-Cumulative orchestrator spend: <cache_read> cache-read / <output> output / <cache_creation> cache-creation / <input> fresh input across <turns> turns.
+Cumulative orchestrator spend: <output> output / <input> input across <turns> turns.
 
 Next:
   - /adamsreview:fix             apply newly auto-eligible findings (deep-lane confirmed_auto)
@@ -921,7 +921,7 @@ subagent_token_line=$(jq -r '
 
 orchestrator_token_line=$(jq -r '
     if (.orchestrator_tokens.turn_count // null) != null
-    then "Cumulative orchestrator spend: \(.orchestrator_tokens.cache_read) cache-read / \(.orchestrator_tokens.total_output) output / \(.orchestrator_tokens.cache_creation) cache-creation / \(.orchestrator_tokens.total_input) fresh input across \(.orchestrator_tokens.turn_count) turns."
+    then "Cumulative orchestrator spend: \(.orchestrator_tokens.total_output) output / \(.orchestrator_tokens.total_input) input across \(.orchestrator_tokens.turn_count) turns."
     else empty end
 ' "$artifact_path")
 ```

@@ -167,12 +167,14 @@ def render_header(artifact):
     orch = artifact.get("orchestrator_tokens") or {}
     turn_count = orch.get("turn_count")
     if turn_count is not None:
+        # Render shows only the user-facing levers — output and fresh input.
+        # cache_read and cache_creation stay in the artifact for cost
+        # analysis but are prompt-cache plumbing, not signal in the PR
+        # comment. See CLAUDE.md §"Pipeline shape" for the rationale.
         lines.append(
             "**Orchestrator tokens:** "
-            f"{thousands(orch.get('cache_read', 0))} cache-read / "
             f"{thousands(orch.get('total_output', 0))} output / "
-            f"{thousands(orch.get('cache_creation', 0))} cache-creation / "
-            f"{thousands(orch.get('total_input', 0))} fresh input "
+            f"{thousands(orch.get('total_input', 0))} input "
             f"across {thousands(turn_count)} turns"
         )
     if artifact.get("trivial_mode"):

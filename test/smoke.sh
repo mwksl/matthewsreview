@@ -1167,6 +1167,62 @@ else
     fail "RH-7: pre-§13.10 artifact should not render freshness; saw: $(echo "$md" | grep 'Base freshness')"
 fi
 
+# --- OTR-* : orchestrator-tokens render line shape (post-plugin-improvements
+# Project A). The header line used to display four counters (cache-read /
+# output / cache-creation / fresh input) which buried the signal; the four
+# values stay in the artifact for cost analysis, but the rendered line now
+# shows only the user-facing levers (output / input across N turns). See
+# CLAUDE.md §"Pipeline shape" for the rationale.
+
+OTR_DIR="$WORK/render-orch"
+mkdir -p "$OTR_DIR"
+"$TOOLS/artifact-patch.py" --init "@$FIX/artifact-seed.json" --path "$OTR_DIR/art.json" >/dev/null
+"$TOOLS/artifact-patch.py" --path "$OTR_DIR/art.json" --set-json \
+    'orchestrator_tokens={"total_input":484,"total_output":566990,"cache_read":53046666,"cache_creation":2134808,"turn_count":324,"sessions":[]}' \
+    >/dev/null
+md=$("$TOOLS/artifact-render.py" --input "$OTR_DIR/art.json")
+
+# Assertion OTR-1: rendered line is the simplified `<output> output /
+# <input> input across <N> turns` shape. Exact, because this string is the
+# whole point of the display-cleanup — regressions silently re-bury signal.
+expected_line='**Orchestrator tokens:** 566,990 output / 484 input across 324 turns'
+if echo "$md" | grep -qxF "$expected_line"; then
+    pass "OTR-1 (post-plugin-improvements A): rendered orchestrator-tokens line is '<output> output / <input> input across <N> turns'"
+else
+    fail "OTR-1: expected '$expected_line'; saw: $(echo "$md" | grep -F 'Orchestrator tokens:' || echo '(no Orchestrator tokens line)')"
+fi
+
+# Assertion OTR-2: cache-read and cache-creation must NOT appear on the
+# rendered header. The artifact still carries them (see schema-v1.json and
+# OT-* helper assertions below) — they just stay machine-facing.
+if echo "$md" | grep -F 'Orchestrator tokens:' | grep -Eq 'cache-read|cache-creation|fresh input'; then
+    fail "OTR-2: rendered header still leaks cache-read/cache-creation/'fresh input'; saw: $(echo "$md" | grep -F 'Orchestrator tokens:')"
+else
+    pass "OTR-2 (post-plugin-improvements A): cache-read/cache-creation/'fresh input' dropped from rendered header (still in artifact)"
+fi
+
+# Assertion OTR-3: all four counters still present in the stored artifact
+# — schema-v1.json still requires them; narrowing the display must not
+# collapse the internal capture.
+stored=$(jq -c '.orchestrator_tokens | {total_input, total_output, cache_read, cache_creation, turn_count}' "$OTR_DIR/art.json")
+expected_stored='{"total_input":484,"total_output":566990,"cache_read":53046666,"cache_creation":2134808,"turn_count":324}'
+if [[ "$stored" == "$expected_stored" ]]; then
+    pass "OTR-3 (post-plugin-improvements A): all four counters preserved in artifact.orchestrator_tokens after narrowed render"
+else
+    fail "OTR-3: artifact counters drifted after narrowed render; got $stored, expected $expected_stored"
+fi
+
+# Assertion OTR-4: render still guards on missing orchestrator_tokens
+# (pre-feature artifacts, interrupted runs) — the seed.json has no
+# orchestrator_tokens object, so the base $ART render from earlier
+# assertions shouldn't carry an Orchestrator line at all.
+md_base=$("$TOOLS/artifact-render.py" --input "$ART")
+if echo "$md_base" | grep -qF 'Orchestrator tokens:'; then
+    fail "OTR-4: pre-feature artifact (no orchestrator_tokens) should not render header line"
+else
+    pass "OTR-4 (post-plugin-improvements A): missing orchestrator_tokens still omits header line (backward compat)"
+fi
+
 # ------------------------------------------------------------------ Stage 2.7
 # assign-finding-ids.sh (§13.12) — deterministic source-priority sort +
 # monotonic F### assignment over pooled internal + external candidates.
