@@ -298,6 +298,34 @@ emit the result to `external_candidates` for the join step at
 01-detection.md step 1.5. Do NOT call `--add-finding` here (§13.12 —
 ids are assigned atomically at the join, not per-phase).
 
+**Parse-with-repair front-stop.** External-tool output (Codex CLI,
+CodeRabbit CLI, PR bot comments) is the messiest boundary in the
+pipeline — the normalizer is a Sonnet sub-agent that reads free-form
+Markdown/JSON and emits structured JSON, with the usual LLM failure
+modes (trailing commas, single quotes, ```json fences, unescaped
+newlines). Pipe the raw normalizer output through `parse-with-repair.py`
+before handing it to `jq` so the downstream schema guard sees canonical
+JSON:
+
+```bash
+normalizer_clean=$(printf '%s' "$normalizer_output" \
+    | parse-with-repair.py \
+        2> >(tee -a "$trace_log_path" >&2))
+
+if [[ -z "$normalizer_clean" ]]; then
+    # parse-with-repair exited non-zero — it already logged the
+    # error-as-prompt to $trace_log_path via the tee above. Drop the
+    # whole external pool to an empty array (§24.2: fail-loud,
+    # continue-pipeline). The one retry budget from the
+    # dispatch-pattern's step 3 should have already been spent upstream
+    # before reaching this helper; a second failure means the
+    # normalizer output is irrecoverable.
+    printf 'phase_1_5_normalizer_unparseable: dropping external candidates\n' \
+        >> "$trace_log_path"
+    external_candidates="[]"
+fi
+```
+
 **Schema guard for missing location info.** The normalizer prompt
 allows `file: null` / `line_range: null` for candidates whose body
 text didn't specify a location. Schema (`schema-v1.json`) requires
@@ -307,12 +335,14 @@ so the finding is still stored (Phase 2 dedup + Phase 4 validation may
 still match it against an internal finding with proper location):
 
 ```bash
-external_candidates=$(echo "$normalizer_output" | jq -c '
-  [ .[] | . + {
-      file:       (.file // "(unknown)"),
-      line_range: (.line_range // [1,1])
-    } ]
-')
+if [[ -n "$normalizer_clean" ]]; then
+    external_candidates=$(printf '%s' "$normalizer_clean" | jq -c '
+      [ .[] | . + {
+          file:       (.file // "(unknown)"),
+          line_range: (.line_range // [1,1])
+        } ]
+    ')
+fi
 ```
 
 Leave a one-line `trace.md` note per repaired candidate so the user

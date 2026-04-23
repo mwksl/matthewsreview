@@ -3585,6 +3585,242 @@ else
     fail "OT-6: filter let non-assistant lines through" "turns=$ot6_turns in=$ot6_in out=$ot6_out"
 fi
 
+# ------------------------------------------------------------------ Project F: LLM output normalization
+#
+# Three helpers attack three distinct LLM-output-shape problems:
+#   PR-* — parse-with-repair.py (tolerant JSON parse, foundation)
+#   VR-* — parse-validator-result.py (Phase 4 score/shape normalizer)
+#   SF-* — source-family-map.py (Phase 1 lens-family canonicalizer)
+# Plus PF-INT-* for fragment integration proof.
+
+# --- PR-* parse-with-repair.py
+
+# PR-1: trailing-comma input → repaired to valid JSON.
+pr1_out=$(echo '{"a": 1, "b": 2,}' | "$TOOLS/parse-with-repair.py" 2>&1)
+if [[ $? -eq 0 ]] && echo "$pr1_out" | jq -e '.a == 1 and .b == 2' >/dev/null; then
+    pass "PR-1: trailing-comma input repaired"
+else
+    fail "PR-1: trailing-comma repair failed" "$pr1_out"
+fi
+
+# PR-2: ```json ... ``` fence-wrapped input → fences stripped.
+pr2_out=$(printf '```json\n{"x": "y"}\n```\n' | "$TOOLS/parse-with-repair.py" 2>&1)
+if [[ $? -eq 0 ]] && echo "$pr2_out" | jq -e '.x == "y"' >/dev/null; then
+    pass 'PR-2: code-fence (```json) stripped'
+else
+    fail "PR-2: fence-strip failed" "$pr2_out"
+fi
+
+# PR-3: single-quoted strings → repaired.
+pr3_out=$(echo "{'a': 'hello'}" | "$TOOLS/parse-with-repair.py" 2>&1)
+if [[ $? -eq 0 ]] && echo "$pr3_out" | jq -e '.a == "hello"' >/dev/null; then
+    pass "PR-3: single-quoted strings repaired"
+else
+    fail "PR-3: single-quote repair failed" "$pr3_out"
+fi
+
+# PR-4: unrecoverable garbage → exit 1 with error-as-prompt.
+pr4_out=$(echo "not json at all" | "$TOOLS/parse-with-repair.py" 2>&1)
+pr4_exit=$?
+if [[ $pr4_exit -eq 1 ]] && echo "$pr4_out" | grep -qF "ERROR: could not parse"; then
+    pass "PR-4: unrecoverable input → exit 1 + error-as-prompt"
+else
+    fail "PR-4: expected exit 1 with ERROR line; exit=$pr4_exit" "$pr4_out"
+fi
+
+# PR-5: empty stdin → exit 1 (distinct from parse-failure exit 1 but same code).
+pr5_out=$(printf '' | "$TOOLS/parse-with-repair.py" 2>&1)
+if [[ $? -eq 1 ]] && echo "$pr5_out" | grep -qF "empty input on stdin"; then
+    pass "PR-5: empty stdin → exit 1 + specific error"
+else
+    fail "PR-5: empty-stdin handling" "$pr5_out"
+fi
+
+# --- VR-* parse-validator-result.py
+
+# VR-1: canonical shape — {score_phase4, actionability} passes through.
+vr1_out=$(echo '{"score_phase4": 72, "actionability": "auto_fixable", "decision": "confirmed"}' \
+    | "$TOOLS/parse-validator-result.py" --lane deep 2>&1)
+if [[ $? -eq 0 ]] \
+    && echo "$vr1_out" | jq -e '.score_phase4 == 72 and .actionability == "auto_fixable" and .confirmed_strength == "moderate"' >/dev/null; then
+    pass "VR-1: canonical {score_phase4,actionability} pass-through + strength derivation"
+else
+    fail "VR-1: canonical shape failed" "$vr1_out"
+fi
+
+# VR-2: nested shape — {score:{correctness:N}}.
+vr2_out=$(echo '{"score": {"correctness": 55}, "actionability": "manual"}' \
+    | "$TOOLS/parse-validator-result.py" --lane deep 2>&1)
+if [[ $? -eq 0 ]] \
+    && echo "$vr2_out" | jq -e '.score_phase4 == 55 and .actionability == "manual" and .confirmed_strength == "weak"' >/dev/null; then
+    pass "VR-2: nested score.correctness extracted"
+else
+    fail "VR-2: nested shape failed" "$vr2_out"
+fi
+
+# VR-3: 1-5 scale via overall_numeric.
+vr3_out=$(echo '{"overall_numeric": 3.5}' \
+    | "$TOOLS/parse-validator-result.py" --lane light 2>&1)
+if [[ $? -eq 0 ]] \
+    && echo "$vr3_out" | jq -e '.score_phase4 == 70 and (.notes | contains("scale_inferred"))' >/dev/null; then
+    pass "VR-3: 1-5 overall_numeric scaled (*20) + scale_inferred in notes"
+else
+    fail "VR-3: overall_numeric scaling failed" "$vr3_out"
+fi
+
+# VR-4: severity string maps to bucket.
+vr4_out=$(echo '{"severity": "medium", "actionability": "manual"}' \
+    | "$TOOLS/parse-validator-result.py" --lane light 2>&1)
+if [[ $? -eq 0 ]] \
+    && echo "$vr4_out" | jq -e '.score_phase4 == 60 and (.notes | contains("severity=medium"))' >/dev/null; then
+    pass "VR-4: severity=medium → 60 (scale_inferred noted)"
+else
+    fail "VR-4: severity mapping failed" "$vr4_out"
+fi
+
+# VR-5: ambiguous {score: 6} → heuristic 1-10 (*10).
+vr5_out=$(echo '{"score": 6}' \
+    | "$TOOLS/parse-validator-result.py" --lane light 2>&1)
+if [[ $? -eq 0 ]] \
+    && echo "$vr5_out" | jq -e '.score_phase4 == 60 and (.notes | contains("1-10"))' >/dev/null; then
+    pass "VR-5: ambiguous {score: 6} heuristic (1-10 *10)"
+else
+    fail "VR-5: ambiguous-score heuristic failed" "$vr5_out"
+fi
+
+# VR-6: malformed input → exit 2 (score unrecoverable).
+vr6_out=$(echo 'garbage' | "$TOOLS/parse-validator-result.py" --lane deep 2>&1)
+vr6_exit=$?
+if [[ $vr6_exit -eq 2 ]] && echo "$vr6_out" | grep -qF "ERROR:"; then
+    pass "VR-6: malformed input → exit 2 + error-as-prompt"
+else
+    fail "VR-6: expected exit 2 on malformed; got $vr6_exit" "$vr6_out"
+fi
+
+# VR-7: deep-lane validation_result passthrough.
+vr7_out=$(echo '{"score_phase4": 80, "actionability": "auto_fixable", "decision": "confirmed", "validation_result": {"evidence": ["e1"], "blast_radius": {}, "fix_proposal": {}, "verification_context": {}}}' \
+    | "$TOOLS/parse-validator-result.py" --lane deep 2>&1)
+if [[ $? -eq 0 ]] \
+    && echo "$vr7_out" | jq -e '.validation_result.evidence[0] == "e1" and .confirmed_strength == "strong"' >/dev/null; then
+    pass "VR-7: deep-lane validation_result passthrough + strong strength at 80"
+else
+    fail "VR-7: deep-lane passthrough failed" "$vr7_out"
+fi
+
+# --- SF-* source-family-map.py
+
+# SF-1: canonical family pass-through.
+sf1_out=$("$TOOLS/source-family-map.py" --input security-family 2>&1)
+if [[ $? -eq 0 ]] && [[ "$sf1_out" == "security-family" ]]; then
+    pass "SF-1: canonical family (security-family) pass-through"
+else
+    fail "SF-1: canonical pass-through failed" "$sf1_out"
+fi
+
+# SF-2: known drift case maps to canonical.
+sf2_out=$("$TOOLS/source-family-map.py" --input prompt-injection 2>&1)
+if [[ $? -eq 0 ]] && [[ "$sf2_out" == "security-family" ]]; then
+    pass "SF-2: drift prompt-injection → security-family"
+else
+    fail "SF-2: drift mapping failed" "$sf2_out"
+fi
+
+# SF-3: stale-line-ref → policy-family (different canonical target).
+sf3_out=$("$TOOLS/source-family-map.py" --input stale-line-ref 2>&1)
+if [[ $? -eq 0 ]] && [[ "$sf3_out" == "policy-family" ]]; then
+    pass "SF-3: drift stale-line-ref → policy-family"
+else
+    fail "SF-3: stale-line-ref mapping failed" "$sf3_out"
+fi
+
+# SF-4: unknown family → exit 3 + UNKNOWN_FAMILY on stderr.
+sf4_out=$("$TOOLS/source-family-map.py" --input completely-made-up 2>&1)
+sf4_exit=$?
+if [[ $sf4_exit -eq 3 ]] && echo "$sf4_out" | grep -qF "UNKNOWN_FAMILY: completely-made-up"; then
+    pass "SF-4: unknown family → exit 3 + UNKNOWN_FAMILY stderr"
+else
+    fail "SF-4: expected exit 3 with UNKNOWN_FAMILY; got $sf4_exit" "$sf4_out"
+fi
+
+# SF-5: external-add-family canonical pass-through (commands/add.md emits this).
+sf5_out=$("$TOOLS/source-family-map.py" --input external-add-family 2>&1)
+if [[ $? -eq 0 ]] && [[ "$sf5_out" == "external-add-family" ]]; then
+    pass "SF-5: canonical family (external-add-family) pass-through"
+else
+    fail "SF-5: external-add-family pass-through failed" "$sf5_out"
+fi
+
+# --- PF-INT-*: fragment integration guards
+
+# PF-INT-1: middle-path ensemble-adapter migration — fragments/02-ensemble-adapter.md
+# pipes the normalizer output through parse-with-repair.py BEFORE the
+# jq schema-guard. This proves the middle-path migration landed in the
+# fragment, not just in the helper. The grep pattern is specific enough
+# that it catches the new bash block (not a stale reference).
+ENSEMBLE_MD="$REPO/fragments/02-ensemble-adapter.md"
+if grep -qF 'parse-with-repair.py' "$ENSEMBLE_MD" \
+    && grep -qF 'normalizer_clean=' "$ENSEMBLE_MD" \
+    && grep -qF 'phase_1_5_normalizer_unparseable' "$ENSEMBLE_MD"; then
+    pass "PF-INT-1: ensemble-adapter normalizer migrated to parse-with-repair.py"
+else
+    fail "PF-INT-1: ensemble-adapter migration missing markers in $ENSEMBLE_MD"
+fi
+
+# PF-INT-2: parse-with-repair.py actually handles the kind of malformed
+# JSON the ensemble normalizer emits in practice (single-quote + trailing
+# comma + fence combo). End-to-end proof, not helper-unit.
+# Write to a temp file via printf with escape codes to sidestep bash
+# backtick-in-heredoc parsing issues — the raw payload is a JSON array
+# wrapped in a markdown code fence ( triple-backtick + "json" ).
+pf2_file=$(mktemp)
+printf '\140\140\140json\n[{"file": "src/a.ts", "claim": "x'\''y",}]\n\140\140\140\n' > "$pf2_file"
+pf2_out=$("$TOOLS/parse-with-repair.py" < "$pf2_file" 2>&1)
+if [[ $? -eq 0 ]] \
+    && echo "$pf2_out" | jq -e '.[0].file == "src/a.ts"' >/dev/null; then
+    pass "PF-INT-2: ensemble-adapter-style malformed input (fence+single-quote+trailing-comma) repaired end-to-end"
+else
+    fail "PF-INT-2: ensemble-style malformed repair failed" "$pf2_out"
+fi
+rm -f "$pf2_file"
+
+# PF-INT-3: fragments/05-validation.md references parse-validator-result.py
+# for canonical shape normalization before --apply-decisions tuple compose.
+VAL_MD="$REPO/fragments/05-validation.md"
+if grep -qF 'parse-validator-result.py' "$VAL_MD" \
+    && grep -qF -e '--lane deep' "$VAL_MD" \
+    && grep -qF 'Phase 4 parse/score unrecoverable' "$VAL_MD"; then
+    pass "PF-INT-3: fragments/05-validation.md integrates parse-validator-result.py"
+else
+    fail "PF-INT-3: validation fragment integration missing markers in $VAL_MD"
+fi
+
+# PF-INT-4: fragments/01-detection.md integrates source-family-map.py at
+# the join step with "unknown"-tag escalation (not silent drop).
+DET_MD="$REPO/fragments/01-detection.md"
+if grep -qF 'source-family-map.py' "$DET_MD" \
+    && grep -qF 'canonical_family="unknown"' "$DET_MD" \
+    && grep -qF 'lens_source_family_unknown' "$DET_MD"; then
+    pass "PF-INT-4: detection fragment integrates source-family-map.py (escalate-not-drop)"
+else
+    fail "PF-INT-4: detection fragment integration missing markers in $DET_MD"
+fi
+
+# PF-INT-5: commands/review.md frontmatter grants bare-name Bash permissions
+# for the three new helpers. Catches the permissions-vs-usage drift class.
+REVIEW_CMD="$REPO/commands/review.md"
+review_front=$(awk '/^---$/{c++; next} c==1{print}' "$REVIEW_CMD")
+rh_missing=()
+for helper in parse-with-repair.py parse-validator-result.py source-family-map.py; do
+    if ! echo "$review_front" | grep -qF "Bash($helper:"; then
+        rh_missing+=("$helper")
+    fi
+done
+if [[ ${#rh_missing[@]} -eq 0 ]]; then
+    pass "PF-INT-5: commands/review.md allowed-tools grants the three new helpers"
+else
+    fail "PF-INT-5: missing Bash grants for: ${rh_missing[*]}"
+fi
+
 echo
 echo "smoke: PASS ($N assertions)"
 exit 0

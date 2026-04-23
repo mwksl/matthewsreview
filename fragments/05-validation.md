@@ -248,6 +248,35 @@ The helper writes `validation_result` only when the derived
 disposition lands in the confirmed band; pass it for every deep-lane
 tuple — uncertain / disproven tuples have it silently ignored.
 
+**Normalize validator output before tuple compose.** Sub-agent score
+shape is not deterministic across model versions / prompt drifts —
+validators have been observed emitting `{score: {correctness: 72}}`,
+`{overall_numeric: 3.5}`, `{severity: "high"}`, and `{score: 6}` instead
+of the `score_phase4` integer the §20 rubric asks for. Pipe each raw
+validator response through `parse-validator-result.py --lane
+deep|light` before composing the tuple; the helper returns a canonical
+shape (`score_phase4`, `actionability`, `confirmed_strength`,
+`decision`, `validation_result`, `notes`) with `scale_inferred:` audit
+notes when it had to guess. Exit 2 from the helper means the score was
+unrecoverable — emit `score_phase4: null` in the tuple so
+`--apply-decisions` routes to `uncertain` per §13.1 Phase-4 row 1, and
+stash the stderr in `trace.md` so the audit trail records the drift.
+
+```bash
+# For each validator response `$raw` (captured from Agent tool output):
+canon=$(printf '%s' "$raw" \
+    | parse-validator-result.py --lane deep \
+        2> >(tee -a "$trace_log_path" >&2)) \
+    || canon='{"score_phase4": null, "actionability": null, "notes": "Phase 4 parse/score unrecoverable"}'
+# `$canon` is now canonical JSON — merge it with {id: $finding_id} and
+# the sub-agent's raw `reason` (if any) to form the tuple. Do the same
+# for light lane with --lane light.
+```
+
+The helper's `notes` field flows into the tuple's `reason` when the
+validator didn't supply one — preserving the scale-inference audit
+trail in the persisted finding.
+
 **The contract is the output, not the technique.** Agent tool results
 land in orchestrator context, not a shell variable, so there's no
 single "right" way to marshal them. Compose the tuple array however is

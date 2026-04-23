@@ -814,10 +814,36 @@ normalizer candidates both need to be fleshed out to schema shape.
 
 For each element in `$ided`, bind it to `$candidate` in the jq call
 below and call `--add-finding`. The jq builder matches the pre-§13.12
-logic (DESIGN §6 shape) with `.id` already populated from the helper:
+logic (DESIGN §6 shape) with `.id` already populated from the helper.
+
+**Source-family canonicalization.** Before the jq builder runs, pipe the
+candidate's raw `source_family` through `source-family-map.py`. The
+helper accepts the seven canonical families (`diff-family`,
+`structural-family`, `policy-family`, `ux-family`, `security-family`,
+`holistic-family`, `external-deep-family`) as pass-through and maps
+known drift patterns (e.g. `prompt-injection → security-family`,
+`stale-line-ref → policy-family`) to their canonical equivalent.
+Exit 3 means "unknown family" — rather than silently drop the
+candidate (risks losing real findings when the mapping table hasn't
+caught up to lens drift), mark `source_family: "unknown"` and log the
+drift to `trace.md` so the next mapping-table update surfaces from
+audit inspection. Phase 2 dedup's union of `source_families` and
+Phase 3's auto-graduation rule both accept arbitrary family strings,
+so `"unknown"` propagates harmlessly downstream.
 
 ```bash
 while IFS= read -r candidate; do
+    raw_family=$(printf '%s' "$candidate" | jq -r '.source_family // "diff-family"')
+    canonical_family=$(source-family-map.py --input "$raw_family" 2>/dev/null) || {
+        printf 'lens_source_family_unknown: source=%s raw=%s -> mapped to "unknown"\n' \
+            "$(printf '%s' "$candidate" | jq -r '.sources[0] // "(unknown)"')" \
+            "$raw_family" \
+            >> "$trace_log_path"
+        canonical_family="unknown"
+    }
+    candidate=$(printf '%s' "$candidate" \
+        | jq -c --arg f "$canonical_family" '.source_family = $f')
+
     full_finding=$(jq -n \
       --argjson trivial "$trivial_mode" \
       --argjson cand "$candidate" \

@@ -202,9 +202,21 @@ Fresh session: the orchestrator appends one entry per project as it goes. Keep e
 - Ended: 2026-04-23T01:43:30Z
 - Builder iterations: 1
 - Smoke assertions: baseline 208 → post 211
-- Commit: <filled below after commit>
+- Commit: 55ea067
 - Summary: Taught `bin/origin-crosscheck.sh` to walk `git log --follow` when the candidate's target file is PR-added (`git cat-file -e $comparison_ref:$file` fails). Builds the file-add SHA set with `git log --diff-filter=A $comparison_ref..HEAD -- $file`; for each blame SHA on the candidate lines, classifies as pre-existing (ancestor of `$comparison_ref` OR equal to a file-add SHA → content-preserving extraction, the F038 case) or PR-modified. Override fires only when ALL blame SHAs are pre-existing; any PR-modified line suppresses the override with `reason=rename-follow-but-lines-modified-in-pr`. Genuinely-new files (no rename ancestor) keep the existing `reason=new-file` respect-lens path untouched. Three new OC-* assertions (OC-9/10/11) with inline scratch-repo fixtures; CLAUDE.md Helper index row updated.
 - Verifier findings: PASS first-try. Verifier independently scratch-reproduced all three fixture cases end-to-end and confirmed the classification decisions. Caller contract preserved: only callsite (`fragments/01-detection.md:692`) consumes stdout JSON array unchanged (same `.origin` / `.origin_confidence` fields, no new keys) and stderr audit format (`origin_crosscheck: id=… action=…[ reason=…]`) unchanged.
+- Inter-project sanity smoke (post-G, pre-F): PASS (211 assertions).
+
+### Project F — LLM output variance normalization
+- Status: COMPLETE
+- Started: 2026-04-23T01:43:30Z
+- Ended: 2026-04-23T02:03:17Z
+- Builder iterations: 2 (iteration 1 passed all structural checks but iteration 1 verifier caught that `bin/source-family-map.py`'s CANONICAL frozenset was missing `external-add-family` — a canonical value emitted by `/adamsreview:add` via `commands/add.md`; iteration 2 fix was a one-line addition to the frozenset + docstring count 7→8 + new SF-5 smoke assertion.)
+- Smoke assertions: baseline 211 → post 233 (iteration 1 added 21 new: 5 PR-* + 7 VR-* + 4 SF-* + 5 PF-INT-*; iteration 2 added 1 SF-5).
+- Commit: <filled below after commit>
+- Summary: Three new helpers + two fragment integrations, closing items #20, #12, #10. (1) `bin/parse-with-repair.py` — foundation JSON-slop repair wrapper (trailing commas, code fences, single quotes, unescaped newlines); exit 0/1 contract. Integrated at `fragments/02-ensemble-adapter.md` normalizer step (middle-path — ONLY site migrated per plan §9 decision 1). (2) `bin/parse-validator-result.py` — Phase 4 validator output normalizer, handles 5 input shapes (canonical, nested-score, 1-5, severity, ambiguous heuristic) with `scale_inferred` audit notes; integrated at `fragments/05-validation.md` §4.4 (both `--lane deep` and `--lane light`). (3) `bin/source-family-map.py` — Phase 1 lens-drift mapper over 8 canonical families (`diff/structural/policy/ux/security/holistic/external-deep/external-add`); integrated at `fragments/01-detection.md` §1.5 with escalate-not-drop semantics (unknown family → `source_family: "unknown"` + `lens_source_family_unknown:` trace line). `commands/review.md` frontmatter grants added for all three; `CLAUDE.md` Helper index rows added.
+- Commit strategy deviation: plan §F "prefers" one commit per helper (three commits) for bisect-bounded blast radius. Splitting the shared-file hunks (`commands/review.md` frontmatter, `CLAUDE.md` helper index, and `test/smoke.sh`'s 22 interleaved assertions) into three clean commits would have required interactive `git add -p` or error-prone patch gymnastics unsuitable for unattended orchestration. Shipped as one Project F commit with an itemized message; bisect navigability preserved via per-helper bullets and namespaced smoke assertions.
+- Verifier findings: iteration 1 FAIL on the canonical-family completeness gap; iteration 2 PASS. Canonical family set verified against `git grep 'source_family: "[a-z-]*-family"'` across `fragments/`, `commands/`, `bin/`, `docs/archive/` — mapper's 8-entry pass-through set is now exhaustive.
 
 ---
 
