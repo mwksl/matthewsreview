@@ -782,6 +782,92 @@ else
     fail "X: expected EXIT_VALIDATION + stderr naming F101+actionability + unchanged file; code=$code sha_eq=$([[ "$BEFORE_SHA" == "$AFTER_SHA" ]] && echo Y || echo N) stderr=$stderr"
 fi
 
+# BD-1. --apply-decisions --expected N rejects under-sized batches (Phase 4
+# structural guard from plans/phase-3-and-4-batching.md). The caller passes
+# the count of candidates it dispatched in this wave (deep + light); if the
+# orchestrator collapsed multiple candidates into a single Opus call OR a
+# light-lane chunk-agent dropped findings from its returned array, fewer
+# tuples arrive than expected and the helper must fail loudly with
+# EXIT_EXPECTED_MISMATCH (exit 6) so the orchestrator re-dispatches.
+# Stderr names BOTH lane recoveries — the helper is lane-agnostic.
+"$TOOLS/artifact-patch.py" --init "$PV_SEED" --path "$APPLY_DIR/art.json" >/dev/null
+BEFORE_SHA=$(sha_of "$APPLY_DIR/art.json")
+SHORT_BATCH='[{"id":"F101","score_phase4":80,"decision":"confirmed","actionability":"auto_fixable"}]'
+stderr=$("$TOOLS/artifact-patch.py" --apply-decisions "$SHORT_BATCH" --expected 5 --path "$APPLY_DIR/art.json" 2>&1 >/dev/null); code=$?
+AFTER_SHA=$(sha_of "$APPLY_DIR/art.json")
+if [[ "$code" == "6" ]] \
+    && echo "$stderr" | grep -q "expected 5 tuple" \
+    && echo "$stderr" | grep -q "received 1" \
+    && echo "$stderr" | grep -q "deep lane" \
+    && echo "$stderr" | grep -q "chunk-agent" \
+    && [[ "$BEFORE_SHA" == "$AFTER_SHA" ]]; then
+    pass "BD-1: --expected N rejects under-sized batch with exit 6; stderr names both deep-lane and chunk-agent recoveries; artifact unchanged"
+else
+    fail "BD-1: expected EXIT_EXPECTED_MISMATCH (6) + count-mismatch stderr (deep-lane + chunk-agent) + unchanged file" "code=$code sha_eq=$([[ "$BEFORE_SHA" == "$AFTER_SHA" ]] && echo Y || echo N) stderr=$stderr"
+fi
+
+# BD-2. --apply-decisions --expected N accepts a matching-count batch — proves
+# the guard is structural, not punitive. Reuses W's BATCH (the 3-tuple set built
+# from VR_JSON above) with --expected 3 to assert the success path still routes
+# per §13.1 when the count check is in play.
+"$TOOLS/artifact-patch.py" --init "$PV_SEED" --path "$APPLY_DIR/art.json" >/dev/null
+out=$("$TOOLS/artifact-patch.py" --apply-decisions "$BATCH" --expected 3 --path "$APPLY_DIR/art.json" 2>&1); code=$?
+F101_DISP_BD=$(jq -r '.findings[] | select(.id=="F101") | .disposition' "$APPLY_DIR/art.json")
+if [[ "$code" == "0" ]] \
+    && [[ "$F101_DISP_BD" == "confirmed_mechanical" ]] \
+    && echo "$out" | grep -q "applied 3 decisions"; then
+    pass "BD-2: --expected N matching count accepts the batch and routes per §13.1"
+else
+    fail "BD-2: expected exit 0 + 'applied 3 decisions' + F101=confirmed_mechanical" "code=$code F101=$F101_DISP_BD out=$out"
+fi
+
+# BD-3. --apply-decisions --expected N rejects over-sized batches (the
+# count-direction tightening from F003). A chunk-agent that returns extra
+# hallucinated ids (or the orchestrator that recomposes from a malformed
+# multi-chunk response) would emit MORE tuples than dispatched. The helper
+# must reject with the same EXIT_EXPECTED_MISMATCH (exit 6) and the same
+# recovery prose so the orchestrator strips the extras before re-invoking.
+"$TOOLS/artifact-patch.py" --init "$PV_SEED" --path "$APPLY_DIR/art.json" >/dev/null
+BEFORE_SHA=$(sha_of "$APPLY_DIR/art.json")
+LONG_BATCH=$(jq -n --argjson vr "$VR_JSON" '[
+  {id:"F101",score_phase4:80,decision:"confirmed",actionability:"auto_fixable",validation_result:$vr},
+  {id:"F102",score_phase4:50,decision:"uncertain",actionability:null},
+  {id:"F103",score_phase4:30,decision:"disproven",actionability:null}
+]')
+stderr=$("$TOOLS/artifact-patch.py" --apply-decisions "$LONG_BATCH" --expected 2 --path "$APPLY_DIR/art.json" 2>&1 >/dev/null); code=$?
+AFTER_SHA=$(sha_of "$APPLY_DIR/art.json")
+if [[ "$code" == "6" ]] \
+    && echo "$stderr" | grep -q "expected 2 tuple" \
+    && echo "$stderr" | grep -q "received 3" \
+    && [[ "$BEFORE_SHA" == "$AFTER_SHA" ]]; then
+    pass "BD-3 (F003): --apply-decisions rejects over-sized batch with exit 6; artifact unchanged"
+else
+    fail "BD-3: expected EXIT_EXPECTED_MISMATCH (6) + over-sized stderr + unchanged file" "code=$code sha_eq=$([[ "$BEFORE_SHA" == "$AFTER_SHA" ]] && echo Y || echo N) stderr=$stderr"
+fi
+
+# BD-4. --apply-decisions rejects duplicate finding ids in the same batch
+# (F003). Independent of --expected — duplicates always re-apply the
+# decision and re-append score_history for the same finding. EXIT_VALIDATION
+# (exit 1) because this is a different validation failure class than count
+# mismatch: the recovery is "strip the duplicate", not "re-dispatch the
+# missing/extra".
+"$TOOLS/artifact-patch.py" --init "$PV_SEED" --path "$APPLY_DIR/art.json" >/dev/null
+BEFORE_SHA=$(sha_of "$APPLY_DIR/art.json")
+DUP_BATCH=$(jq -n --argjson vr "$VR_JSON" '[
+  {id:"F101",score_phase4:80,decision:"confirmed",actionability:"auto_fixable",validation_result:$vr},
+  {id:"F101",score_phase4:50,decision:"uncertain",actionability:null}
+]')
+stderr=$("$TOOLS/artifact-patch.py" --apply-decisions "$DUP_BATCH" --path "$APPLY_DIR/art.json" 2>&1 >/dev/null); code=$?
+AFTER_SHA=$(sha_of "$APPLY_DIR/art.json")
+if [[ "$code" == "1" ]] \
+    && echo "$stderr" | grep -q "duplicate finding id" \
+    && echo "$stderr" | grep -q "F101" \
+    && [[ "$BEFORE_SHA" == "$AFTER_SHA" ]]; then
+    pass "BD-4 (F003): --apply-decisions rejects duplicate ids with exit 1; artifact unchanged"
+else
+    fail "BD-4: expected EXIT_VALIDATION (1) + duplicate-id stderr + unchanged file" "code=$code sha_eq=$([[ "$BEFORE_SHA" == "$AFTER_SHA" ]] && echo Y || echo N) stderr=$stderr"
+fi
+
 # ------------------------------------------------------------------ Stage 2.6.A
 # Base-branch freshness gate (§13.10). Exercises the non-interactive pieces of
 # 00-preflight.md step 0.2a against scratch git repos — the AskUserQuestion
@@ -1760,6 +1846,30 @@ if [[ "$code" == "1" ]] \
     pass "FX-AF-9 (§13.1 Phase 9): unknown phase_9_outcome rejected with did-you-mean"
 else
     fail "FX-AF-9: expected exit 1 + unknown outcome + suggestion; got code=$code stderr='$stderr'"
+fi
+
+# Assertion FX-OUT-DUP (F003): --apply-fix-outcomes rejects duplicate
+# finding ids in the same batch. Two tuples for the same finding would
+# cause two fix_attempt appends and two state transitions in one call —
+# audit-trail pollution at best, schema invariant violation at worst.
+# The dup guard mirrors the one in --apply-decisions (BD-4) — same
+# parallel path, same EXIT_VALIDATION (exit 1).
+"$TOOLS/artifact-patch.py" --init "@$FIX/fix-group-seed.json" --path "$WORK/af-out-dup.json" >/dev/null
+"$TOOLS/artifact-patch.py" --path "$WORK/af-out-dup.json" --apply-fix-start \
+  '[{"id":"F001","run_id":"fixrun_dup"}]' >/dev/null
+BEFORE_SHA=$(sha_of "$WORK/af-out-dup.json")
+stderr=$("$TOOLS/artifact-patch.py" --path "$WORK/af-out-dup.json" --apply-fix-outcomes \
+  '[{"id":"F001","run_id":"fixrun_dup","fix_group_id":"FG-1","input_sha":"aaaa111","output_sha":"bbbb222","phase_9_outcome":"verified","timestamp":"2026-04-18T13:00:00Z"},
+    {"id":"F001","run_id":"fixrun_dup","fix_group_id":"FG-1","input_sha":"aaaa111","output_sha":null,"phase_9_outcome":"partial","timestamp":"2026-04-18T13:00:00Z","phase_9_finding":"x"}]' \
+  2>&1 >/dev/null); code=$?
+AFTER_SHA=$(sha_of "$WORK/af-out-dup.json")
+if [[ "$code" == "1" ]] \
+    && echo "$stderr" | grep -q "duplicate finding id" \
+    && echo "$stderr" | grep -q "F001" \
+    && [[ "$BEFORE_SHA" == "$AFTER_SHA" ]]; then
+    pass "FX-OUT-DUP (F003): --apply-fix-outcomes rejects duplicate ids with exit 1; artifact unchanged"
+else
+    fail "FX-OUT-DUP: expected EXIT_VALIDATION (1) + duplicate-id stderr + unchanged file" "code=$code sha_eq=$([[ "$BEFORE_SHA" == "$AFTER_SHA" ]] && echo Y || echo N) stderr=$stderr"
 fi
 
 # ------------------------------------------------------------------ Reconcile-on-overlap (plans/reconcile-on-overlap.md)
@@ -3536,6 +3646,29 @@ if [[ -z "$tk5_missing" ]]; then
     pass "TK-6: chat-summary filter omits line when subagent_tokens absent"
 else
     fail "TK-6: expected empty output; got [$tk5_missing]"
+fi
+
+# TK-7: phase_4b chunk-agent rows (light-lane, chunked-batch — see
+# fragments/05-validation.md §4.3) log without finding_id. Without the
+# tally's null-key filter, jq's `from_entries` would error on them.
+# This assertion appends one such row, re-tallies, and confirms:
+#   (a) the helper exits 0 (doesn't crash on a missing-finding_id row),
+#   (b) total / phase_4b in by_phase reflect the new tokens,
+#   (c) by_finding_phase4 still keys only on real finding ids
+#       (the chunk-agent's tokens roll up only into total/by_phase/by_model).
+printf '{"phase":"phase_4b","agent_role":"validator","agent_id":"a7","model":"sonnet","tokens":2400,"ts":"2026-04-24T12:00:00Z"}\n' >> "$TK_DIR/tokens.jsonl"
+"$TOOLS/tally-subagent-tokens.sh" \
+    --tokens-log "$TK_DIR/tokens.jsonl" \
+    --artifact   "$TK_DIR/artifact.json" \
+    >/dev/null 2>&1 || fail "TK-7: helper exit non-zero on chunked phase_4b row (null-key from_entries regression)"
+tk7_total=$(jq -r '.subagent_tokens.total' "$TK_DIR/artifact.json")
+tk7_p4b=$(jq -r '.subagent_tokens.by_phase.phase_4b // 0' "$TK_DIR/artifact.json")
+tk7_by_finding_keys=$(jq -r '.subagent_tokens.by_finding_phase4 | keys | join(",")' "$TK_DIR/artifact.json")
+if [[ "$tk7_total" == "15400" && "$tk7_p4b" == "2400" \
+      && "$tk7_by_finding_keys" == "F001,F002" ]]; then
+    pass "TK-7: phase_4b chunk-agent row (no finding_id) tallies cleanly; by_finding_phase4 keeps only real ids"
+else
+    fail "TK-7: expected total=15400 phase_4b=2400 by_finding_phase4_keys=F001,F002; got total=$tk7_total p4b=$tk7_p4b keys=$tk7_by_finding_keys"
 fi
 
 # ------------------------------------------------------------------ orchestrator-tokens.sh
