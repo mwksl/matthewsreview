@@ -400,6 +400,7 @@ All scripts live under `bin/`. The plugin runtime adds `bin/` to `$PATH` on load
 - **Plan mode by default.** Per user's global CLAUDE.md: present plan, get approval, then execute. "Plan-and-execute" requests skip the approval round-trip. Bug fixes can go direct.
 - **Blast-radius discipline before committing.** Check every writer, every consumer, parallel code paths, full function bodies, and stale comments. Self-review as if you were a reviewer.
 - **Behavior changes land in the fragment + `CLAUDE.md` + smoke.** The archive is frozen — don't update `docs/archive/` to reflect new behavior. If the change is large enough that CLAUDE.md drifts materially from the archive, that's fine: CLAUDE.md is authoritative going forward.
+- **Bump `.claude-plugin/plugin.json` version on user-visible behavior changes before merging.** Without it, installed copies don't pick up the change via `/plugin marketplace update`. Patch bump (`0.2.X → 0.2.X+1`) for bug-class fixes and behavior corrections; minor bump (`0.2.X → 0.3.0`) for new commands or breaking output-shape changes. Either bump in the same PR (precedent: PR #15 "v0.2.4") or land a follow-up direct-to-main commit immediately after merge (precedent: `a8ae251` "Bump plugin version 0.2.1 → 0.2.2"). Skip for docs-only / test-only / pure-refactor changes.
 - **New stages get a `plans/stage-N-<name>.md`** drafted in plan mode, user-approved before execution.
 
 ## Batched-helper pattern
