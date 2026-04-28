@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(artifact-read.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(assign-finding-ids.sh:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(git:*), Bash(jq:*), Bash(date:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(cat:*), Bash(printf:*), Bash(tr:*), Bash(awk:*), Bash(grep:*), Bash(mktemp:*), Read, Agent
+allowed-tools: Bash(artifact-read.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(assign-finding-ids.sh:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(git:*), Bash(jq:*), Bash(date:*), Bash(timeout:*), Bash(sleep:*), Bash(kill:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(cat:*), Bash(printf:*), Bash(tr:*), Bash(awk:*), Bash(grep:*), Bash(mktemp:*), Read, Agent, AskUserQuestion
 argument-hint: "[<paste...>] [--file path --line N --claim \"...\"] [--impact <type>] [--no-dedup]"
 description: Inject externally-sourced findings (cloud /ultrareview, manual finds, etc.) into the most recent /adamsreview:review artifact for this branch. Validates via Phase 4, re-renders, re-publishes.
 disable-model-invocation: false
@@ -56,28 +56,34 @@ helper-script error-as-prompt).**
 This command runs against an artifact that ALREADY exists. The
 sequencing matters:
 
-1. Locate the artifact via `latest.txt` (same pattern as
+1. **Parse arguments.** Paste / structured / mixed mode detection;
+   honor `--no-dedup`, `--impact` overrides.
+2. Locate the artifact via `latest.txt` (same pattern as
    `/adamsreview:fix` and `/adamsreview:promote`).
-2. **Hard abort if any finding is `current_state == attempted`.**
+3. **Hard abort if any finding is `current_state == attempted`.**
    Mirrors `/adamsreview:fix` Phase 7's leftover-attempted gate. Adding
    findings while the artifact is mid-mutation is a footgun.
-3. Build candidate findings — either via the structured one-shot, the
+3a. **Branch-behind-base advisory.** Active fetch + behind-count vs
+    `$base_branch`; if behind, `AskUserQuestion` (Stop / Proceed / Abort).
+4. Build candidate findings — either via the structured one-shot, the
    paste normalizer, or both (mixed mode = paste + `--impact` override).
-4. Dedup against existing findings (one Sonnet call) unless
+5. Dedup against existing findings (one Sonnet call) unless
    `--no-dedup` is set. Matched candidates merge `sources[]` into the
    existing finding; unmatched proceed to validation.
-5. Assign new IDs continuing past the highest existing F-id (via
-   `assign-finding-ids.sh --start-from`).
-6. `--add-finding` loop to land the new candidates into `artifact.json`.
+6. Assign new IDs and run the `--add-finding` loop to land the new
+   candidates into `artifact.json` (continuing past the highest
+   existing F-id via `assign-finding-ids.sh --start-from`).
 7. Phase 4 validation, lane-aware (Opus deep / Sonnet light), no Wave 2
    chain retry. `--apply-decisions` batched call writes the §13.1
    dispositions.
-8. Re-render `artifact.md` and re-publish to the existing `comment_id`.
-9. Append a `## add (<ts>)` block to `trace.md` and print a user-visible
-   summary.
+8. Re-tally `subagent_tokens` + `orchestrator_tokens`, then re-render
+   `artifact.md`.
+9. Re-publish to the existing `comment_id` (PR mode only).
+10. Append a `## add (<ts>)` block to `trace.md` and print a user-visible
+    summary.
 
-**Build a TaskList that mirrors steps 1–9 below.** Mark each
-`in_progress` when starting, `completed` when done.
+**Build a TaskList that mirrors the steps above** (1, 2, 3, 3a, 4–10).
+Mark each `in_progress` when starting, `completed` when done.
 
 ## Sub-agent dispatch pattern
 
@@ -214,6 +220,137 @@ message and abort (same shape as Phase 7 step 4 in
 
 Append a one-line `add_rejected_leftover_attempted: ids=...` entry to
 `trace.md` for audit, then exit non-zero.
+
+### 3a. Branch-behind-base advisory
+
+Active fetch — the artifact's review-time freshness snapshot may have
+aged since `:review` ran. Use an explicit refspec
+(`refs/heads/<base>:refs/remotes/origin/<base>`) so the fetch updates
+`refs/remotes/origin/<base>` even under narrow `remote.origin.fetch`
+configs that would otherwise update only `FETCH_HEAD` and leave a
+stale `origin/<base>` in place. Route the rev-list by fetch success:
+on success, prefer `origin/<base>` (with a defensive fallback to
+local `<base>` if it somehow still doesn't resolve); on failure, fall
+back to local `<base>` AND surface a "fetch failed" note so the user
+knows the count may itself be stale (a bare `origin/<base>` rev-list
+would silently resolve from cached refs and mislead). Track
+`$merge_ref` alongside the count so the Stop guidance points at the
+same ref the count was actually against — telling the user to merge
+local `<base>` when the count was against `origin/<base>` would be a
+no-op against a still-stale local ref. The fetch is bounded by a 30s
+soft timeout (GNU `timeout` when available, background+watchdog
+fallback otherwise), mirroring `freshness-gate.sh`'s §0.2a pattern so
+a hung remote can't block the add run indefinitely. When neither
+`origin/$base_branch` nor local `$base_branch` resolves to a count,
+emit a `branch_behind_base unresolvable` trace line so an operator
+inspecting `trace.md` later can distinguish a genuinely-up-to-date
+branch (`behind=0`) from a silently-degraded gate (also `behind=0`).
+When the fetch fails AND the local fallback resolves to `behind=0`,
+emit a `branch_behind_base degraded` trace line — the gate decides
+not to fire (no `AskUserQuestion` since `behind == 0`), but the
+operator still needs a trail showing the count came from a possibly
+stale local ref.
+
+```bash
+base_branch=$(jq -r '.base_branch' "$artifact_path")
+fetch_ok=true
+if command -v timeout >/dev/null 2>&1; then
+    GIT_TERMINAL_PROMPT=0 timeout 30 git fetch origin \
+        "refs/heads/$base_branch:refs/remotes/origin/$base_branch" \
+        --quiet 2>/dev/null \
+        || fetch_ok=false
+else
+    ( GIT_TERMINAL_PROMPT=0 git fetch origin \
+        "refs/heads/$base_branch:refs/remotes/origin/$base_branch" \
+        --quiet 2>/dev/null ) &
+    fetch_pid=$!
+    ( sleep 30 && kill -TERM "$fetch_pid" 2>/dev/null ) &
+    watchdog_pid=$!
+    wait "$fetch_pid" 2>/dev/null || fetch_ok=false
+    kill -TERM "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+fi
+if $fetch_ok; then
+    if behind=$(git rev-list --count "HEAD..origin/$base_branch" 2>/dev/null); then
+        merge_ref="origin/$base_branch"
+    else
+        # origin/<base> didn't resolve — narrow-refspec edge — fall back to local
+        if behind=$(git rev-list --count "HEAD..$base_branch" 2>/dev/null); then
+            merge_ref="$base_branch"
+        else
+            behind=0
+            merge_ref="$base_branch"
+            printf '[%s] branch_behind_base unresolvable fetch_ok=true local_resolve=false base_branch=%s\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$base_branch" \
+                >> "$trace_log_path"
+        fi
+    fi
+    fetch_note=""
+else
+    if behind=$(git rev-list --count "HEAD..$base_branch" 2>/dev/null); then
+        merge_ref="$base_branch"
+        if [[ "$behind" == "0" ]]; then
+            # Degraded fail-silent path: fetch failed, local rev-list
+            # resolved to 0. The AskUserQuestion below won't fire (gated
+            # on `behind > 0`), so without this trace line `trace.md`
+            # has no signal distinguishing "branch genuinely fresh" from
+            # "fetch failed, local says 0 but local may be stale."
+            printf '[%s] branch_behind_base degraded fetch_ok=false local_resolve=true behind=0 base_branch=%s\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$base_branch" \
+                >> "$trace_log_path"
+        fi
+    else
+        behind=0
+        merge_ref="$base_branch"
+        printf '[%s] branch_behind_base unresolvable fetch_ok=false local_resolve=false base_branch=%s\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$base_branch" \
+            >> "$trace_log_path"
+    fi
+    fetch_note=" (Note: fetch of \`origin/$base_branch\` failed; behind-count is from local \`$base_branch\`, which may itself be stale.)"
+fi
+```
+
+Fail-open on any non-zero git exit — the gate is a warning surface, not
+a precondition.
+
+All three branches (Proceed / Stop / Abort) write a distinct
+`branch_behind_base <verdict>` audit line to `trace.md` so an operator
+reading the trace later can tell which path the user took.
+
+If `$behind > 0`, `AskUserQuestion` once:
+
+> Branch `$head_branch` is `$behind` commits behind `$base_branch`.$fetch_note
+> New findings will be deduped against the artifact's existing finding
+> set and validated against the diff `:review` saw — if `$base_branch`
+> has shifted, validators may reason against stale shared context
+> (callers or helpers on `$base_branch` that have changed since).
+> Recommend merging `$merge_ref` into `$head_branch` first.
+
+- **(a) Stop — I'll merge `$merge_ref` into `$head_branch` first, then re-run.** Emit a `branch_behind_base stopped` trace line, then exit 0 with: `Stopping. Run \`git merge $merge_ref\` (or fast-forward) on \`$head_branch\`, then re-run /adamsreview:add.`
+  ```bash
+  printf '[%s] branch_behind_base stopped behind=%s merge_ref=%s fetch_ok=%s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$behind" "$merge_ref" "$fetch_ok" \
+      >> "$trace_log_path"
+  ```
+- **(b) Proceed.** Append a trace line and continue. Logs `merge_ref`
+  and `fetch_ok` alongside the count so an operator reading `trace.md`
+  later can tell which ref the count was measured against and whether
+  the active fetch succeeded — mirrors `:review` §0.6a's
+  Proceed-on-warning pattern; the active variants additionally log
+  `merge_ref` and `fetch_ok` because the fetch may have failed and the
+  gate may have measured against a different ref than the user is told
+  to merge.
+  ```bash
+  printf '[%s] branch_behind_base proceeded behind=%s merge_ref=%s fetch_ok=%s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$behind" "$merge_ref" "$fetch_ok" \
+      >> "$trace_log_path"
+  ```
+- **(c) Abort.** Emit a `branch_behind_base aborted` trace line, then exit 0 with `Aborted.`.
+  ```bash
+  printf '[%s] branch_behind_base aborted behind=%s merge_ref=%s fetch_ok=%s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$behind" "$merge_ref" "$fetch_ok" \
+      >> "$trace_log_path"
+  ```
 
 ### 4. Build candidate array
 
@@ -479,7 +616,7 @@ done
 ```
 
 Capture the new ID list as `new_ids` (CSV) for step 7's dispatch and
-step 9's summary:
+step 10's summary:
 
 ```bash
 new_ids=$(echo "$findings_to_add" | jq -r '[.[].id] | join(",")')
@@ -833,7 +970,7 @@ log-phase.sh \
 Re-tally first so the rendered report (and the downstream PR comment
 update in step 9) reflects this run's new sub-agent + orchestrator
 spend on top of the prior `/adamsreview:review` baseline. The paste
-normalizer (§3a) and any Phase-4 re-validators that ran during this
+normalizer (§4b) and any Phase-4 re-validators that ran during this
 `/adamsreview:add` invocation already logged their sub-agent usage to
 `tokens.jsonl`; the orchestrator transcript on disk captured every
 main-session turn. Both helpers are pure readbacks:
