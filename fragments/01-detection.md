@@ -89,11 +89,12 @@ shared_invariants_body="${shared_invariants_body//\$comparison_ref/$comparison_r
 shared_invariants_body="${shared_invariants_body//\$reviewed_sha/$reviewed_sha}"
 ```
 
-The lens-body files (`fragments/lens-prompts/L<N>.md`) are read at
-each lens's dispatch step (1.3). L2's body carries `$prior_fix_suspects`,
+The lens-body files (`fragments/lens-prompts/L<N>.md`) are read in
+step 1.3's bulk pre-read (one parallel batch of `Read` tool-uses
+before the dispatch turn). L2's body carries `$prior_fix_suspects`,
 L3's and L5's bodies carry `$claude_md_paths` — substitute these the
-same way before dispatch (the lens dispatch sub-sections below remind
-you per-lens).
+same way before the dispatch turn (the lens dispatch sub-sections
+below specify the per-lens substitutions).
 
 Lens-specific extensions the shared block does **not** cover (keep
 inline in each lens sub-section):
@@ -289,9 +290,11 @@ phase_1_5_start_epoch=$(date +%s)
 
 This epoch is what 02-ensemble-adapter.md step 1.5.7 subtracts to
 compute `phase_1_5_elapsed`. Placing it here mirrors Phase 1's
-`phase_1_start_epoch` capture at the top of step 1.3 — both clocks
-start at the same turn boundary, so under §13.12 parallel dispatch
-the two `elapsed_sec` values naturally overlap in `phases.jsonl`.
+`phase_1_start_epoch` capture in step 1.3's pre-dispatch init —
+Phase 1.5 starts after readiness/prior-fix work and Phase 1 starts
+just before the lens fan-out, so both clocks bracket the §13.12
+dispatch turn and the two `elapsed_sec` values naturally overlap in
+`phases.jsonl`.
 
 ### 1.3. Dispatch the lenses (one turn, one Agent call per applicable lens)
 
@@ -303,82 +306,85 @@ issue EVERY applicable lens's `Agent` tool-use in a SINGLE
 orchestrator turn so they run concurrently — alongside the ensemble
 fan-out's background `Bash` calls when `ensemble_mode == true` (see
 the "Ensemble fan-out" sub-section below). The per-lens sub-sections
-that follow give the prompt-body location and the per-lens
-substitution rules (`$prior_fix_suspects`, `$claude_md_paths`); their
-"Read `fragments/lens-prompts/L<N>.md` … and dispatch" phrasing is a
-*recipe per lens*, NOT an instruction to serialize one lens at a time
-across multiple turns. Doing the per-lens "Read L<N>.md then dispatch
-Agent" pairs serially defeats the parallelism this phase relies on:
-Phase 1 wall-clock latency goes from `max(lens_durations)` to
-`sum(lens_durations)`, and the ensemble fan-out's background CLIs
-lose their overlap window with the lens dispatches.
+that follow are declarative spec data — the dispatch model, prompt
+body location, and substitution rules (`$prior_fix_suspects`,
+`$claude_md_paths`) for each lens; they are reference material, NOT
+seven serial action targets. The unambiguous action target is the
+"#### Dispatch turn" sub-section after L7. Treating each per-lens
+sub-section as its own dispatch turn defeats the parallelism this
+phase relies on: Phase 1 wall-clock latency goes from
+`max(lens_durations)` to `sum(lens_durations)`, and the ensemble
+fan-out's background CLIs lose their overlap window with the lens
+dispatches.
 
 #### L1 — diff-local scan (Sonnet)
 
-Launch one `Agent` tool-use with `model: sonnet`, `subagent_type: general-purpose`.
+Dispatch spec: `model: sonnet`, `subagent_type: general-purpose`.
 
-Prompt body: Read `fragments/lens-prompts/L1.md` — its content is the L1
-prompt body verbatim. Prepend the shared invariants from step 1.2.1 and
-dispatch.
+Prompt body: `fragments/lens-prompts/L1.md` (read in step 1.3's bulk
+pre-read; its content is the L1 prompt body verbatim). Final prompt =
+shared invariants (from step 1.2.1) + lens body.
 
 #### L2 — structural / blast-radius (Opus; skipped if `trivial_mode`)
 
-Launch one `Agent` tool-use with `model: opus`, `subagent_type: general-purpose`,
-with `Read` and `Bash(git:*)` + `Bash(grep:*)` permissions (the sub-agent
-inherits the parent command's grants — this already covers it).
+Dispatch spec: `model: opus`, `subagent_type: general-purpose`. The
+sub-agent inherits the parent command's `Read` + `Bash(git:*)` +
+`Bash(grep:*)` grants (this already covers it).
 
 L2 additionally reads surrounding files and uses `git blame` / `git log`.
 
-Prompt body: Read `fragments/lens-prompts/L2.md` — its content is the L2
-prompt body verbatim. Substitute `$prior_fix_suspects` with the JSON array
-captured at step 1.2b. Prepend the shared invariants from step 1.2.1 and
-dispatch.
+Prompt body: `fragments/lens-prompts/L2.md` (read in step 1.3's bulk
+pre-read; its content is the L2 prompt body verbatim). Per-lens
+substitution: `$prior_fix_suspects` → the JSON array captured at step
+1.2b. Final prompt = shared invariants (from step 1.2.1) + lens body
+(with substitution applied).
 
 #### L3 — CLAUDE.md compliance (Sonnet)
 
-Launch one `Agent` tool-use with `model: sonnet`.
+Dispatch spec: `model: sonnet`.
 
-Prompt body: Read `fragments/lens-prompts/L3.md` — its content is the L3
-prompt body verbatim. Substitute `$claude_md_paths` with the newline-joined
-list from Phase 0 step 0.7. Prepend the shared invariants from step 1.2.1
-and dispatch.
+Prompt body: `fragments/lens-prompts/L3.md` (read in step 1.3's bulk
+pre-read; its content is the L3 prompt body verbatim). Per-lens
+substitution: `$claude_md_paths` → the newline-joined list from Phase
+0 step 0.7. Final prompt = shared invariants (from step 1.2.1) + lens
+body (with substitution applied).
 
 #### L4 — comment compliance (Sonnet)
 
-Launch one `Agent` tool-use with `model: sonnet`.
+Dispatch spec: `model: sonnet`.
 
 L4 additionally reads the current content of every modified file.
 
-Prompt body: Read `fragments/lens-prompts/L4.md` — its content is the L4
-prompt body verbatim. Prepend the shared invariants from step 1.2.1 and
-dispatch.
+Prompt body: `fragments/lens-prompts/L4.md` (read in step 1.3's bulk
+pre-read; its content is the L4 prompt body verbatim). Final prompt =
+shared invariants (from step 1.2.1) + lens body.
 
 #### L5 — UX (Sonnet; skipped if `trivial_mode` or `user_facing == false`)
 
-Launch one `Agent` tool-use with `model: sonnet`.
+Dispatch spec: `model: sonnet`.
 
-Prompt body: Read `fragments/lens-prompts/L5.md` — its content is the L5
-prompt body verbatim (the inlined UX checklist is the canonical content;
-`fragments/lens-ux-reference.md` is a redundant duplicate kept for now to
-avoid scope creep). Substitute `$claude_md_paths` with the newline-joined
-list from Phase 0 step 0.7. Prepend the shared invariants from step 1.2.1
-and dispatch.
+Prompt body: `fragments/lens-prompts/L5.md` (read in step 1.3's bulk
+pre-read; its content is the L5 prompt body verbatim — the canonical
+content; `fragments/lens-ux-reference.md` is a redundant duplicate kept
+for now to avoid scope creep). Per-lens substitution: `$claude_md_paths`
+→ the newline-joined list from Phase 0 step 0.7. Final prompt = shared
+invariants (from step 1.2.1) + lens body (with substitution applied).
 
 #### L6 — lightweight security (Sonnet; skipped if `trivial_mode`)
 
-Launch one `Agent` tool-use with `model: sonnet`.
+Dispatch spec: `model: sonnet`.
 
-Prompt body: Read `fragments/lens-prompts/L6.md` — its content is the L6
-prompt body verbatim (the inlined security checklist is the canonical
-content; `fragments/lens-security-reference.md` is a redundant duplicate
-kept for now to avoid scope creep). Prepend the shared invariants from
-step 1.2.1 and dispatch.
+Prompt body: `fragments/lens-prompts/L6.md` (read in step 1.3's bulk
+pre-read; its content is the L6 prompt body verbatim — the canonical
+content; `fragments/lens-security-reference.md` is a redundant
+duplicate kept for now to avoid scope creep). Final prompt = shared
+invariants (from step 1.2.1) + lens body.
 
 #### L7 — holistic review (Opus; `ensemble_mode` only; skipped if `trivial_mode`)
 
-Launch one `Agent` tool-use with `model: opus`, `subagent_type: general-purpose`.
-Inherits the parent command's Read + Bash(git:*) + Bash(grep:*) grants — same
-permissions as L2.
+Dispatch spec: `model: opus`, `subagent_type: general-purpose`.
+Inherits the parent command's Read + Bash(git:*) + Bash(grep:*) grants —
+same permissions as L2.
 
 L7 exists as a recall-oriented safety net: focused lenses have narrower
 prompts tuned to specific bug classes; L7 reads the diff like a skeptical
@@ -390,9 +396,40 @@ signal via Phase 3's ≥2-families auto-graduate rule, not noise.
 L7 additionally reads surrounding code and uses `git blame` / `git log`
 freely.
 
-Prompt body: Read `fragments/lens-prompts/L7.md` — its content is the L7
-prompt body verbatim. Prepend the shared invariants from step 1.2.1 and
-dispatch.
+Prompt body: `fragments/lens-prompts/L7.md` (read in step 1.3's bulk
+pre-read; its content is the L7 prompt body verbatim). Final prompt =
+shared invariants (from step 1.2.1) + lens body.
+
+#### Dispatch turn (one turn, all blocks)
+
+**Pre-dispatch init** (orchestrator working context — not a separate
+tool-use turn): capture the phase epoch and seed the in-context
+candidate pool that §1.4 will append to as lens results return.
+
+```bash
+phase_1_start_epoch=$(date +%s)
+internal_candidates='[]'
+```
+
+These are working-context value initializations per CLAUDE.md
+operational rule 11 ("Working set lives in-prompt, not shell vars"),
+not `Bash` tool-uses; the orchestrator records them in-context
+*before* issuing the `Agent` blocks below. The `phase_1_start_epoch`
+capture mirrors the §1.2-Phase-1.5 `phase_1_5_start_epoch` so both
+clocks bracket the §13.12 dispatch turn and the two `elapsed_sec`
+values naturally overlap in `phases.jsonl`, and
+`internal_candidates='[]'` is the seed value §1.4's per-lens
+`--argjson accum "$internal_candidates"` appends require.
+
+**Dispatch.** With every applicable lens's spec assembled (L1–L7
+sub-sections above), issue every applicable lens's `Agent` tool-use
+in a SINGLE orchestrator turn. The per-lens sub-sections are
+reference data — a parameter sweep, not a turn sweep. Phase 1
+wall-clock latency is `max(lens_durations)`, not `sum(lens_durations)`.
+
+Under `ensemble_mode == true`, the Ensemble fan-out's background
+`Bash` calls (next sub-section) launch in this same turn — see the
+"Total tool-use blocks" table below for the exact count by mode.
 
 #### Ensemble fan-out (same turn, when `ensemble_mode == true`)
 
@@ -432,15 +469,9 @@ execution reaches it and execution proceeds straight to Phase 2.
 Collection runs per-lens as each sub-agent result returns — but under
 §13.12 nothing gets an `id` and nothing is committed to the artifact
 during collection. Candidates accumulate in an in-context pool
-(`internal_candidates`) and are committed at the join step 1.5.
-
-Initialize the pool and capture the phase epoch before the first lens
-dispatch (at the top of step 1.3's dispatch turn):
-
-```bash
-phase_1_start_epoch=$(date +%s)
-internal_candidates='[]'
-```
+(`internal_candidates`, initialized in step 1.3's pre-dispatch init
+along with `phase_1_start_epoch`) and are committed at the join step
+1.5.
 
 For each sub-agent result, in the order it returns:
 
