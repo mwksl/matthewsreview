@@ -2959,6 +2959,147 @@ else
     fail "AFH-10: integration wiring missing — re-grep the assertion to find the dropped reference"
 fi
 
+# AFH-11: Phase 5.5 eligibility predicate covers confirmed_mechanical
+# regardless of lane (v0.4.2 widening). Runs the exact jq filter from
+# fragments/06b-auto-fix-hint.md against a synthetic 9-finding artifact
+# and asserts the selected set matches the predicate's intent.
+#
+# Why: dedup's "deep wins over light" rule produces findings with
+# lane=deep + impact_type=ux when two lenses with different lanes
+# collide on the same root cause. Pre-v0.4.2 these fell through both
+# Phase 8 (impact_type filter excludes ux) and Phase 5.5 (lane filter
+# excluded deep+mechanical). Real-world hit: F031 on
+# user-research-invite PR #267, surfaced 2026-05-11.
+#
+# Expected selected ids: F-DM, F-LM, F-MAN, F-REP (4 of 9).
+afh11_synth=$(jq -nc '{
+    findings: [
+        {id:"F-DM",  disposition:"confirmed_mechanical", validation_lane:"deep",  score_phase4:70, current_state:"open",     human_confirmation:null, auto_fix_hint:null},
+        {id:"F-LM",  disposition:"confirmed_mechanical", validation_lane:"light", score_phase4:70, current_state:"open",     human_confirmation:null, auto_fix_hint:null},
+        {id:"F-MAN", disposition:"confirmed_manual",     validation_lane:"deep",  score_phase4:80, current_state:"open",     human_confirmation:null, auto_fix_hint:null},
+        {id:"F-REP", disposition:"confirmed_report",     validation_lane:"light", score_phase4:65, current_state:"open",     human_confirmation:null, auto_fix_hint:null},
+        {id:"F-LO",  disposition:"confirmed_mechanical", validation_lane:"light", score_phase4:50, current_state:"open",     human_confirmation:null, auto_fix_hint:null},
+        {id:"F-PRE", disposition:"pre_existing_report",  validation_lane:"deep",  score_phase4:80, current_state:"open",     human_confirmation:null, auto_fix_hint:null},
+        {id:"F-RES", disposition:"confirmed_mechanical", validation_lane:"deep",  score_phase4:80, current_state:"resolved", human_confirmation:null, auto_fix_hint:null},
+        {id:"F-HC",  disposition:"confirmed_mechanical", validation_lane:"light", score_phase4:70, current_state:"open",     human_confirmation:{reviewer:"x",ts:"t",reason:"r"}, auto_fix_hint:null},
+        {id:"F-AFH", disposition:"confirmed_mechanical", validation_lane:"deep",  score_phase4:70, current_state:"open",     human_confirmation:null, auto_fix_hint:{hint:"h",confidence:"high",second_opinion:"concurs",ts:"t"}}
+    ]
+}')
+
+# Exact predicate copied from fragments/06b-auto-fix-hint.md §5.5.0.
+afh11_selected=$(printf '%s' "$afh11_synth" | jq -r '
+    [.findings[]
+       | select(.current_state == "open")
+       | select(.human_confirmation == null)
+       | select(.auto_fix_hint == null)
+       | select(.disposition != "pre_existing_report")
+       | select(
+           (.disposition == "confirmed_manual")
+           or (.disposition == "confirmed_report")
+           or (.disposition == "confirmed_mechanical")
+         )
+       | select(.score_phase4 != null and .score_phase4 >= 60)
+       | .id]
+    | sort | join(",")
+')
+
+if [[ "$afh11_selected" == "F-DM,F-LM,F-MAN,F-REP" ]]; then
+    pass "AFH-11 (v0.4.2): Phase 5.5 predicate selects confirmed_mechanical regardless of lane (covers dedup-induced deep+ux gap, F031-style); correctly excludes below-gate, pre_existing_report, resolved, already-promoted, already-hinted"
+else
+    fail "AFH-11: predicate mismatch — expected 'F-DM,F-LM,F-MAN,F-REP'; got '$afh11_selected'" "the predicate in fragments/06b-auto-fix-hint.md may have drifted from the v0.4.2 widening — re-check §5.5.0"
+fi
+
+# AFH-12: fragment source must not re-introduce the lane gate on
+# confirmed_mechanical (regression guard for v0.4.2). Pairs with AFH-11
+# and AFH-13:
+# - AFH-11 checks the predicate's runtime behavior via the inline copy.
+# - AFH-13 checks the predicate's runtime behavior via the canonical
+#   fragment block (extracted between fence markers and executed).
+# - AFH-12 catches textual revert forms that AFH-13 might still pass
+#   (e.g., a syntactically reordered predicate that semantically
+#   re-narrows the lane gate but happens to evaluate identically on the
+#   AFH-11/AFH-13 synthetic). The patterns below catch the original
+#   form, clause-order swaps, separate-select reformulations, and
+#   single-quoted variants.
+afh12_frag="$REPO/fragments/06b-auto-fix-hint.md"
+# Strip whitespace inside the fragment for tolerant matching of
+# multi-line reformulations. Bash 3.2 portable: tr -d '[:space:]'.
+afh12_compact=$(tr -d '[:space:]' < "$afh12_frag")
+afh12_hit=0
+# Pattern A: confirmed_mechanical adjacent to a validation_lane=="light"
+# clause in either order (catches "and" / "&&" / separate select() with
+# the two clauses textually adjacent after whitespace stripping).
+if printf '%s' "$afh12_compact" \
+   | grep -qE '"confirmed_mechanical"[^|}]{0,80}\.validation_lane=="light"'; then
+    afh12_hit=1
+fi
+if printf '%s' "$afh12_compact" \
+   | grep -qE '\.validation_lane=="light"[^|}]{0,80}"confirmed_mechanical"'; then
+    afh12_hit=1
+fi
+# Pattern B: single-quoted variants (jq embedded in a different bash
+# quoting context).
+if printf '%s' "$afh12_compact" \
+   | grep -qE "'confirmed_mechanical'[^|}]{0,80}\.validation_lane=='light'"; then
+    afh12_hit=1
+fi
+if printf '%s' "$afh12_compact" \
+   | grep -qE "\.validation_lane=='light'[^|}]{0,80}'confirmed_mechanical'"; then
+    afh12_hit=1
+fi
+if [[ "$afh12_hit" -eq 1 ]]; then
+    fail "AFH-12: fragments/06b-auto-fix-hint.md re-introduces the light-lane gate on confirmed_mechanical — see v0.4.2 release notes / F031 incident"
+else
+    pass "AFH-12 (v0.4.2 regression guard): fragments/06b-auto-fix-hint.md predicate has no light-lane gate on confirmed_mechanical (clause-swap / separate-select / single-quote variants all checked)"
+fi
+
+# AFH-13: behavioral check on the canonical fragment block.
+# AFH-11 exercises an inline COPY of the predicate; if the fragment
+# drifts (e.g., '>= 60' becomes '>= 75', a select() clause is dropped,
+# the lane gate is re-added under a different syntax), AFH-11 stays
+# green because it tests the copy, not the source. AFH-13 closes that
+# gap: extract the bash block between the fence markers in §5.5.0,
+# rewrite the artifact-read.sh call so it reads from the AFH-11
+# synthetic via plain jq, and assert the selected IDs still match the
+# v0.4.2-widened expectation. Any non-trivial predicate drift breaks
+# this assertion.
+afh13_frag="$REPO/fragments/06b-auto-fix-hint.md"
+# Extract the bash block between the fence markers. The fences are
+# HTML comments wrapping the ```bash ... ``` block; awk prints lines
+# strictly between START and END markers.
+afh13_block=$(awk '
+    /<!-- AFH-PREDICATE-START -->/ { inblock = 1; next }
+    /<!-- AFH-PREDICATE-END -->/   { inblock = 0 }
+    inblock { print }
+' "$afh13_frag")
+if [[ -z "$afh13_block" ]]; then
+    fail "AFH-13: could not extract canonical predicate block from $afh13_frag — fence markers AFH-PREDICATE-START / AFH-PREDICATE-END missing or out of order"
+fi
+# Extract just the jq filter body from inside the artifact-read.sh
+# --filter '...' single-quoted argument. The filter spans from the
+# first line after "--filter '" up to (but not including) the closing
+# "  ')" line. The result is a self-contained jq expression operating
+# on the artifact root {findings: [...]}.
+afh13_filter=$(printf '%s\n' "$afh13_block" | awk '
+    /--filter / { capture = 1; next }
+    capture && /^[[:space:]]*'"'"'\)$/ { capture = 0 }
+    capture { print }
+')
+if [[ -z "$afh13_filter" ]]; then
+    fail "AFH-13: extracted block did not contain an artifact-read.sh --filter '...' jq body — block shape changed?"
+fi
+# Execute the canonical filter against the AFH-11 synthetic and
+# extract the .id of each selected element, sorted. Append the sort +
+# join to the extracted filter (which itself ends with a "| ... ]"
+# array constructor).
+afh13_selected=$(printf '%s' "$afh11_synth" \
+    | jq -r "$afh13_filter"' | map(.id) | sort | join(",")')
+if [[ "$afh13_selected" == "F-DM,F-LM,F-MAN,F-REP" ]]; then
+    pass "AFH-13 (v0.4.2 fragment behavior): canonical predicate extracted from fragments/06b-auto-fix-hint.md §5.5.0 selects expected ids on AFH-11 synthetic (drift catches: score threshold, lane gate re-add, missing select clause)"
+else
+    fail "AFH-13: canonical fragment predicate selected '$afh13_selected'; expected 'F-DM,F-LM,F-MAN,F-REP' — fragments/06b-auto-fix-hint.md §5.5.0 has drifted from the v0.4.2 contract"
+fi
+
 # ---------------------------------------------------------------- walkthrough
 #
 # WT-* cover the /adamsreview:walkthrough command surface. WT-1..WT-4 exercise
