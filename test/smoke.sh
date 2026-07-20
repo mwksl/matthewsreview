@@ -4885,7 +4885,8 @@ cat > "$AD_HOME/bin/codex" <<'EOF'
 cat >/dev/null
 out=""
 while [[ $# -gt 0 ]]; do case "$1" in -o) out="$2"; shift 2;; *) shift;; esac; done
-echo '{"msg":{"type":"token_count","payload":{"info":{"total_token_usage":{"total_tokens":777}}}}}'
+# real codex exec JSONL terminal event shape (CLI 0.145.x)
+echo '{"type":"turn.completed","usage":{"input_tokens":700,"cached_input_tokens":300,"output_tokens":77}}'
 [[ -n "$out" ]] && echo "codex done" > "$out"
 EOF
 cat > "$AD_HOME/bin/omp" <<'EOF'

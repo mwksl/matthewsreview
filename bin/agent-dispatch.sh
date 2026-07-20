@@ -175,7 +175,17 @@ poll)
                         raw=$(jq -rs '[.[] | objects | (.msg // .) | select(.type? == "agent_message") | .message] | last // ""' "$dir/out" 2>/dev/null)
                         [[ -z "$raw" ]] && raw=$(cat "$dir/out")
                     fi
-                    tokens=$(jq -rs '[.[] | objects | (.msg // .) | select(.type? == "token_count") | (.payload.info.total_token_usage.total_tokens? // .payload.total_tokens? // empty)] | last // null' "$dir/out" 2>/dev/null || echo null)
+                    # Real codex exec JSONL (verified on CLI 0.145.x): terminal
+                    # {"type":"turn.completed","usage":{input_tokens,
+                    # cached_input_tokens, output_tokens, ...}}. cached is a
+                    # SUBSET of input — don't add it. Legacy token_count
+                    # shape kept as fallback.
+                    tokens=$(jq -rs '
+                        ([.. | objects | select(.type? == "turn.completed") | .usage
+                          | ((.input_tokens // 0) + (.output_tokens // 0))] | last)
+                        // ([.. | objects | (.msg // .) | select(.type? == "token_count")
+                          | (.payload.info.total_token_usage.total_tokens? // .payload.total_tokens? // empty)] | last)
+                        // null' "$dir/out" 2>/dev/null || echo null)
                     [[ -z "$tokens" ]] && tokens=null
                     ;;
                 omp|*)
