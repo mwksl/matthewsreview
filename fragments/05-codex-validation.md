@@ -314,7 +314,7 @@ each drop to `trace.md` with tag `phase_4a_codex_dropped:<finding_id>
 reason=<short cause>`.
 
 If MORE THAN HALF of deep-lane findings drop, dispatch
-`AskUserQuestion` once for the phase:
+ASK once for the phase:
 
 ```
 "<N> of <M> deep-lane Codex validators failed. Continue with degraded
@@ -527,7 +527,7 @@ chunk (`score_phase4: null`, `decision: uncertain`). Log each drop:
 `phase_4b_codex_dropped:<chunk_n> ids=<comma-sep>`.
 
 If more than half of light-lane chunks drop, escalate via
-`AskUserQuestion` per the §4.2.4 pattern.
+the ASK primitive per the §4.2.4 pattern.
 
 #### 4.3.4. Log tokens
 

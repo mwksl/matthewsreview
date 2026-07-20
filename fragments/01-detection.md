@@ -127,7 +127,7 @@ lens claim.
 This gate runs before the dispatch turn so a missing-CLI prompt surfaces
 ahead of any token spend. Under `ensemble_mode=false` it's a one-line
 no-op; under `ensemble_mode=true` it probes Codex, may prompt the user
-via `AskUserQuestion`, and prepares the scratch directory + Codex
+via ASK, and prepares the scratch directory + Codex
 prompt file for the joint dispatch at step 1.3.
 
 **When `ensemble_mode != true`:**
@@ -156,9 +156,19 @@ Check Codex availability:
 ```bash
 CODEX_COMPANION="$(find ~/.claude/plugins -type f -name codex-companion.mjs -path '*codex*' 2>/dev/null | head -1)"
 if [[ -z "$CODEX_COMPANION" ]]; then
-    codex_available=false
-    codex_reason="companion script not found — run /codex:setup"
+    # Non-Claude-Code orchestrators (omp, Codex) have no codex plugin.
+    # Fall back to the standalone CLI via agent-dispatch.sh when present.
+    if command -v codex >/dev/null 2>&1; then
+        codex_available=true
+        codex_launch_mode="agent-dispatch"
+        printf '%s\n' "Phase 1 readiness: companion not found; using codex CLI via agent-dispatch.sh" \
+            >> "$review_dir/trace.md"
+    else
+        codex_available=false
+        codex_reason="companion script not found and no codex CLI on PATH — run /codex:setup or install Codex CLI"
+    fi
 else
+    codex_launch_mode="companion"
     # Companion CLI surface: `setup --json` emits {"ready": true|false, ...}.
     # The older `ready` subcommand does not exist — parse the JSON's
     # `.ready` boolean instead of grep-matching a literal string.
@@ -189,7 +199,7 @@ else
         # re-probe) costs a Codex turn on every cold start.
         #
         # Any other not-ready shape (missing CLI, direct-mode failure,
-        # malformed payload) falls through to the AskUserQuestion
+        # malformed payload) falls through to the ASK
         # prompt below.
         cx_mode=$(jq -r '.sessionRuntime.mode // ""' <<<"$codex_setup_json" 2>/dev/null)
         cx_cli=$(jq -r '.codex.available // false' <<<"$codex_setup_json" 2>/dev/null)
@@ -207,8 +217,10 @@ else
 fi
 ```
 
-**If Codex is available**, proceed silently. **If Codex is
-unavailable**, dispatch `AskUserQuestion` **once** with two options:
+**If Codex is available**, proceed silently (default
+`codex_launch_mode=companion` unless the fallback above set
+`agent-dispatch`). **If Codex is unavailable**, ASK **once** with two
+options:
 
 - **Proceed without Codex** — in PR mode, continue with the PR
   bot-comment scrape only; in local mode, this leaves Phase 1.5 with
@@ -307,7 +319,7 @@ consumed once at step 1.3 (L2's prompt). No artifact write here —
 suspects are prompt input, not findings.
 
 **Finally, capture `phase_1_5_start_epoch`** — AFTER the readiness-gate
-`AskUserQuestion` (from step 1.2a) may have run AND after the prior-fix
+ASK primitive (from step 1.2a) may have run AND after the prior-fix
 helper completes, so neither user-response wait time nor helper runtime
 is billed into Phase 1.5's elapsed:
 
@@ -329,8 +341,8 @@ dispatch turn and the two `elapsed_sec` values naturally overlap in
 `fragments/lens-prompts/L<N>.md` files plus
 `fragments/lens-prompts/_shared-invariants.md` first (these `Read`
 tool-uses can run in parallel within one orchestrator turn). Then
-issue EVERY applicable lens's `Agent` tool-use in a SINGLE
-orchestrator turn so they run concurrently — alongside the ensemble
+issue EVERY applicable lens's DISPATCH in a SINGLE
+batch (Prelude §3.4) so they run concurrently — alongside the ensemble
 fan-out's background `Bash` call when `ensemble_mode == true` (see
 the "Ensemble fan-out" sub-section below). The per-lens sub-sections
 that follow are declarative spec data — the dispatch model, prompt
@@ -467,7 +479,7 @@ values naturally overlap in `phases.jsonl`, and
 `--argjson accum "$internal_candidates"` appends require.
 
 **Dispatch.** With every applicable lens's spec assembled (L1–L7
-sub-sections above), issue every applicable lens's `Agent` tool-use
+sub-sections above), issue every applicable lens's DISPATCH
 in a SINGLE orchestrator turn. The per-lens sub-sections are
 reference data — a parameter sweep, not a turn sweep. Phase 1
 wall-clock latency is `max(lens_durations)`, not `sum(lens_durations)`.

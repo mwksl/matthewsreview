@@ -6,7 +6,7 @@ user-facing-change classifier (step 0.9), and that's skipped in trivial mode.
 **Run every Bash command in this phase in the foreground — do NOT use
 `run_in_background`.** Phase 0's output (branch detection, dirty-tree
 status, freshness prompts) is consumed inline by later steps and by
-`AskUserQuestion` dispatches; backgrounded shells leave the orchestrator
+ASK dispatches; backgrounded shells leave the orchestrator
 unable to read the output and the session stalls on a variable that
 never gets assigned.
 
@@ -67,7 +67,7 @@ Capture `base_branch`.
 
 Phase-0 invariant preventing stale-local-`base_branch` runs from poisoning
 downstream lenses / blame. `freshness-gate.sh` owns remote detect, fetch,
-and behind-count; orchestrator owns `AskUserQuestion`.
+and behind-count; orchestrator owns the ASK primitive.
 
 ```bash
 # Initialize preflight_warnings ONCE — prior-call warnings must survive
@@ -214,7 +214,7 @@ else
 fi
 ```
 
-If `$behind > 0`, `AskUserQuestion` once:
+If `$behind > 0`, ASK once:
 
 > Branch `$head_branch` is `$behind` commits behind `$comparison_ref`
 > (the diff base for this review). The lens diff includes phantom
@@ -249,7 +249,7 @@ repos have no CLAUDE.md).
 
 Run `git status --porcelain`. If output is non-empty, briefly list what's
 uncommitted (filenames only, categorized as Modified / Staged / Untracked —
-do NOT dump the diff). Then use `AskUserQuestion` once with three options:
+do NOT dump the diff). Then ASK once with three options:
 
 - **Stash my changes, run review, restore** (recommended). Run
   `git stash push -u -m "pre-matthews-review-stash"` now; at end of Phase 6,
@@ -361,7 +361,7 @@ If the file exists and is non-empty, read its contents as
 `prior_review_id`. Read `<reviews_root>/<repo_slug>/<head_branch>/<prior_review_id>/artifact.json`
 and determine the prior state:
 
-| Condition | AskUserQuestion prompt |
+| Condition | ASK prompt |
 |---|---|
 | `prior.reviewed_sha == reviewed_sha` AND no `fix_attempts` on any finding | "You have a review for this exact commit from `<date>`. Re-run fresh, or abort?" |
 | `prior.reviewed_sha == reviewed_sha` AND some finding has a `fix_attempts[-1]` whose `output_sha` matches `HEAD` | "You have a review that was already fixed at this commit. Re-run fresh, or abort?" |
@@ -395,7 +395,7 @@ gh api --paginate "repos/$(gh repo view --json nameWithOwner -q .nameWithOwner)/
        | last // empty | .id'
 ```
 
-If a comment id is returned, run `AskUserQuestion` with three choices:
+If a comment id is returned, run ASK with three choices:
 
 - **(a) Post a new comment alongside the existing one** (default). The
   prior comment stays on the PR untouched; this run's rendered artifact

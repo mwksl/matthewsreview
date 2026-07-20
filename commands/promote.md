@@ -75,7 +75,7 @@ If no `finding_id` was provided, error-as-prompt:
 > Valid input: /matthewsreview:promote F037 [--reason "..."] [--fix-hint "..."] [--force]
 > Action: pass a finding id (matching `^F[0-9]+$`) as the first arg.
 
-If `--reason` was not provided, dispatch `AskUserQuestion` once with
+If `--reason` was not provided, ASK once with
 three options:
 - "Validator was too conservative — the issue is real."
 - "I've verified this manually and want it auto-fixed."

@@ -259,7 +259,7 @@ Prepend a one-line mode-aware header:
 - `local` → `### Code review (local — \`$head_branch\` vs \`$base_branch\`)`
 
 After the main report body (the contents of `artifact.md`), add a
-**Next steps** block. Do NOT use `AskUserQuestion` here.
+**Next steps** block. Do NOT use ASK here.
 
 Render this block verbatim (with the review's actual threshold
 default):

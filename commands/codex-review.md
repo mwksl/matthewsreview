@@ -63,7 +63,7 @@ Codex job failures (non-zero exit, malformed output, sentinel timeout)
 are handled per the **adaptive retry-with-orchestrator-judgment**
 policy: retry up to 3 times with the same prompt; on persistent
 failure, drop the affected unit (lens / finding / chunk) and escalate
-to the user via `AskUserQuestion` ("L2 failed; continue with 6 lenses
+to the user via ASK ("L2 failed; continue with 6 lenses
 or abort?"). Log every drop to `trace.md` with tag
 `phase_<N>_codex_dropped:<unit_id>`. This policy is restated where it
 applies in each Codex-using fragment.
@@ -108,14 +108,14 @@ readiness probe.
 
 **Claude sub-agents** (Sonnet shape-fixers, normalizer, dedup, scoring):
 
-Every `Agent` tool-use specifies:
+Every DISPATCH specifies:
 - `subagent_type: general-purpose`
 - `model:` the model segment of the role string (`normalizer` for
   shape-fixer / normalizer dispatches; `scoring` for Phase 3 — both
   default claude:sonnet)
 
-Parallel fan-outs happen by firing multiple Agent tool-use blocks in a
-single orchestrator turn.
+Parallel fan-outs happen by issuing every DISPATCH in one batch
+(Prelude §3.4).
 
 ## Argument handling
 

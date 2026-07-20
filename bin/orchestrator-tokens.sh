@@ -149,6 +149,15 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Harness guard: when the transcript dir was DERIVED (not explicitly
+# passed) and doesn't exist, this isn't a Claude Code session (omp /
+# Codex orchestrator, or a fresh machine). Skip like the opt-out path —
+# a zero rollup would write misleading zero counters into the artifact.
+if [[ ! -d "$TRANSCRIPT_DIR" ]]; then
+    echo "orchestrator-tally: skipped (no transcript dir $TRANSCRIPT_DIR — not a Claude Code session)"
+    exit 0
+fi
+
 # Collect transcripts. Missing dir or zero matches → zero rollup.
 # `sort` makes the sessions[] ordering deterministic for testing; jq's
 # later sort_by(.first_seen) is the user-facing order.

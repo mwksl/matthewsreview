@@ -121,7 +121,7 @@ self-critique — independence is the second-opinion mechanism.
 ### 5.5.2. Generation pass — one Sonnet sub-agent per chunk
 
 ★ **Parallel dispatch — load-bearing.** Issue every generation
-sub-agent's `Agent` tool-use in a SINGLE orchestrator turn so they
+sub-agent's DISPATCH in a SINGLE batch (Prelude §3.4) so they
 run concurrently. Phase 5.5 wall-clock latency is
 `max(chunk_durations) * 2` (gen + verify), not
 `sum(chunk_durations) * 2`. Treating each chunk as its own turn

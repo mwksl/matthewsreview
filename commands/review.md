@@ -58,8 +58,10 @@ Every Agent tool-use specifies:
   fragment names (roles resolve via the model plan; see
   `_prelude-shared.md` §Model plan & role resolution).
 
-**Parallel fan-outs** happen by firing multiple Agent tool-use blocks
-in a single orchestrator turn. Always batch within one turn.
+**Parallel fan-outs** happen by issuing every DISPATCH in one batch
+(Prelude §3.4: N Agent blocks in one turn on CC; one `parallel()` eval
+cell on omp; N `agent-dispatch.sh start` calls on Codex). Always batch
+within one turn.
 
 ## Argument handling
 

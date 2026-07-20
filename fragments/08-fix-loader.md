@@ -141,7 +141,7 @@ Otherwise categorize (filenames only — do NOT dump diffs) and prompt:
 - **Staged**: lines starting with `A` / `M` in the index column (first char).
 - **Untracked**: lines starting with `??`.
 
-Dispatch `AskUserQuestion` once with two options:
+Dispatch ASK once with two options:
 
 - **Stash my changes, run fix, restore** (recommended). Run
   `git stash push --include-untracked -m "pre-matthews-review-fix-stash"`
@@ -237,7 +237,7 @@ inspecting `trace.md` later can distinguish a genuinely-up-to-date
 branch (`behind=0`) from a silently-degraded gate (also `behind=0`).
 When the fetch fails AND the local fallback resolves to `behind=0`,
 emit a `branch_behind_base degraded` trace line — the gate decides
-not to fire (no `AskUserQuestion` since `behind == 0`), but the
+not to fire (no ASK since `behind == 0`), but the
 operator still needs a trail showing the count came from a possibly
 stale local ref.
 
@@ -281,7 +281,7 @@ else
         merge_ref="$base_branch"
         if [[ "$behind" == "0" ]]; then
             # Degraded fail-silent path: fetch failed, local rev-list
-            # resolved to 0. The AskUserQuestion below won't fire (gated
+            # resolved to 0. The ASK below won't fire (gated
             # on `behind > 0`), so without this trace line `trace.md`
             # has no signal distinguishing "branch genuinely fresh" from
             # "fetch failed, local says 0 but local may be stale."
@@ -307,7 +307,7 @@ All three branches (Proceed / Stop / Abort) write a distinct
 `branch_behind_base <verdict>` audit line to `trace.md` so an operator
 reading the trace later can tell which path the user took.
 
-If `$behind > 0`, `AskUserQuestion` once:
+If `$behind > 0`, ASK once:
 
 > Branch `$head_branch` is `$behind` commits behind `$base_branch`.$fetch_note
 > The fix run will edit code that may merge-conflict with `$base_branch`,
@@ -501,7 +501,7 @@ no tool call) covering every promotable finding. Surface
 **concerns** prominently — they are the load-bearing signal for
 "don't blindly accept this hint." Show concerns in their own column
 (or italicized inline below the row when the table would otherwise
-overflow) so the user sees them before the AskUserQuestion fires:
+overflow) so the user sees them before the ASK fires:
 
 ```markdown
 **$auto_rec_count auto-recommendation(s) ready for batch confirm.**
@@ -537,7 +537,7 @@ Build the rows from `$auto_rec_promotable` via jq. Columns:
   OR `second_opinion == "concerns"`, italicize the entire row's
   concerns text so the user can scan low-confidence rows at a glance.
 
-Then dispatch `AskUserQuestion` with **four single-select options**,
+Then ASK with **four single-select options**,
 default highlighted on the first:
 
 - "⭐ Apply all (recommended) — auto-promote $auto_rec_count finding(s) and run Phase 8"
@@ -691,7 +691,7 @@ Loop over `$auto_rec_promotable` in order. For each entry:
    **Concerns:** <concerns joined with "; ">
    ```
 
-2. **Dispatch `AskUserQuestion`** with options:
+2. **Dispatch the ASK primitive** with options:
    - "⭐ Promote with this hint (recommended)" — uses
      `--apply-auto-rec-promotions` (the helper sources hint from
      `auto_fix_hint.hint`).
@@ -699,7 +699,7 @@ Loop over `$auto_rec_promotable` in order. For each entry:
      **$alt_i.label**: $alt_i.title" — falls through to the
      `promote-core.md` path with `fix_hint = alt_i.hint`.
    - "✎ Edit the hint" — captures a free-form replacement string via
-     a follow-up `AskUserQuestion`, then promotes via
+     a follow-up the ASK primitive, then promotes via
      `promote-core.md` with the edited hint.
    - "Skip this finding".
 

@@ -391,7 +391,7 @@ table: "N pre-existing finding(s) are excluded from both walk tiers
 and will be offered as GitHub issues at the end of the run." This
 prevents the "where did F005 go?" variant of the same confusion.
 
-Then dispatch `AskUserQuestion` with three options. Default
+Then ASK with three options. Default
 highlighted on Qualifying:
 
 - "⭐ Qualifying only — walk $scope_qualifying_count finding(s) (recommended)"
@@ -402,7 +402,7 @@ Edge case: if `scope_qualifying_count == 0` and `scope_full_count > 0`,
 the only useful walk choice is "Full." Offer only "Full" and "Cancel"
 in that case — no recommendation star, since Qualifying is empty.
 If `scope_full_count == 0` AND `scope_preexisting_count > 0` (only
-pre-existing findings remain), skip the walk `AskUserQuestion`
+pre-existing findings remain), skip the walk the ASK primitive
 entirely and set `scope_tier="none"` directly. Print a one-line note
 like "No walk scope at score floor $threshold; jumping to pre-existing
 issue filing." Then continue normally: the timestamp/reviewer
@@ -413,9 +413,9 @@ derived, and §6.5 takes over. The §7 guard
 ("decisions empty AND issues_filed empty → skip POST") handles the
 case where the reviewer then skips issue filing too.
 
-Bind the `AskUserQuestion` result to `$scope_tier` (one of
+Bind the the ASK primitive result to `$scope_tier` (one of
 `qualifying` / `full` / `cancel`). For the walk-skip edge case
-(scope_full_count == 0, AskUserQuestion bypassed), set
+(scope_full_count == 0, ASK bypassed), set
 `scope_tier="none"` directly. Then map it onto the loop variables
 the rest of the command uses:
 
@@ -568,7 +568,7 @@ of Accept-all."
 
 #### 4.5.3. Ask for the batch action
 
-Dispatch `AskUserQuestion` with three options. **Note on rationale:**
+Dispatch ASK with three options. **Note on rationale:**
 the original spec called for four options including a "Skip auto-rec
 batch" alongside "Walk through each." Both end with the same outcome
 (continue to §5 with full scope; the §5.2 short-circuit handles the
@@ -595,7 +595,7 @@ Compute `accept_ids` (comma-separated) and `accept_payload`
 accept_ids=$(jq -r '[.[].id] | join(",")' <<<"$auto_rec_in_scope")
 ```
 
-**`pick_subset`:** dispatch `AskUserQuestion` (multi-select) with
+**`pick_subset`:** ASK (multi-select) with
 one option per auto-rec finding:
 
 ```
@@ -975,9 +975,9 @@ log-tokens.sh \
 
 #### 5.3. Render the briefing to chat
 
-**Anti-instruction (between iterations).** Do not dispatch a spurious
-"continue / stop?" `AskUserQuestion` between per-finding iterations.
-The only `AskUserQuestion` the reviewer sees per finding is the
+**Anti-instruction (between iterations).** Do not ASK a spurious
+"continue / stop?" between per-finding iterations.
+The only the ASK primitive the reviewer sees per finding is the
 decision prompt at step 5.4, which already includes an explicit "Stop
 the walkthrough" option. Adding a standalone continue/stop check
 after each iteration double-prompts the reviewer and breaks the
@@ -1005,14 +1005,14 @@ glance:
 
 #### 5.4. Ask for a decision
 
-Dispatch `AskUserQuestion` with options built from the briefing:
+Dispatch ASK with options built from the briefing:
 
 - One option per `briefing.options[]` entry, labeled with its letter
   and title ("**A.** <title>").
 - **"✎ Edit the fix hint (for the recommended option)"** — picks the
   briefing's recommended option but overrides its
   `fix_hint_if_picked` with reviewer-supplied text. On selection,
-  dispatch one follow-up `AskUserQuestion` (free-form) capturing the
+  dispatch one follow-up ASK primitive (free-form) capturing the
   override string. Use when the recommended option's direction is
   right but the hint wording needs tightening or negative constraints
   added.
@@ -1290,14 +1290,14 @@ cleaner.
 
 #### 6.5.1. One-shot gate prompt
 
-Dispatch `AskUserQuestion`:
+Dispatch the ASK primitive:
 
 - "File all $scope_preexisting_count issue(s)"
 - "Pick a subset"
 - "Skip — don't file any"
 
 If the reviewer picks "Pick a subset," dispatch a follow-up
-`AskUserQuestion` with the finding ids as multi-select options
+ASK with the finding ids as multi-select options
 (fall back to a free-form comma-separated id list with validation
 when multi-select isn't available). Capture the selected ids into
 `filing_ids` (comma-separated). "File all" sets
@@ -1392,7 +1392,7 @@ Parse the returned text as JSON (one retry on parse failure). On
 second failure, log to `trace.md` under tag
 `walkthrough_issue_draft_failed:$finding_id` and surface a degraded
 UX: offer `Skip this finding` or `Write body free-form` (captured
-via one `AskUserQuestion` free-form follow-up).
+via one ASK free-form follow-up).
 
 Log the drafting agent's tokens:
 
@@ -1417,15 +1417,15 @@ log-tokens.sh \
 <draft.body>
 ```
 
-**Ask for the next action.** `AskUserQuestion`:
+**Ask for the next action.** the ASK primitive:
 
 - "Create issue"
 - "Edit the body first"
 - "Skip this finding"
 
-For "Edit the body first," dispatch one follow-up `AskUserQuestion`
+For "Edit the body first," dispatch one follow-up the ASK primitive
 (free-form) capturing the replacement body, then re-render and loop
-back to this same `AskUserQuestion`. Two edit rounds max per finding
+back to this same the ASK primitive. Two edit rounds max per finding
 to keep cadence predictable — after two, auto-offer Create/Skip only.
 
 **For "Skip this finding,"** continue to the next finding in

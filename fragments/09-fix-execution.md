@@ -126,7 +126,7 @@ on disk.
 > `sum(group_durations)`. Serializing turns the fix run into a per-group
 > timer; each group's edits are independent.
 
-Fan out one sub-agent per group, all in a single orchestrator turn.
+Fan out one sub-agent per group, all in a single batch (Prelude §3.4).
 Each agent uses `subagent_type: general-purpose`, role `fix` (default
 claude:opus), and receives the full §19.8 input per-group.
 
@@ -260,7 +260,7 @@ Capture `phase_8_start_epoch` at the top of the dispatch turn:
 phase_8_start_epoch=$(date +%s)
 ```
 
-Then fire all `group_count` Agent tool-use blocks in the same turn.
+Then fire all `group_count` DISPATCHes in the same batch (Prelude §3.4).
 Claude Code runs them concurrently.
 
 ### 8.6. Parse + record per-group results

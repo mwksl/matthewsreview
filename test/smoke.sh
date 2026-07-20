@@ -2276,16 +2276,16 @@ fi
 
 FRAG="$REPO/fragments/10-post-fix-and-commit.md"
 
-# FX-RECON-1: fragment offers a three-way AskUserQuestion on overlap,
+# FX-RECON-1: fragment offers a three-way ASK on overlap,
 # with Abort as the default (recommended) choice.
 if grep -q "9.pre.offer" "$FRAG" \
-   && grep -q "AskUserQuestion" "$FRAG" \
+   && grep -q "ASK with three options" "$FRAG" \
    && grep -q "Abort (recommended)" "$FRAG" \
    && grep -q "Reconcile — dispatch one merge agent" "$FRAG" \
    && grep -q "Inspect — leave tree as-is" "$FRAG"; then
-    pass "FX-RECON-1: 9.pre.offer presents three-way AskUserQuestion with Abort as default"
+    pass "FX-RECON-1: 9.pre.offer presents three-way ASK with Abort as default"
 else
-    fail "FX-RECON-1: fragment missing one of {9.pre.offer, AskUserQuestion, Abort/Reconcile/Inspect options}"
+    fail "FX-RECON-1: fragment missing one of {9.pre.offer, ASK with three options, Abort/Reconcile/Inspect options}"
 fi
 
 # FX-RECON-2: reconcile branch collapses fix_groups to a synthetic
@@ -4525,20 +4525,19 @@ else
     fail "OT-1: slug mismatch" "expected=[$ot1_expected] got=[$ot1_slug]"
 fi
 
-# OT-2: missing transcript dir → zero rollup; schema-validates.
-"$TOOLS/orchestrator-tokens.sh" \
+# OT-2: missing transcript dir → harness-guard skip (omp/Codex orchestrator
+# shape): exit 0, skip line on stdout, orchestrator_tokens left ABSENT —
+# never misleading zero counters.
+ot2_stdout=$("$TOOLS/orchestrator-tokens.sh" \
     --artifact "$OT_DIR/artifact.json" \
     --since    "2026-04-21T00:00:00.000Z" \
-    --transcript-dir "$OT_DIR/does-not-exist" \
-    >/dev/null 2>&1 || fail "OT-2: helper exit non-zero on missing dir"
-ot2_total_input=$(jq -r '.orchestrator_tokens.total_input' "$OT_DIR/artifact.json")
-ot2_turns=$(jq -r '.orchestrator_tokens.turn_count' "$OT_DIR/artifact.json")
-ot2_sessions=$(jq -c '.orchestrator_tokens.sessions' "$OT_DIR/artifact.json")
-if [[ "$ot2_total_input" == "0" && "$ot2_turns" == "0" && "$ot2_sessions" == "[]" ]] \
+    --transcript-dir "$OT_DIR/does-not-exist" 2>&1); code=$?
+ot2_field=$(jq -r '.orchestrator_tokens // "absent"' "$OT_DIR/artifact.json")
+if [[ $code -eq 0 && "$ot2_stdout" == *"skipped"* && "$ot2_field" == "absent" ]] \
    && "$TOOLS/artifact-validate.sh" --path "$OT_DIR/artifact.json" >/dev/null 2>&1; then
-    pass "OT-2: missing transcript dir → zero rollup; schema-validates"
+    pass "OT-2: missing transcript dir → skip line, field absent, schema-valid"
 else
-    fail "OT-2: expected zeros + valid artifact; got input=$ot2_total_input turns=$ot2_turns sessions=$ot2_sessions"
+    fail "OT-2: expected skip + absent field; got code=$code field=$ot2_field stdout=$ot2_stdout"
 fi
 
 # OT-3: one synthetic transcript, 3 in-window assistant turns with known
@@ -4870,6 +4869,120 @@ if [[ $code -ne 0 && "$gb_err" == *"confirmed band (>=60)"* ]]; then
     pass "GB-2: non-ascending phase4_bands ignored (defaults apply; error names resolved band)"
 else
     fail "GB-2: malformed-bands fallback mismatch" "code=$code err=$gb_err"
+fi
+
+# ------------------------------------------------------------------
+# AD: agent-dispatch.sh — harness-neutral engine dispatch (stubbed engines)
+AD_HOME="$WORK/ad"
+mkdir -p "$AD_HOME/bin" "$AD_HOME/scratch"
+cat > "$AD_HOME/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+echo '{"type":"result","result":"claude done","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":25,"cache_creation_input_tokens":10}}'
+EOF
+cat > "$AD_HOME/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+out=""
+while [[ $# -gt 0 ]]; do case "$1" in -o) out="$2"; shift 2;; *) shift;; esac; done
+echo '{"msg":{"type":"token_count","payload":{"info":{"total_token_usage":{"total_tokens":777}}}}}'
+[[ -n "$out" ]] && echo "codex done" > "$out"
+EOF
+cat > "$AD_HOME/bin/omp" <<'EOF'
+#!/usr/bin/env bash
+echo "omp done"
+EOF
+cat > "$AD_HOME/bin/claude-fail" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null; echo "boom: overloaded" >&2; exit 2
+EOF
+chmod +x "$AD_HOME/bin/"*
+echo "test prompt" > "$AD_HOME/prompt.md"
+AD="$TOOLS/agent-dispatch.sh"
+ad_path() { PATH="$AD_HOME/bin:/usr/bin:/bin" "$@"; }
+
+# AD-1: claude engine completes with tokens summed across all usage buckets
+ad_j=$(ad_path "$AD" start --engine claude --model opus --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+sleep 1
+ad_out=$(ad_path "$AD" poll --job "$ad_j" --scratch-dir "$AD_HOME/scratch")
+if [[ $(printf '%s' "$ad_out" | jq -r '.verdict') == "completed" ]] \
+   && [[ $(printf '%s' "$ad_out" | jq -r '.tokens') == "185" ]] \
+   && [[ $(printf '%s' "$ad_out" | jq -r '.raw_output') == "claude done" ]]; then
+    pass "AD-1: claude engine start/poll → completed, tokens=185 (all usage buckets), raw_output from .result"
+else
+    fail "AD-1: claude dispatch mismatch" "$ad_out"
+fi
+
+# AD-2: codex engine extracts last-message file + token_count JSONL
+ad_j=$(ad_path "$AD" start --engine codex --effort high --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+sleep 1
+ad_out=$(ad_path "$AD" poll --job "$ad_j" --scratch-dir "$AD_HOME/scratch")
+if [[ $(printf '%s' "$ad_out" | jq -r '.verdict') == "completed" ]] \
+   && [[ $(printf '%s' "$ad_out" | jq -r '.tokens') == "777" ]] \
+   && [[ $(printf '%s' "$ad_out" | jq -r '.raw_output') == "codex done" ]]; then
+    pass "AD-2: codex engine start/poll → completed, tokens=777 (token_count event), raw_output from -o file"
+else
+    fail "AD-2: codex dispatch mismatch" "$ad_out"
+fi
+
+# AD-3: omp engine completes, tokens null (no usage surface)
+ad_j=$(ad_path "$AD" start --engine omp --model "anthropic/claude-sonnet-4-5" --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+sleep 1
+ad_out=$(ad_path "$AD" poll --job "$ad_j" --scratch-dir "$AD_HOME/scratch")
+if [[ $(printf '%s' "$ad_out" | jq -r '.verdict') == "completed" ]] \
+   && [[ $(printf '%s' "$ad_out" | jq -r '.tokens') == "null" ]] \
+   && [[ $(printf '%s' "$ad_out" | jq -r '.raw_output') == "omp done" ]]; then
+    pass "AD-3: omp engine start/poll → completed, tokens=null"
+else
+    fail "AD-3: omp dispatch mismatch" "$ad_out"
+fi
+
+# AD-4: failed engine → failed_terminal with exit code + error tail
+PATH="$AD_HOME/bin:/usr/bin:/bin" "$AD" start --engine claude-fail --model x --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" >/dev/null 2>&1
+# start requires a KNOWN engine; claude-fail is not one — use claude with a failing stub instead
+mv "$AD_HOME/bin/claude" "$AD_HOME/bin/claude-ok"
+cp "$AD_HOME/bin/claude-fail" "$AD_HOME/bin/claude"
+ad_j=$(ad_path "$AD" start --engine claude --model opus --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+sleep 1
+ad_out=$(ad_path "$AD" poll --job "$ad_j" --scratch-dir "$AD_HOME/scratch")
+mv "$AD_HOME/bin/claude-ok" "$AD_HOME/bin/claude"
+if [[ $(printf '%s' "$ad_out" | jq -r '.verdict') == "failed_terminal" ]] \
+   && [[ $(printf '%s' "$ad_out" | jq -r '.exit_code') == "2" ]] \
+   && [[ $(printf '%s' "$ad_out" | jq -r '.error_tail') == *"overloaded"* ]]; then
+    pass "AD-4: failing engine → failed_terminal with exit_code + error_tail"
+else
+    fail "AD-4: failed-terminal path mismatch" "$ad_out"
+fi
+
+# AD-5: start returns immediately (background child must not hold the
+# caller's stdout pipe — the 30s-stub regression) and stop → failed 143
+cat > "$AD_HOME/bin/sleeper-engine.sh" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null; sleep 30
+EOF
+chmod +x "$AD_HOME/bin/sleeper-engine.sh"
+cp "$AD_HOME/bin/sleeper-engine.sh" "$AD_HOME/bin/codex.sav"
+mv "$AD_HOME/bin/codex" "$AD_HOME/bin/codex.fast"
+cp "$AD_HOME/bin/sleeper-engine.sh" "$AD_HOME/bin/codex"
+ad_t0=$(date +%s)
+ad_j=$(ad_path "$AD" start --engine codex --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+ad_elapsed=$(( $(date +%s) - ad_t0 ))
+ad_v1=$(ad_path "$AD" poll --job "$ad_j" --scratch-dir "$AD_HOME/scratch" | jq -r .verdict)
+ad_path "$AD" stop --job "$ad_j" --scratch-dir "$AD_HOME/scratch" >/dev/null
+ad_v2=$(ad_path "$AD" poll --job "$ad_j" --scratch-dir "$AD_HOME/scratch" | jq -r '.verdict + ":" + (.exit_code|tostring)')
+mv "$AD_HOME/bin/codex.fast" "$AD_HOME/bin/codex"
+if [[ $ad_elapsed -lt 5 && "$ad_v1" == "alive" && "$ad_v2" == "failed_terminal:143" ]]; then
+    pass "AD-5: start non-blocking (<5s on 30s child); alive → stop → failed_terminal:143"
+else
+    fail "AD-5: lifecycle mismatch" "elapsed=${ad_elapsed}s v1=$ad_v1 v2=$ad_v2"
+fi
+
+# AD-6: missing engine CLI → exit 5 with install action
+ad_err=$(PATH="/usr/bin:/bin" "$AD" start --engine omp --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" 2>&1); code=$?
+if [[ $code -eq 5 && "$ad_err" == *"not on PATH"* && "$ad_err" == *"Action:"* ]]; then
+    pass "AD-6: missing engine CLI → exit 5 with install action"
+else
+    fail "AD-6: missing-CLI path mismatch" "code=$code err=$ad_err"
 fi
 
 # ------------------------------------------------------------------ Project F: LLM output normalization
@@ -5968,16 +6081,16 @@ if grep -q '### 3a. Branch-behind-base advisory' <<<"$BB_ADD_BODY" \
    && grep -qF 'git merge $merge_ref' <<<"$BB_ADD_BODY" \
    && grep -qF 'fetch_note=' <<<"$BB_ADD_BODY" \
    && grep -qE '^allowed-tools:.*AskUserQuestion' "$BB_ADD" \
-   && grep -qF '`AskUserQuestion` once:' <<<"$BB_ADD_BODY" \
+   && grep -qF 'ASK once:' <<<"$BB_ADD_BODY" \
    && grep -qF 'branch_behind_base proceeded behind=%s merge_ref=%s fetch_ok=%s' <<<"$BB_ADD_BODY" \
    && grep -qF 'branch_behind_base stopped behind=%s merge_ref=%s fetch_ok=%s' <<<"$BB_ADD_BODY" \
    && grep -qF 'branch_behind_base aborted behind=%s merge_ref=%s fetch_ok=%s' <<<"$BB_ADD_BODY" \
    && grep -qF 'branch_behind_base unresolvable fetch_ok=true local_resolve=false' <<<"$BB_ADD_BODY" \
    && grep -qF 'branch_behind_base unresolvable fetch_ok=false local_resolve=false' <<<"$BB_ADD_BODY" \
    && grep -qF 'branch_behind_base degraded fetch_ok=false local_resolve=true behind=0' <<<"$BB_ADD_BODY"; then
-    pass "BB-3: /matthewsreview:add §3a branch-behind-base gate present (active fetch with 30s timeout + fetch_ok routing structure + merge_ref tracked AND consumed in Stop guidance + fetch_note + AskUserQuestion grant + §3a invocation prose + Proceed/Stop/Abort traces + unresolvable-path warning both fetch_ok branches + degraded-path warning)"
+    pass "BB-3: /matthewsreview:add §3a branch-behind-base gate present (active fetch with 30s timeout + fetch_ok routing structure + merge_ref tracked AND consumed in Stop guidance + fetch_note + AskUserQuestion grant + §3a ASK prose + Proceed/Stop/Abort traces + unresolvable-path warning both fetch_ok branches + degraded-path warning)"
 else
-    fail "BB-3: §3a header/fetch with 30s timeout/fetch_ok routing/merge_ref assignment AND Stop-consumer/fetch_note/AskUserQuestion grant AND §3a invocation/Proceed/Stop/Abort traces/unresolvable-path warning/degraded-path warning missing in $BB_ADD (§3a slice)"
+    fail "BB-3: §3a header/fetch with 30s timeout/fetch_ok routing/merge_ref assignment AND Stop-consumer/fetch_note/AskUserQuestion grant AND §3a ASK/Proceed/Stop/Abort traces/unresolvable-path warning/degraded-path warning missing in $BB_ADD (§3a slice)"
 fi
 
 # UV-1: every uv-shebang Python helper uses `--quiet --script`, not bare
@@ -6256,10 +6369,10 @@ cr12a_window=$(awk '
     /^#### L1 /          {if (in_window) in_window=0}
     in_window            {print}
 ' "$REPO/fragments/01-detection.md" | tr '\n' ' ')
-if printf '%s' "$cr12a_window" | grep -qE 'SINGLE[[:space:]]+orchestrator[[:space:]]+turn'; then
+if printf '%s' "$cr12a_window" | grep -qE 'SINGLE[[:space:]]+(orchestrator[[:space:]]+turn|batch)'; then
     pass "CR-12a: fragments/01-detection.md §1.3 carries top-of-section SINGLE-turn parallel-dispatch directive (regression guard for lens-prompt extraction serializing dispatch)"
 else
-    fail "CR-12a: fragments/01-detection.md §1.3 missing top-of-section 'SINGLE orchestrator turn' directive between §1.3 header and the first L1 sub-section"
+    fail "CR-12a: fragments/01-detection.md §1.3 missing top-of-section 'SINGLE turn/batch' directive between §1.3 header and the first L1 sub-section"
 fi
 
 # Flatten newlines before the imperative grep — the per-lens prose

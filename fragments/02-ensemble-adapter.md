@@ -62,7 +62,9 @@ under option (b) `used_remote_ref`).
 **Codex:**
 
 The prompt file was already written in 01-detection.md step 1.2a (the
-readiness gate). Just invoke the CLI:
+readiness gate). Invoke per `codex_launch_mode`:
+
+*`codex_launch_mode == "companion"` (default on Claude Code):*
 
 ```bash
 node "$CODEX_COMPANION" task --prompt-file "/tmp/matthews-review-codex-$review_id.md" \
@@ -70,10 +72,45 @@ node "$CODEX_COMPANION" task --prompt-file "/tmp/matthews-review-codex-$review_i
 ```
 
 Launch with the Bash tool using `run_in_background: true`. Capture the
-returned shell id as `codex_shell_id`. If `codex_available == false`,
-skip this launch.
+returned shell id as `codex_shell_id`.
+
+*`codex_launch_mode == "agent-dispatch"` (omp / Codex orchestrators,
+companion absent):*
+
+```bash
+"${MRB}agent-dispatch.sh" start --engine codex \
+  --model "${role_ensemble_detect_model:-}" --effort "${role_ensemble_detect_effort:-high}" \
+  --prompt-file "/tmp/matthews-review-codex-$review_id.md" \
+  --scratch-dir "$scratch_dir"
+```
+
+(`role_ensemble_detect_model`/`role_ensemble_detect_effort` come from
+the `ensemble_detect` role in the model plan — Prelude §2.) Capture
+the returned `job_id` as `codex_job_id`. Polling happens in §1.5.3.
+
+If `codex_available == false`, skip this launch.
 
 ### 1.5.3. Collect CLI reviewer output
+
+*`codex_launch_mode == "agent-dispatch"`:* poll via the helper's
+shared verdict vocabulary instead of BashOutput:
+
+```bash
+"${MRB}agent-dispatch.sh" poll --job "$codex_job_id" --scratch-dir "$scratch_dir" \
+  --stall-threshold-sec 90 --wall-clock-ceiling-sec "$ensemble_ceiling_sec"
+```
+
+(`$ensemble_ceiling_sec` = the size-scaled deadline from §Deadline
+scaling — default 600 + 60s per 1,000 changed lines, cap 2×.) Loop on
+`alive`/`stalled_suspect`; on `completed` the payload's `raw_output`
+is the reviewer output (write it to `$scratch_dir/codex.out` so the
+normalizer path below is mode-agnostic) and `tokens` logs via
+log-tokens.sh; on `wall_clock_exceeded` run `agent-dispatch.sh stop`,
+set `codex_timed_out=true`; on `failed_terminal` set
+`codex_exit_code` from the payload and continue as with the companion
+failure path.
+
+*`codex_launch_mode == "companion"`:*
 
 Poll the background shell via the `BashOutput` tool — it's the only
 non-blocking read-current-output mechanism granted in

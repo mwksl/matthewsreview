@@ -37,7 +37,7 @@ fi
 
 Delete-leak (`deleted_paths` non-empty) goes straight to abort — v1 revert
 can't handle deletes and neither can reconcile, so no merge offer. For
-plain overlap, offer a three-way `AskUserQuestion` before abort.
+plain overlap, offer a three-way the ASK primitive before abort.
 
 Snapshot for commit message + trace:
 
@@ -62,7 +62,7 @@ Fix agents touched overlapping files:
 Choose how to proceed.
 ```
 
-Dispatch `AskUserQuestion` with three options; Abort highlighted as default:
+Dispatch ASK with three options; Abort highlighted as default:
 
 - "⭐ Abort (recommended) — discard all edits, restore tree, reset state, re-run manually"
 - "Reconcile — dispatch one merge agent to combine edits, then run full Phase 9 review"

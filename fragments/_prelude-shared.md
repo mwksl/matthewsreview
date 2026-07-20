@@ -11,6 +11,11 @@ Before branching on its content — immediately, in order:
    structured `usage` field when available; otherwise parse
    `<usage>total_tokens: N</usage>` from the sub-agent's output text.
    On parse failure, log with tokens value `null` (i.e. `--tokens null`).
+   On **omp** (eval-bridge dispatch), when the result exposes no usage
+   field, log `--tokens null` — do not estimate. On **Codex**,
+   `agent-dispatch.sh poll` emits the token count parsed from the
+   engine's own usage events (codex JSONL `token_count` / claude `-p`
+   JSON usage); `null` when the engine reports none.
 2. **Call `log-tokens.sh`** with the phase, agent_role, agent_id,
    model, finding_id (when applicable), and the tokens value. This
    is the invariant: every sub-agent's cost is accounted
@@ -69,7 +74,94 @@ captured — `role_deep_lens`, `role_deep_validate`,
 `role_codex_detect`, `role_codex_validate`, `role_codex_crosscut` — so
 every fragment reads `role_<name>` without re-querying.
 
-## 3. Helper-script errors — error-as-prompt
+## 3. Dispatch Protocol — DISPATCH / ASK primitives
+
+Commands and fragments never name harness tools (`Agent`,
+`AskUserQuestion`, `task`, `eval`, `ask`). They use two primitives;
+you map them to your harness once, here.
+
+### 3.1. Identify your harness
+
+Set `harness_id` from your tool inventory:
+
+| You have… | `harness_id` | Harness |
+|---|---|---|
+| an `Agent` (or `Task`) tool with `subagent_type` + `model` params | `claude-code` | Claude Code |
+| `task` + `eval` tools (eval bridge with `agent()` / `parallel()`) | `omp` | Oh My Pi |
+| neither, but a shell | `codex` | Codex CLI (skill invocation) |
+
+### 3.2. Resolve helper locations (skip when `claude-code`)
+
+On Claude Code the plugin runtime puts `bin/` on `$PATH` — helpers
+invoke bare (`repo-slug.sh ...`), which also keeps the command's
+`allowed-tools` grants matching. On other harnesses, resolve the
+plugin root ONCE at the start of the command:
+
+```bash
+if command -v repo-slug.sh >/dev/null 2>&1; then
+    MREVIEW_ROOT=""
+else
+    for cand in \
+        $(ls -dt "$HOME"/.claude/plugins/cache/matthewsreview/matthewsreview/*/ 2>/dev/null | head -1) \
+        $(ls -dt "$HOME"/.omp/plugins/cache/plugins/*matthewsreview*/ 2>/dev/null | head -1); do
+        if [[ -n "$cand" && -x "$cand/bin/repo-slug.sh" ]]; then MREVIEW_ROOT="$cand"; break; fi
+    done
+fi
+[[ -n "$MREVIEW_ROOT" ]] || { echo "matthewsreview install not found; see README §Install"; exit 1; }
+# helper invocations below then use "${MREVIEW_ROOT}bin/<helper>" when
+# MREVIEW_ROOT is set, else the bare name. Shell-var convenience:
+MRB="${MREVIEW_ROOT:+${MREVIEW_ROOT}bin/}"
+```
+
+A generated Codex skill bakes `MREVIEW_ROOT=<abs path>` into its
+preamble — that value wins over the probe when present.
+
+### 3.3. DISPATCH(role, prompt, [finding_id])
+
+One sub-agent run with the model the plan resolved for `role`.
+
+- **claude-code**: `Agent` tool-use, `subagent_type: general-purpose`,
+  `model:` = the model segment of `role_<name>` (e.g. `opus` from
+  `claude:opus`). A `codex:*` role goes through the ensemble adapter's
+  companion path (Phase 1.5) or `agent-dispatch.sh start --engine codex`
+  elsewhere.
+- **omp**: one eval cell — `agent(prompt, { model: "<model segment>",
+  label: "<role>" })`. A `codex:*` role: `agent-dispatch.sh start
+  --engine codex` + the shared poll loop. Token accounting: if the
+  result exposes no usage, log `--tokens null`.
+- **codex**: write the prompt to `$scratch/<role>-<id>.md`, then
+  `"${MRB}agent-dispatch.sh" start --engine <engine> --model <model>
+  [--effort <effort>] --prompt-file … --scratch-dir …`, then the shared
+  poll loop (`agent-dispatch.sh poll`) until `completed`.
+
+### 3.4. Parallel fan-out
+
+"Dispatch N in parallel" maps to one batch per harness — never N
+sequential dispatches:
+
+- **claude-code**: N `Agent` tool-use blocks in ONE orchestrator turn.
+- **omp**: ONE eval cell using `parallel([() => agent(p1, …),
+  () => agent(p2, …), …])`.
+- **codex**: launch all N `agent-dispatch.sh start` calls, then poll
+  each job to completion (the poll loop handles them in any order).
+
+Fragments' anti-serialization callouts apply to whichever batch shape
+you use: Phase wall-clock is `max(durations)`, never `sum(durations)`.
+
+### 3.5. ASK(question, options[, multi])
+
+Interactive user gate.
+
+- **claude-code**: `AskUserQuestion` with the listed options (and a
+  follow-up `AskUserQuestion` for free-form captures).
+- **omp**: `ask` tool — `questions: [{ id, question, options:
+  [{label, description}], multi? }]`; free-form captures use the
+  automatic "Other (type your own)" option, no follow-up needed.
+- **codex**: print the question as a numbered-options list in chat and
+  stop; the user's reply selects the option. Free-form captures ask for
+  the text directly. Keep one ASK per turn.
+
+## 4. Helper-script errors — error-as-prompt
 
 Helper-script errors follow the error-as-prompt convention:
 ERROR → context → Valid values → Did you mean → Action. When a helper

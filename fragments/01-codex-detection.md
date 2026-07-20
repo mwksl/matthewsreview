@@ -328,7 +328,7 @@ the orchestrator inspects the failure context and decides:
    unrecoverable. Log to `trace.md` with tag `phase_1_codex_dropped:L<N>
    reason=<short cause>`.
 
-When any lens is dropped, dispatch `AskUserQuestion` ONCE for the whole
+When any lens is dropped, ASK ONCE for the whole
 phase (don't ask per-lens — that's ~7 prompts):
 
 ```

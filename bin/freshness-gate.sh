@@ -3,7 +3,7 @@
 # (DESIGN §13.10). Extracts the ~80-line inline bash block from
 # fragments/00-preflight.md step 0.2a.
 #
-# The `AskUserQuestion` dispatch stays orchestrator-side: this helper
+# The ASK dispatch stays orchestrator-side: this helper
 # does everything *up to* the point where a behind-count case would
 # need user input, emits `base_freshness: "pending_user_gate"` in that
 # case, and exits 0 so the orchestrator can branch and re-invoke with
@@ -69,13 +69,13 @@ a JSON object with \`comparison_ref\`, \`base_freshness\`, \`remote_sha\`,
   --head-branch    Required. The head branch name. Reserved for future
                    per-branch logic; currently unused but accepted so
                    the call site documents its intent.
-  --after-choice   Optional. When re-invoked after AskUserQuestion:
+  --after-choice   Optional. When re-invoked after the orchestrator ASK:
                    a = fast-forward local <base-branch>
                    b = compare against origin/<base-branch>
                    c = proceed with stale local <base-branch>
 
 See fragments/00-preflight.md step 0.2a for the orchestrator-side
-AskUserQuestion flow and the prompt text shown to the user.
+ASK flow and the prompt text shown to the user.
 USAGE
 }
 
@@ -157,7 +157,7 @@ emit_terminal() {
 
 # Emit a pending JSON object (behind_count > 0 path). `ff_available`
 # signals to the orchestrator whether to offer option (a) in its
-# AskUserQuestion. Set false after a non-FF (a)-retry failure.
+# the orchestrator ASK. Set false after a non-FF (a)-retry failure.
 emit_pending() {
     local rsha="$1" bhc="$2" warnings="$3" ff_available="$4"
     jq -n \

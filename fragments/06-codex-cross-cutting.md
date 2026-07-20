@@ -165,7 +165,7 @@ just skips Phase 5 and ships the artifact without `cross_cutting_groups`):
 elapsed_for_log=$(printf '%s' "$poll" | jq -r '.elapsed_sec // "null"')
 printf 'phase_5_codex_watchdog: verdict=%s job=%s elapsed=%s\n' \
     "$verdict" "$xc_job_id" "$elapsed_for_log" >> "$trace_log_path"
-# fall through to §5.2.3 retry-with-judgment / AskUserQuestion
+# fall through to §5.2.3 retry-with-judgment / ASK
 ```
 
 #### 5.2.3. Adaptive retry-with-judgment
@@ -174,7 +174,7 @@ Apply the §3.7 retry policy:
 
 1. On Codex job failure (non-zero exit, malformed output, or empty
    output), retry up to 3 times with the same prompt.
-2. If all 3 retries fail, dispatch `AskUserQuestion`:
+2. If all 3 retries fail, ASK:
 
    ```
    "Codex cross-cutting analysis failed after retry. Continue without

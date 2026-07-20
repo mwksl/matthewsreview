@@ -78,8 +78,10 @@ Every Agent tool-use specifies:
   - Phase 8 fix-group agents → role `fix` (default claude:opus).
   - Phase 9a post-fix reviewer → role `post_fix_review` (default claude:opus).
 
-**Parallel fan-outs** happen by firing multiple Agent tool-use blocks
-in a single orchestrator turn. Phase 8's fix-group dispatch fans out
+**Parallel fan-outs** happen by issuing every DISPATCH in one batch
+(Prelude §3.4: N Agent blocks in one turn on CC; one `parallel()` eval
+cell on omp; N `agent-dispatch.sh start` calls on Codex). Phase 8's
+fix-group dispatch fans out
 all groups at once — don't wait a turn between them. Phase 9a is a
 single-agent call (one sub-agent reviews the whole working tree).
 
