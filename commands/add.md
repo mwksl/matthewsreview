@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(artifact-read.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(assign-finding-ids.sh:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(git:*), Bash(jq:*), Bash(date:*), Bash(timeout:*), Bash(sleep:*), Bash(kill:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(cat:*), Bash(printf:*), Bash(tr:*), Bash(awk:*), Bash(grep:*), Bash(mktemp:*), Read, Agent, AskUserQuestion
+allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(doctor.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(assign-finding-ids.sh:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(git:*), Bash(jq:*), Bash(date:*), Bash(timeout:*), Bash(sleep:*), Bash(kill:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(cat:*), Bash(printf:*), Bash(tr:*), Bash(awk:*), Bash(grep:*), Bash(mktemp:*), Read, Agent, AskUserQuestion
 argument-hint: "[<paste...>] [--file path --line N --claim \"...\"] [--impact <type>] [--no-dedup]"
 description: Inject externally-sourced findings (cloud /ultrareview, manual finds, etc.) into the most recent /matthewsreview:review artifact for this branch. Validates via Phase 4, re-renders, re-publishes.
 disable-model-invocation: false
@@ -31,6 +31,8 @@ Optional flags:
   every emitted candidate. Default `correctness`. In paste mode this
   *overrides* the normalizer's per-candidate guess; useful when the
   reviewer knows the input is "all security."
+- `--profile <name>` / `--models "<csv>"` — model-plan overrides,
+  resolved fresh at load time (step 2b). Same semantics as `:review`.
 - `--no-dedup` — skip the dedup pass (§step 5). Useful when the
   reviewer is confident the input is fresh, or when the artifact has
   many findings and the dedup call would be expensive.
@@ -108,6 +110,39 @@ Otherwise:
 review_id=$(tr -d '[:space:]' < "$latest_path")
 review_dir="$reviews_root/$repo_slug/$head_branch/$review_id"
 artifact_path="$review_dir/artifact.json"
+```
+
+### 2b. Resolve the model plan
+
+Resolve fresh for this invocation, store it, print the table (the
+paste normalizer, dedup, and Phase-4 validators all dispatch by role):
+
+```bash
+plan_args=(--repo-root "$repo_root" --orchestrator "$harness_id")
+[[ -n "${profile:-}" ]] && plan_args+=(--profile "$profile")
+[[ -n "${models_csv:-}" ]] && plan_args+=(--models "$models_csv")
+model_plan_json=$(review-config.sh "${plan_args[@]}")
+plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX)
+printf '%s' "$model_plan_json" > "$plan_tmp"
+artifact-patch.py --path "$artifact_path" \
+  --set-json model_plan=@"$plan_tmp" \
+  --set-json "gates=$(printf '%s' "$model_plan_json" | jq -c '.gates')"
+rm -f "$plan_tmp"
+
+printf '%s' "$model_plan_json" | jq -r '
+  "| Role | Engine | Model | Effort | Source |",
+  "|---|---|---|---|---|",
+  (.roles | to_entries[]
+   | "| \(.key) | \(.value.engine) | \(.value.model | if . == "" then "(cli default)" else . end) | \(.value.effort // "—") | \(.value.source) |"),
+  (.warnings[]? | "warning: \(.)")'
+```
+
+On non-zero from `review-config.sh`: surface stderr verbatim, stop.
+`$harness_id` is the Dispatch Protocol identity.
+
+Capture the log paths:
+
+```bash
 trace_log_path="$review_dir/trace.md"
 phases_log_path="$review_dir/phases.jsonl"
 tokens_log_path="$review_dir/tokens.jsonl"
@@ -620,9 +655,9 @@ light_count=0
 
 #### 7.3 Deep-lane dispatch (Opus, one sub-agent per candidate)
 
-For each id in `deep_ids`, launch ONE `Agent` tool-use with `model:
-opus`, `subagent_type: general-purpose`, dispatched in a single
-orchestrator turn for concurrency. Read the finding JSON and pass it
+For each id in `deep_ids`, launch ONE sub-agent with role
+`deep_validate` (default claude:opus), `subagent_type: general-purpose`,
+dispatched in a single orchestrator turn for concurrency. Read the finding JSON and pass it
 inline.
 
 **One Opus per candidate — never collapse multiple deep-lane candidates
@@ -685,13 +720,14 @@ Prompt:
 > confirmed findings.
 
 After each sub-agent returns: log tokens per candidate (phase
-`phase_add`, agent_role `validator`, `--finding-id` set, model `opus`).
+`phase_add`, agent_role `validator`, `--finding-id` set, `--model "$role_deep_validate"`).
 
 #### 7.4 Light-lane dispatch (Sonnet, chunked-batch fan-out)
 
 Split `light_ids` into chunks of **at most 25 candidates per chunk**,
-balanced as evenly as feasible. For each chunk, launch ONE `Agent`
-tool-use with `model: sonnet`. Dispatch all chunk-agents in one
+balanced as evenly as feasible. For each chunk, launch ONE sub-agent
+with role `light_validate` (default claude:sonnet). Dispatch all
+chunk-agents in one
 orchestrator turn for concurrency. Same chunked rationale as
 `05-validation.md` §4.3 — light-lane work is rubric-checking, not
 per-candidate investigation, so it batches well; the 25-cap restores
@@ -739,7 +775,7 @@ Prompt essence — verbatim from `05-validation.md` §4.3:
 After each chunk-agent returns: log tokens once per chunk-agent
 (phase `phase_add`, agent_role `validator`, `--finding-id` OMITTED
 because tokens are agent-level when a single sub-agent owns multiple
-findings, model `sonnet`).
+findings, `--model "$role_light_validate"`).
 
 #### 7.5 Tree-cleanliness sweep (belt-and-braces)
 

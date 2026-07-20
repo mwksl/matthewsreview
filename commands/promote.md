@@ -1,6 +1,6 @@
 ---
-allowed-tools: Bash(artifact-read.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(repo-slug.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(cat:*), Bash(printf:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(tr:*), Bash(mktemp:*), Read, AskUserQuestion
-argument-hint: "<finding_id> [--reason \"...\"] [--fix-hint \"...\"] [--force] [--defer-publish]"
+allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(doctor.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(repo-slug.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(cat:*), Bash(printf:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(tr:*), Bash(mktemp:*), Read, AskUserQuestion
+argument-hint: "<finding_id> [--reason \"...\"] [--fix-hint \"...\"] [--force] [--defer-publish] [--profile <name>] [--models \"<csv>\"]"
 description: Promote a finding to auto-fixable via human override. Patches artifact, re-renders, re-publishes to PR.
 disable-model-invocation: false
 ---
@@ -34,6 +34,9 @@ helper-script error-as-prompt).**
   at `disposition=disproven` (validator found positive evidence it's
   wrong). Without `--force`, disproven findings reject promotion with
   a user-visible message pointing to the validator's conclusion.
+- `--profile <name>` / `--models "<csv>"` (optional) — model-plan
+  overrides, resolved fresh at step 2b. Rarely needed here (`:promote`
+  dispatches no sub-agents) but keeps the artifact's plan current.
 - `--defer-publish` (optional) — skip steps 7 (re-render), 8
   (re-publish to PR), and 10 (user-visible summary). The artifact
   patch and trace entry still land. Useful for scripted promote
@@ -107,6 +110,29 @@ review_dir="$reviews_root/$repo_slug/$head_branch/$review_id"
 artifact_path="$review_dir/artifact.json"
 trace_log_path="$review_dir/trace.md"
 ```
+
+### 2b. Resolve the model plan (silent)
+
+Resolve fresh for this invocation and store it — keep the artifact's
+`model_plan` current for the `:fix` that follows. No table render:
+`:promote` dispatches no sub-agents and is often looped with
+`--defer-publish`, so the table would be per-call noise.
+
+```bash
+plan_args=(--repo-root "$repo_root" --orchestrator "$harness_id")
+[[ -n "${profile:-}" ]] && plan_args+=(--profile "$profile")
+[[ -n "${models_csv:-}" ]] && plan_args+=(--models "$models_csv")
+model_plan_json=$(review-config.sh "${plan_args[@]}")
+plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX)
+printf '%s' "$model_plan_json" > "$plan_tmp"
+artifact-patch.py --path "$artifact_path" \
+  --set-json model_plan=@"$plan_tmp" \
+  --set-json "gates=$(printf '%s' "$model_plan_json" | jq -c '.gates')"
+rm -f "$plan_tmp"
+```
+
+On non-zero from `review-config.sh`: surface stderr verbatim, stop.
+`$harness_id` is the Dispatch Protocol identity.
 
 Capture paths. Schema-validate as a safety rail:
 

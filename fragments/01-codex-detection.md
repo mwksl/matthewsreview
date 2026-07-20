@@ -371,7 +371,8 @@ Concatenate all surviving lens outputs with lens-id headers:
 ...
 ```
 
-Dispatch via `Agent` with `model: sonnet`, `subagent_type: general-purpose`.
+Dispatch with role `normalizer` (default claude:sonnet),
+`subagent_type: general-purpose`.
 Prompt essence:
 
 > You are normalizing 7 (or fewer if any were skipped/dropped) Codex
@@ -438,7 +439,7 @@ Capture the normalizer's raw output as `normalizer_output`. Log tokens:
 log-tokens.sh \
   --review-dir "$review_dir" --phase phase_1 \
   --agent-role codex_normalizer --agent-id <id> \
-  --model sonnet --tokens <N or null>
+  --model "$role_normalizer" --tokens <N or null>
 ```
 
 ### 1.5.1. Parse + repair + schema-guard

@@ -360,6 +360,8 @@ JSON_SETTABLE_ARTIFACT_FIELDS = frozenset({
     "orchestrator_tokens",
     "metrics",
     "reviewer_sources",
+    "model_plan",
+    "gates",
 })
 
 
@@ -908,7 +910,30 @@ _ACTIONABILITY_TO_DISPOSITION = {
 }
 
 
-def _derive_phase4_disposition(tup, idx):
+DEFAULT_PHASE4_BANDS = (45, 60, 75)
+
+
+def _phase4_bands(artifact):
+    """Resolved Phase-4 band cutoffs from artifact.gates.phase4_bands.
+
+    Defaults to (45, 60, 75) for pre-v1.0 artifacts (no gates field) or
+    malformed values — gate defaults are normative (docs/state-and-gates.md).
+    """
+    try:
+        bands = (artifact or {}).get("gates", {}).get("phase4_bands")
+    except AttributeError:
+        bands = None
+    if (
+        isinstance(bands, list)
+        and len(bands) == 3
+        and all(isinstance(b, (int, float)) and not isinstance(b, bool) for b in bands)
+        and bands[0] < bands[1] < bands[2]
+    ):
+        return tuple(bands)
+    return DEFAULT_PHASE4_BANDS
+
+
+def _derive_phase4_disposition(tup, idx, bands=DEFAULT_PHASE4_BANDS):
     """Derive {disposition, confirmed_strength} per DESIGN §13.1 Phase 4.
 
     On invalid input (bad score type, missing actionability for confirmed
@@ -928,16 +953,17 @@ def _derive_phase4_disposition(tup, idx):
         )
         sys.exit(c.EXIT_VALIDATION)
 
-    if score < 45:
+    b1, b2, b3 = bands
+    if score < b1:
         return {"disposition": "disproven", "confirmed_strength": None}
-    if score < 60:
+    if score < b2:
         return {"disposition": "uncertain", "confirmed_strength": None}
 
     # Confirmed band — needs actionability.
     actionability = tup.get("actionability")
     if actionability is None:
         c.err_prompt(
-            f"--apply-decisions tuple #{idx} ({fid}): score_phase4={score} is in the confirmed band (>=60) but no actionability provided",
+            f"--apply-decisions tuple #{idx} ({fid}): score_phase4={score} is in the confirmed band (>={bands[1]}) but no actionability provided",
             valid_values=sorted(_ACTIONABILITY_TO_DISPOSITION.keys()),
             action="add actionability to the tuple (auto_fixable/manual/report_only); the validator owns that classification."
         )
@@ -953,7 +979,7 @@ def _derive_phase4_disposition(tup, idx):
 
     return {
         "disposition": _ACTIONABILITY_TO_DISPOSITION[actionability],
-        "confirmed_strength": "strong" if score >= 75 else "moderate",
+        "confirmed_strength": "strong" if score >= b3 else "moderate",
     }
 
 
@@ -1064,7 +1090,10 @@ def cmd_apply_decisions(args):
             )
             return c.EXIT_VALIDATION
 
-        derived = _derive_phase4_disposition(tup, idx)
+        # Bands come from the artifact's gates field (resolved by
+        # review-config.sh at Phase 0 / load time). Read once from the
+        # pre-loop artifact; gates don't change mid-batch.
+        derived = _derive_phase4_disposition(tup, idx, _phase4_bands(_load_or_fail(args.path)))
 
         # Load fresh per-tuple so preceding tuples' writes are visible on the
         # next iteration's base state. Matches the "per-tuple atomic writes"

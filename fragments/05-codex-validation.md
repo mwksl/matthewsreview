@@ -287,8 +287,8 @@ Shape-fixer prompt essence:
 > **Use the candidate's id (`<finding_id>`) verbatim in the output.**
 > Do not invent ids; do not omit it.
 
-Dispatch via `Agent` with `model: sonnet`, `subagent_type: general-purpose`.
-Capture each shape-fixer's response.
+Dispatch with role `normalizer` (default claude:sonnet),
+`subagent_type: general-purpose`. Capture each shape-fixer's response.
 
 #### 4.2.4. Per-finding atomicity
 
@@ -333,7 +333,7 @@ plan §3.8):
 log-tokens.sh \
   --review-dir "$review_dir" --phase phase_4a \
   --agent-role validator_shape_fixer --finding-id "$finding_id" \
-  --agent-id <id> --model sonnet \
+  --agent-id <id> --model "$role_normalizer" \
   --tokens <N or null>
 ```
 
@@ -535,7 +535,7 @@ If more than half of light-lane chunks drop, escalate via
 log-tokens.sh \
   --review-dir "$review_dir" --phase phase_4b \
   --agent-role validator_shape_fixer \
-  --agent-id <id> --model sonnet \
+  --agent-id <id> --model "$role_normalizer" \
   --tokens <N or null>
 ```
 

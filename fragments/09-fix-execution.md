@@ -126,9 +126,9 @@ on disk.
 > `sum(group_durations)`. Serializing turns the fix run into a per-group
 > timer; each group's edits are independent.
 
-Fan out one `Agent` tool-use per group, all in a single orchestrator
-turn. Each agent uses `subagent_type: general-purpose`, `model: opus`,
-and receives the full §19.8 input per-group.
+Fan out one sub-agent per group, all in a single orchestrator turn.
+Each agent uses `subagent_type: general-purpose`, role `fix` (default
+claude:opus), and receives the full §19.8 input per-group.
 
 **Prompt body per fix-group agent** (inline for each group):
 
@@ -274,7 +274,7 @@ After every agent returns (before branching on its content):
      --review-dir "$review_dir" \
      --phase phase_8 --agent-role "fix_group_$group.id" \
      --agent-id <id-from-Agent-result> \
-     --model opus \
+     --model "$role_fix" \
      --tokens <N or null>
    ```
 

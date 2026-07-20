@@ -39,7 +39,8 @@ Otherwise, capture the list as `xc_input_json` and proceed.
 
 ### 5.2. Dispatch the cross-cutting sub-agent
 
-Launch one `Agent` tool-use with `model: opus`. No tool access needed;
+Launch one sub-agent with role `cross_cutting` (default claude:opus).
+No tool access needed;
 input is the serialized findings in the prompt.
 
 Prompt essence:
@@ -102,7 +103,7 @@ First, token log:
 log-tokens.sh \
   --review-dir "$review_dir" --phase phase_5 \
   --agent-role cross_cutting --agent-id <id> \
-  --model opus --tokens <N or null>
+  --model "$role_cross_cutting" --tokens <N or null>
 ```
 
 Parse the sub-agent's JSON. If parsing fails after one retry (§24.1),

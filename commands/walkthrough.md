@@ -1,6 +1,6 @@
 ---
-allowed-tools: Bash(artifact-read.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(repo-slug.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(cat:*), Bash(printf:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(tr:*), Bash(awk:*), Bash(mktemp:*), Agent, Read, AskUserQuestion
-argument-hint: "[threshold]"
+allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(doctor.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(repo-slug.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(cat:*), Bash(printf:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(tr:*), Bash(awk:*), Bash(mktemp:*), Agent, Read, AskUserQuestion
+argument-hint: "[threshold] [--profile <name>] [--models \"<csv>\"]"
 description: Walk interactively through findings /matthewsreview:fix would skip, above a score floor. Per-finding briefing + options + recommendation, then batch re-render/re-publish and post a decisions-log PR comment.
 disable-model-invocation: false
 ---
@@ -23,8 +23,11 @@ helper-script error-as-prompt).**
 
 ## Arguments
 
+- `--profile <name>` / `--models "<csv>"` (optional) — model-plan
+  overrides, resolved fresh at step 2b. Same semantics as `:review`.
 - `[threshold]` (optional, positional) — non-negative integer score
-  floor. Default: 60. Findings with effective score
+  floor. Default: the resolved `gates.walkthrough_threshold` (60 unless
+  configured). Findings with effective score
   (`COALESCE(score_phase4, score_phase3, -1)`) below this value are
   dropped from the walk scope so the session isn't padded with
   low-signal findings. Independent of the `/matthewsreview:fix`
@@ -80,7 +83,8 @@ Parse `$ARGUMENTS` (whitespace-split):
 - First token that parses as a non-negative integer → `threshold`.
 - Any other token → stop and ask the user to clarify.
 
-If no integer was provided, `threshold=60` (matches the
+If no integer was provided, step 2b sets `threshold` from the resolved
+`gates.walkthrough_threshold` (default 60) (matches the
 `/matthewsreview:fix` default and the Phase 4 moderate-confirmation
 breakpoint, so the walkthrough shows what a reviewer at standard
 confidence would want to see). Record in your working context.
@@ -109,6 +113,34 @@ review_dir="$reviews_root/$repo_slug/$head_branch/$review_id"
 artifact_path="$review_dir/artifact.json"
 trace_log_path="$review_dir/trace.md"
 ```
+
+### 2b. Resolve the model plan
+
+Resolve fresh for this invocation, store it, print the table (the
+briefer and issue-drafter dispatch by role):
+
+```bash
+plan_args=(--repo-root "$repo_root" --orchestrator "$harness_id")
+[[ -n "${profile:-}" ]] && plan_args+=(--profile "$profile")
+[[ -n "${models_csv:-}" ]] && plan_args+=(--models "$models_csv")
+model_plan_json=$(review-config.sh "${plan_args[@]}")
+plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX)
+printf '%s' "$model_plan_json" > "$plan_tmp"
+artifact-patch.py --path "$artifact_path" \
+  --set-json model_plan=@"$plan_tmp" \
+  --set-json "gates=$(printf '%s' "$model_plan_json" | jq -c '.gates')"
+rm -f "$plan_tmp"
+
+printf '%s' "$model_plan_json" | jq -r '
+  "| Role | Engine | Model | Effort | Source |",
+  "|---|---|---|---|---|",
+  (.roles | to_entries[]
+   | "| \(.key) | \(.value.engine) | \(.value.model | if . == "" then "(cli default)" else . end) | \(.value.effort // "—") | \(.value.source) |"),
+  (.warnings[]? | "warning: \(.)")'
+```
+
+On non-zero from `review-config.sh`: surface stderr verbatim, stop.
+`$harness_id` is the Dispatch Protocol identity.
 
 Capture paths. Schema-validate:
 
@@ -845,8 +877,8 @@ directly to §5.3 with `$briefing_json` populated.
 Run the Sonnet briefer below ONLY when `briefing_source ==
 "briefer_agent"`.
 
-One `Agent` tool-use per finding. Model: `sonnet`. Budget: ~3-5k
-tokens. Prompt:
+One sub-agent per finding. Role `briefer` (default claude:sonnet).
+Budget: ~3-5k tokens. Prompt:
 
 > You are a code-review triage briefer. The reviewer is walking
 > through one finding and needs:
@@ -937,7 +969,7 @@ log-tokens.sh \
     --review-dir "$review_dir" \
     --phase walkthrough --agent-role briefing \
     --agent-id <id-from-Agent-result> \
-    --model sonnet --finding-id "$finding_id" \
+    --model "$role_briefer" --finding-id "$finding_id" \
     --tokens <N or null>
 ```
 
@@ -1320,8 +1352,8 @@ fi
 Do NOT add an `issues_filed[]` entry for a skipped finding — the array
 records what was actually filed, not what was considered.
 
-**Dispatch a Sonnet drafting agent.** Model: `sonnet`. Budget: ~2-3k
-tokens. Prompt:
+**Dispatch a drafting agent** (role `drafter`, default claude:sonnet).
+Budget: ~2-3k tokens. Prompt:
 
 > You are drafting a GitHub issue for a code-review finding that
 > pre-dates the current PR (`pre_existing_report`). The reviewer
@@ -1369,7 +1401,7 @@ log-tokens.sh \
     --review-dir "$review_dir" \
     --phase walkthrough --agent-role pre_existing_issue_draft \
     --agent-id <id-from-Agent-result> \
-    --model sonnet --finding-id "$finding_id" \
+    --model "$role_drafter" --finding-id "$finding_id" \
     --tokens <N or null>
 ```
 

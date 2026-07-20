@@ -4186,14 +4186,14 @@ else
     fail "L7-3: expected pre_existing/medium on ancestor L7 range; got origin=$origin conf=$conf"
 fi
 
-# L7-4: CLAUDE.md pipeline-shape narrative reflects the 6-vs-7 lens
+# L7-4: AGENTS.md pipeline-shape narrative reflects the 6-vs-7 lens
 # count. A sanity guard so this meta-doc doesn't silently drift from
-# the fragment.
-if grep -qF '7 under --ensemble' "$REPO/CLAUDE.md" \
-    && grep -qF 'holistic Opus safety net' "$REPO/CLAUDE.md"; then
-    pass "L7-4 (§2.9.D): CLAUDE.md pipeline-shape narrative mentions L7 under --ensemble"
+# the fragment. (Moved from CLAUDE.md when AGENTS.md became canonical.)
+if grep -qF '7 under --ensemble' "$REPO/AGENTS.md" \
+    && grep -qF 'holistic Opus safety net' "$REPO/AGENTS.md"; then
+    pass "L7-4 (§2.9.D): AGENTS.md pipeline-shape narrative mentions L7 under --ensemble"
 else
-    fail "L7-4: CLAUDE.md pipeline-shape block missing L7 / --ensemble update"
+    fail "L7-4: AGENTS.md pipeline-shape block missing L7 / --ensemble update"
 fi
 
 # L7-5: artifact-patch.py --add-finding accepts source_families:
@@ -4728,6 +4728,149 @@ else
 fi
 
 unset MATTHEWS_REVIEW_TALLY_ORCHESTRATOR
+
+# ------------------------------------------------------------------
+# RC: review-config.sh — model-plan resolver (precedence, grammar, matrix)
+# Isolated HOME + repo so user/repo configs are fully controlled.
+RC_HOME="$WORK/rc-home"
+RC_REPO="$WORK/rc-repo"
+mkdir -p "$RC_HOME/.matthews-reviews" "$RC_REPO"
+cat > "$RC_HOME/.matthews-reviews/config.json" <<'EOF'
+{"tiers":{"utility":"claude:haiku"},"roles":{"scoring":"codex::medium"},"gates":{"phase3_gate":55},"profiles":{"max":{"tiers":{"light":"claude:opus"}}}}
+EOF
+cat > "$RC_REPO/.matthewsreview.json" <<'EOF'
+{"roles":{"scoring":"claude:sonnet"}}
+EOF
+rc_run() { env -u MATTHEWS_REVIEW_REVIEWS_ROOT HOME="$RC_HOME" "$TOOLS/review-config.sh" --repo-root "$RC_REPO" "$@"; }
+
+# RC-1: defaults — deep role inherits claude:opus from default tier, gates default 45
+# (empty HOME → no user config; repo config moved aside → pure defaults)
+RC_EMPTY="$WORK/rc-empty"
+mkdir -p "$RC_EMPTY"
+mv "$RC_REPO/.matthewsreview.json" "$RC_REPO/.matthewsreview.json.hold"
+rc_out=$(env -u MATTHEWS_REVIEW_REVIEWS_ROOT HOME="$RC_EMPTY" "$TOOLS/review-config.sh" --repo-root "$RC_REPO" --orchestrator claude-code); code=$?
+mv "$RC_REPO/.matthewsreview.json.hold" "$RC_REPO/.matthewsreview.json"
+rc_deep=$(printf '%s' "$rc_out" | jq -r '.roles.deep_validate | "\(.engine):\(.model)|\(.source)"')
+rc_gate=$(printf '%s' "$rc_out" | jq -r '.gates.phase3_gate')
+if [[ $code -eq 0 && "$rc_deep" == "claude:opus|default (tier:deep)" && "$rc_gate" == "45" ]]; then
+    pass "RC-1: defaults resolve (deep=claude:opus via default tier; phase3_gate=45)"
+else
+    fail "RC-1: default resolution mismatch" "code=$code deep=$rc_deep gate=$rc_gate"
+fi
+
+# RC-2: user config + repo config precedence (repo wins role scoring; user wins tier utility)
+rc_out=$(rc_run --orchestrator claude-code)
+rc_scoring=$(printf '%s' "$rc_out" | jq -r '.roles.scoring | "\(.engine):\(.model)|\(.source)"')
+rc_util=$(printf '%s' "$rc_out" | jq -r '.roles.dedup | "\(.engine):\(.model)|\(.source)"')
+rc_gate=$(printf '%s' "$rc_out" | jq -r '.gates.phase3_gate')
+if [[ "$rc_scoring" == "claude:sonnet|repo-config" && "$rc_util" == "claude:haiku|user-config (tier:utility)" && "$rc_gate" == "55" ]]; then
+    pass "RC-2: user < repo precedence (role from repo, tier from user, gate merged)"
+else
+    fail "RC-2: precedence mismatch" "scoring=$rc_scoring util=$rc_util gate=$rc_gate"
+fi
+
+# RC-3: --models CLI beats repo config; tier override flows to inheriting roles
+rc_out=$(rc_run --orchestrator claude-code --models "scoring=claude:haiku,utility=claude:opus")
+rc_scoring=$(printf '%s' "$rc_out" | jq -r '.roles.scoring | "\(.engine):\(.model)|\(.source)"')
+rc_util=$(printf '%s' "$rc_out" | jq -r '.roles.dedup | "\(.engine):\(.model)|\(.source)"')
+if [[ "$rc_scoring" == "claude:haiku|cli" && "$rc_util" == "claude:opus|cli (tier:utility)" ]]; then
+    pass "RC-3: --models CLI override wins (role + tier)"
+else
+    fail "RC-3: CLI override mismatch" "scoring=$rc_scoring util=$rc_util"
+fi
+
+# RC-4: --profile applies; --models beats --profile
+rc_out=$(rc_run --orchestrator claude-code --profile max)
+rc_light=$(printf '%s' "$rc_out" | jq -r '.roles.light_lens | "\(.engine):\(.model)|\(.source)"')
+rc_out2=$(rc_run --orchestrator claude-code --profile max --models "light=claude:haiku")
+rc_light2=$(printf '%s' "$rc_out2" | jq -r '.roles.light_lens | "\(.engine):\(.model)|\(.source)"')
+if [[ "$rc_light" == "claude:opus|profile(max) (tier:light)" && "$rc_light2" == "claude:haiku|cli (tier:light)" ]]; then
+    pass "RC-4: profile applies; --models beats --profile"
+else
+    fail "RC-4: profile/CLI precedence mismatch" "light=$rc_light light2=$rc_light2"
+fi
+
+# RC-5: unknown --models key → exit 1 with valid-key list
+rc_err=$(rc_run --orchestrator claude-code --models "bogus=claude:opus" 2>&1); code=$?
+if [[ $code -eq 1 && "$rc_err" == *"unknown --models key 'bogus'"* && "$rc_err" == *"Valid keys:"* ]]; then
+    pass "RC-5: unknown --models key rejected with valid-key list"
+else
+    fail "RC-5: unknown-key rejection mismatch" "code=$code err=$rc_err"
+fi
+
+# RC-6: effort segment on claude: → exit 1 (codex-only grammar)
+rc_err=$(rc_run --orchestrator claude-code --models "deep=claude:opus:high" 2>&1); code=$?
+if [[ $code -eq 1 && "$rc_err" == *"effort is only valid for codex: engines"* ]]; then
+    pass "RC-6: effort segment rejected on claude: role string"
+else
+    fail "RC-6: effort-on-claude rejection mismatch" "code=$code err=$rc_err"
+fi
+
+# RC-7: omp: role on claude-code orchestrator → exit 1 (matrix)
+rc_err=$(rc_run --orchestrator claude-code --models "deep=omp:openai/gpt-5.3-codex" 2>&1); code=$?
+if [[ $code -eq 1 && "$rc_err" == *"wants omp:... but the orchestrator is Claude Code"* ]]; then
+    pass "RC-7: omp: engine rejected on claude-code orchestrator"
+else
+    fail "RC-7: matrix rejection mismatch" "code=$code err=$rc_err"
+fi
+
+# RC-8: omp orchestrator accepts omp: engine; codex effort validates
+rc_out=$(rc_run --orchestrator omp --models "deep=omp:openai/gpt-5.3-codex,ensemble_detect=codex::ultra")
+rc_deep=$(printf '%s' "$rc_out" | jq -r '.roles.deep_validate | "\(.engine):\(.model)"')
+rc_ens=$(printf '%s' "$rc_out" | jq -r '.roles.ensemble_detect.effort')
+if [[ "$rc_deep" == "omp:openai/gpt-5.3-codex" && "$rc_ens" == "ultra" ]]; then
+    pass "RC-8: omp orchestrator accepts omp: engine; codex effort=ultra validates"
+else
+    fail "RC-8: omp orchestrator resolution mismatch" "deep=$rc_deep ens=$rc_ens"
+fi
+
+# RC-9: missing profile → exit 1
+rc_err=$(rc_run --orchestrator claude-code --profile nope 2>&1); code=$?
+if [[ $code -eq 1 && "$rc_err" == *"profile 'nope' not found"* ]]; then
+    pass "RC-9: missing profile rejected with define-it action"
+else
+    fail "RC-9: missing-profile rejection mismatch" "code=$code err=$rc_err"
+fi
+
+# RC-10: malformed config file → exit 1 naming the file
+echo '{broken' > "$RC_REPO/.matthewsreview.json"
+rc_err=$(rc_run --orchestrator claude-code 2>&1); code=$?
+if [[ $code -eq 1 && "$rc_err" == *"not valid JSON"* && "$rc_err" == *".matthewsreview.json"* ]]; then
+    pass "RC-10: malformed repo config rejected naming the file"
+else
+    fail "RC-10: malformed-config rejection mismatch" "code=$code err=$rc_err"
+fi
+echo '{"roles":{"scoring":"claude:sonnet"}}' > "$RC_REPO/.matthewsreview.json"
+
+# GB-1: --apply-decisions honors artifact gates.phase4_bands over the
+# 45/60/75 defaults. Bands [50,70,90] → score 65 lands in the uncertain
+# band (default would call it confirmed_* and demand actionability).
+GB_DIR="$WORK/gb"
+mkdir -p "$GB_DIR"
+cp "$FIX/artifact-seed.json" "$GB_DIR/art.json"
+"$TOOLS/artifact-patch.py" --path "$GB_DIR/art.json" \
+    --set-json 'gates={"phase3_gate":45,"phase4_bands":[50,70,90],"fix_threshold":60,"walkthrough_threshold":60}' >/dev/null
+gb_err=$("$TOOLS/artifact-patch.py" --path "$GB_DIR/art.json" \
+    --apply-decisions '[{"id":"F001","score_phase4":65,"validation_result":null}]' 2>&1); code=$?
+gb_disp=$(jq -r '.findings[] | select(.id=="F001") | .disposition' "$GB_DIR/art.json")
+if [[ $code -eq 0 && "$gb_disp" == "uncertain" ]]; then
+    pass "GB-1: --apply-decisions uses artifact gates.phase4_bands (65 with bands [50,70,90] → uncertain)"
+else
+    fail "GB-1: gates-band override mismatch" "code=$code disp=$gb_disp err=$gb_err"
+fi
+
+# GB-2: malformed bands (non-ascending) fall back to defaults — 65 with
+# default band demands actionability → validation error without it.
+cp "$FIX/artifact-seed.json" "$GB_DIR/art2.json"
+"$TOOLS/artifact-patch.py" --path "$GB_DIR/art2.json" \
+    --set-json 'gates={"phase4_bands":[70,50,90]}' >/dev/null
+gb_err=$("$TOOLS/artifact-patch.py" --path "$GB_DIR/art2.json" \
+    --apply-decisions '[{"id":"F001","score_phase4":65,"validation_result":null}]' 2>&1); code=$?
+if [[ $code -ne 0 && "$gb_err" == *"confirmed band (>=60)"* ]]; then
+    pass "GB-2: non-ascending phase4_bands ignored (defaults apply; error names resolved band)"
+else
+    fail "GB-2: malformed-bands fallback mismatch" "code=$code err=$gb_err"
+fi
 
 # ------------------------------------------------------------------ Project F: LLM output normalization
 #
@@ -5878,7 +6021,7 @@ SG_MD="$REPO/fragments/04-scoring-gate.md"
 sg1_missing=()
 for phrase in \
     'When `score` is null' \
-    'treat `(score >= 45)` as false' \
+    'treat `(score >= $phase3_gate)` as false' \
     'score unavailable — Phase 3 score missing or unparseable'; do
     if ! grep -qF "$phrase" "$SG_MD"; then
         sg1_missing+=("$phrase")
@@ -5909,7 +6052,7 @@ if [[ -f "$CR_CMD" ]] \
     && grep -qF 'Bash(node:*)' "$CR_CMD" \
     && grep -qF 'AskUserQuestion' "$CR_CMD" \
     && grep -qF 'Bash(artifact-seed.sh:*)' "$CR_CMD" \
-    && grep -qF '[--effort <low|medium|high|xhigh>]' "$CR_CMD" \
+    && grep -qF '[--effort <low|medium|high|xhigh|max|ultra>]' "$CR_CMD" \
     && grep -qF '[--full]' "$CR_CMD"; then
     pass "CR-1: commands/codex-review.md present with codex/effort/full grants"
 else

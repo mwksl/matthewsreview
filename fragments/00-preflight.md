@@ -313,7 +313,7 @@ If `trivial_mode == true`, set `user_facing=false` and skip this step
 (L5 is already off in trivial mode; Phase 1's L5 gating will also
 re-check `trivial_mode`).
 
-Otherwise, launch a Sonnet sub-agent with this input:
+Otherwise, launch a sub-agent (role `classifier`, default claude:sonnet) with this input:
 
 ```
 Diff files (with short descriptions of each file's apparent type):
@@ -329,7 +329,7 @@ i18n files. Return false for pure backend logic, build tooling,
 internal utilities, config.
 ```
 
-Dispatch with the `Agent` tool, `model: sonnet`. After the sub-agent returns,
+Dispatch with role `classifier`. After the sub-agent returns,
 parse `user_facing` + `surfaces`. Then log tokens (every required arg is
 explicit here to match the helper's argparse — don't infer):
 
@@ -339,7 +339,7 @@ log-tokens.sh \
   --phase phase_0 \
   --agent-role user_facing_classifier \
   --agent-id "$classifier_agent_id" \
-  --model sonnet \
+  --model "$role_classifier" \
   --tokens "$classifier_tokens_or_null"
 ```
 
@@ -414,6 +414,60 @@ abort to recover the prior artifact first."
 Only option (b) sets `existing_comment_id`. The publisher has no
 auto-discovery fallback (§13.4), so any run that reaches Phase 6
 without `existing_comment_id` posts a fresh comment.
+
+### 0.14b. Resolve the model plan
+
+Resolve which model runs which pipeline role. This runs even when
+everything is defaults — the printed table is the audit trail and the
+stored `model_plan` is what fragments read roles from.
+
+```bash
+plan_args=(--repo-root "$repo_root" --orchestrator "$harness_id")
+[[ -n "${profile:-}" ]] && plan_args+=(--profile "$profile")
+[[ -n "${models_csv:-}" ]] && plan_args+=(--models "$models_csv")
+model_plan_json=$(review-config.sh "${plan_args[@]}")
+```
+
+`$harness_id` is the Dispatch Protocol identity from
+`_prelude-shared.md` (`claude-code` on Claude Code, `omp` on Oh My Pi,
+`codex` on Codex). On `:codex-review`, apply the `--effort` override to
+the three codex lanes right after resolution:
+
+```bash
+# :codex-review only — CLI --effort beats config for codex_* roles
+if [[ "${reviewer_sources_label:-}" == "internal-codex" ]]; then
+    model_plan_json=$(printf '%s' "$model_plan_json" | jq --arg e "$effort" \
+        '.roles.codex_detect.effort=$e | .roles.codex_validate.effort=$e | .roles.codex_crosscut.effort=$e')
+fi
+```
+
+On non-zero exit from `review-config.sh` the stderr is error-as-prompt
+(invalid role string, unknown key, engine-matrix violation, malformed
+config). Surface it verbatim and stop — a wrong model plan is worse
+than no review.
+
+Render the Model plan table for the user (also echo any `warnings[]`
+entries below it):
+
+```bash
+printf '%s' "$model_plan_json" | jq -r '
+  "| Role | Engine | Model | Effort | Source |",
+  "|---|---|---|---|---|",
+  (.roles | to_entries[]
+   | "| \(.key) | \(.value.engine) | \(.value.model | if . == "" then "(cli default)" else . end) | \(.value.effort // "—") | \(.value.source) |"),
+  (.warnings[]? | "warning: \(.)")'
+```
+
+Extract the gates for later phases (Phase 3 gate, Phase 4 bands, fix/
+walkthrough thresholds read these from the artifact after step 0.15's
+patch; fragments reference them as "the resolved `gates.*` value"):
+
+```bash
+gates_json=$(printf '%s' "$model_plan_json" | jq -c '.gates')
+```
+
+Capture `model_plan_json` and `gates_json` in working context. The
+artifact patch happens in step 0.15b (the artifact doesn't exist yet).
 
 ### 0.15. Create the review directory and initialize the artifact
 
@@ -499,6 +553,24 @@ after retry, escalate to the user with the stderr content AND delete the
 empty `review_dir` you created (`rm -rf -- "$review_dir"`). Leaving it
 behind makes step 0.13 on the next run think a prior review exists when
 none does. Do NOT write `latest.txt` (step 0.16) on this failure path.
+
+### 0.15b. Store the model plan in the artifact
+
+After step 0.15's `--init` succeeds (and before step 0.16), persist the
+model plan + gates so fragments and later lifecycle commands read them
+from the artifact rather than re-deriving:
+
+```bash
+plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX)
+printf '%s' "$model_plan_json" > "$plan_tmp"
+artifact-patch.py --path "$artifact_path" \
+  --set-json model_plan=@"$plan_tmp" \
+  --set-json gates="$gates_json"
+rm -f "$plan_tmp"
+```
+
+On non-zero exit: error-as-prompt (schema rejected the shape) — parse,
+fix the config value it names, retry once, escalate on second failure.
 
 ### 0.16. Update `latest.txt` (atomic) — only after --init succeeds
 

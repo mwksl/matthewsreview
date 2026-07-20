@@ -67,7 +67,8 @@ same parallel fan-out pattern as Phase 1 lenses, but at chunk granularity.
 candidates per Sonnet sub-agent. Unbounded batches collapse score
 resolution onto the rubric anchors (every score landing on
 0/25/50/75/100) and stop using parallelism on large reviews — the
-25-cap restores both. The Phase-3 gate is a sharp cutoff at 45, so
+25-cap restores both. The Phase-3 gate is a sharp cutoff at the resolved
+`gates.phase3_gate` (default 45), so
 slight per-candidate score loss is tolerable; loss of triage signal
 feeding Phase 4 is not.
 
@@ -116,7 +117,8 @@ Prompt essence:
 > 50 and 75 should score 60 or 65 — do not snap it to an anchor. If
 > half the chunk would naturally land at 50, that is a triage failure:
 > resolve which ones are 40, 55, 65, etc. before returning. The
-> Phase-3 gate cuts at exactly 45; scores compressed onto anchors lose
+> Phase-3 gate cuts at exactly the resolved `gates.phase3_gate` (default
+> 45); scores compressed onto anchors lose
 > the resolution Phase 4 needs to triage.
 >
 > Return JSON array, one entry per candidate (order does not matter,
@@ -136,7 +138,7 @@ For each chunk-agent's result:
     log-tokens.sh \
       --review-dir "$review_dir" --phase phase_3 \
       --agent-role scoring --agent-id <id-from-result> \
-      --model sonnet --tokens <N or null>
+      --model "$role_scoring" --tokens <N or null>
     ```
 
 2. **Parse** the JSON array (retry once on parse failure).
@@ -180,10 +182,11 @@ artifact-read.sh \
 
 For each returned entry, compute:
 
-- `advances_to_phase_4 = (score >= 45) OR (count(distinct source_families) >= 2)`
+- `advances_to_phase_4 = (score >= $phase3_gate) OR (count(distinct source_families) >= 2)`
+  (where `$phase3_gate` is the resolved `gates.phase3_gate`, default 45)
 
 **When `score` is null** (§3.3 set it that way after a chunk parse
-failure or a missing-id response): treat `(score >= 45)` as false. The
+failure or a missing-id response): treat `(score >= $phase3_gate)` as false. The
 auto-graduation clause still runs — a candidate with ≥2 source families
 advances to Phase 4 even with a null score, matching §3.3's stated
 intent. Only candidates that are *both* null-scored and single-family

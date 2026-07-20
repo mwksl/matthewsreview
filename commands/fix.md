@@ -1,6 +1,6 @@
 ---
-allowed-tools: Bash(artifact-read.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(claude-md-paths.sh:*), Bash(staleness.sh:*), Bash(external-scrape.sh:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(origin-crosscheck.sh:*), Bash(assign-finding-ids.sh:*), Bash(group-fixes.py:*), Bash(repo-slug.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(timeout:*), Bash(sleep:*), Bash(kill:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(mktemp:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(node:*), Bash(find:*), AskUserQuestion, Agent, Read, Edit, Write, BashOutput, KillShell
-argument-hint: "[threshold] [--granular-commits]"
+allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(doctor.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(claude-md-paths.sh:*), Bash(staleness.sh:*), Bash(external-scrape.sh:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(origin-crosscheck.sh:*), Bash(assign-finding-ids.sh:*), Bash(group-fixes.py:*), Bash(repo-slug.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(timeout:*), Bash(sleep:*), Bash(kill:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(mktemp:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(node:*), Bash(find:*), AskUserQuestion, Agent, Read, Edit, Write, BashOutput, KillShell
+argument-hint: "[threshold] [--granular-commits] [--profile <name>] [--models \"<csv>\"]"
 description: Apply auto-fixable code review findings. Dispatches fix-group agents, post-fix-reviews the working tree, commits survivors, reverts regressions, updates the artifact.
 disable-model-invocation: false
 ---
@@ -74,9 +74,9 @@ with what actually happened on disk.
 
 Every Agent tool-use specifies:
 - `subagent_type: general-purpose`.
-- `model:` explicitly:
-  - Phase 8 fix-group agents → `opus`.
-  - Phase 9a post-fix reviewer → `opus`.
+- `model:` explicitly — the model segment of the role string:
+  - Phase 8 fix-group agents → role `fix` (default claude:opus).
+  - Phase 9a post-fix reviewer → role `post_fix_review` (default claude:opus).
 
 **Parallel fan-outs** happen by firing multiple Agent tool-use blocks
 in a single orchestrator turn. Phase 8's fix-group dispatch fans out
@@ -88,11 +88,17 @@ single-agent call (one sub-agent reviews the whole working tree).
 Parse `$ARGUMENTS` (whitespace-split):
 - First token that parses as a non-negative integer → `threshold`.
 - `--granular-commits` → `granular_commits=true` (else `false`).
+- `--profile <name>` → `profile=<name>` (else unset).
+- `--models "<csv>"` → `models_csv=<csv>` (else unset).
 - Any other token → stop and ask the user to clarify.
 
-If no integer was provided, `threshold=60` (default).
+If no integer was provided, leave `threshold` unset — step 7.2b sets it
+from the resolved `gates.fix_threshold` (default 60).
 
-Capture both in your working context before executing Phase 7.
+Capture all four in your working context before executing Phase 7.
+`profile` and `models_csv` are consumed by Phase 7 step 7.2b (model
+plan resolution) — a `:fix` weeks after the review resolves against
+the config of the day, not the review-time plan.
 
 ---
 

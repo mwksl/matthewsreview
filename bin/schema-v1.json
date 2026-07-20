@@ -91,10 +91,23 @@
     "subagent_tokens": { "$ref": "#/$defs/subagent_tokens" },
     "orchestrator_tokens": { "$ref": "#/$defs/orchestrator_tokens" },
     "metrics": { "$ref": "#/$defs/metrics" },
-    "base_context": { "$ref": "#/$defs/base_context" }
+    "base_context": { "$ref": "#/$defs/base_context" },
+    "model_plan": { "$ref": "#/$defs/model_plan" },
+    "gates": { "$ref": "#/$defs/gates" }
   },
 
   "$defs": {
+    "model_plan": {
+      "description": "Resolved per-role model plan for the current lifecycle command, written by review-config.sh at Phase 0 (review) / load time (fix, add, walkthrough, promote). Optional — pre-v1.0 artifacts omit it. Each command re-resolves fresh; the field reflects the most recent invocation.",
+      "type": "object",
+      "required": ["orchestrator", "roles"],
+      "additionalProperties": true
+    },
+    "gates": {
+      "description": "Resolved gate thresholds for this run (phase3_gate, phase4_bands, fix_threshold, walkthrough_threshold), from review-config.sh. Optional — absent means built-in defaults (45 / 45-60-75 / 60 / 60).",
+      "type": "object",
+      "additionalProperties": true
+    },
     "base_context": {
       "description": "§13.10 base-branch freshness record. Optional — absent from pre-§13.10 artifacts.",
       "type": "object",

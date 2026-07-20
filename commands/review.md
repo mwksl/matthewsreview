@@ -1,6 +1,6 @@
 ---
-allowed-tools: Bash(artifact-read.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(claude-md-paths.sh:*), Bash(staleness.sh:*), Bash(external-scrape.sh:*), Bash(comment-freshness.sh:*), Bash(prior-fix-diff.sh:*), Bash(line-range-check.sh:*), Bash(assign-finding-ids.sh:*), Bash(origin-crosscheck.sh:*), Bash(parse-with-repair.py:*), Bash(parse-validator-result.py:*), Bash(source-family-map.py:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(freshness-gate.sh:*), Bash(trivial-check.sh:*), Bash(artifact-seed.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(mktemp:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(node:*), Bash(find:*), AskUserQuestion, Agent, Read, BashOutput, KillShell
-argument-hint: "[--ensemble] [--full]"
+allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(doctor.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(claude-md-paths.sh:*), Bash(staleness.sh:*), Bash(external-scrape.sh:*), Bash(comment-freshness.sh:*), Bash(prior-fix-diff.sh:*), Bash(line-range-check.sh:*), Bash(assign-finding-ids.sh:*), Bash(origin-crosscheck.sh:*), Bash(parse-with-repair.py:*), Bash(parse-validator-result.py:*), Bash(source-family-map.py:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(freshness-gate.sh:*), Bash(trivial-check.sh:*), Bash(artifact-seed.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(mktemp:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(node:*), Bash(find:*), AskUserQuestion, Agent, Read, BashOutput, KillShell
+argument-hint: "[--ensemble] [--full] [--profile <name>] [--models \"<csv>\"]"
 description: Deep code review producing artifact.json, artifact.md, and (PR mode) a review comment on the PR.
 disable-model-invocation: false
 ---
@@ -11,6 +11,12 @@ Flags (optional):
   by default — enable for a richer review at higher cost.
 - `--full` forces `trivial_mode=false` for this run (overrides the
   doc/config-PR early-exit).
+- `--profile <name>` applies a named model profile from
+  `profiles.<name>` in `<repo>/.matthewsreview.json` or
+  `~/.matthews-reviews/config.json` (repo first).
+- `--models "<k=v,k=v>"` overrides tiers or roles for this run
+  (e.g. `--models "utility=claude:haiku,deep_validate=claude:sonnet"`).
+  Beats `--profile`. Unknown keys abort with the valid-key list.
 
 **Read `fragments/_prelude-shared.md` before proceeding — it lists
 rules that apply to every phase below (sub-agent return handling,
@@ -48,8 +54,9 @@ Every Agent tool-use specifies:
 - `subagent_type: general-purpose`. (The Codex CLI under `--ensemble`
   runs as a background Bash invocation of `codex-companion.mjs`, not
   an Agent dispatch — see `fragments/02-ensemble-adapter.md`.)
-- `model:` explicitly — `haiku`, `sonnet`, or `opus` per the fragment's
-  instructions.
+- `model:` explicitly — the model segment of the role string the
+  fragment names (roles resolve via the model plan; see
+  `_prelude-shared.md` §Model plan & role resolution).
 
 **Parallel fan-outs** happen by firing multiple Agent tool-use blocks
 in a single orchestrator turn. Always batch within one turn.
@@ -59,9 +66,14 @@ in a single orchestrator turn. Always batch within one turn.
 Parse `$ARGUMENTS` (whitespace-split) for:
 - `--ensemble` → `ensemble_mode=true` (else `false`)
 - `--full` → `force_full=true` (else `false`)
+- `--profile <name>` → `profile=<name>` (else unset)
+- `--models "<csv>"` → `models_csv=<csv>` (else unset; the CSV is one
+  quoted argument)
 - Any other token → stop and ask the user to clarify.
 
-Capture both in your working context before executing Phase 0.
+Capture all four in your working context before executing Phase 0.
+`profile` and `models_csv` are consumed by Phase 0 step 0.14b (model
+plan resolution).
 
 ---
 

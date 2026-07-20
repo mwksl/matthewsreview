@@ -1,6 +1,6 @@
 ---
-allowed-tools: Bash(artifact-read.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(claude-md-paths.sh:*), Bash(staleness.sh:*), Bash(prior-fix-diff.sh:*), Bash(line-range-check.sh:*), Bash(assign-finding-ids.sh:*), Bash(origin-crosscheck.sh:*), Bash(parse-with-repair.py:*), Bash(parse-validator-result.py:*), Bash(source-family-map.py:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(freshness-gate.sh:*), Bash(trivial-check.sh:*), Bash(artifact-seed.sh:*), Bash(codex-poll.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(mktemp:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(node:*), Bash(find:*), AskUserQuestion, Agent, Read, BashOutput, KillShell
-argument-hint: "[--effort <low|medium|high|xhigh>] [--full]"
+allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(doctor.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(claude-md-paths.sh:*), Bash(staleness.sh:*), Bash(prior-fix-diff.sh:*), Bash(line-range-check.sh:*), Bash(assign-finding-ids.sh:*), Bash(origin-crosscheck.sh:*), Bash(parse-with-repair.py:*), Bash(parse-validator-result.py:*), Bash(source-family-map.py:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(freshness-gate.sh:*), Bash(trivial-check.sh:*), Bash(artifact-seed.sh:*), Bash(codex-poll.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(mktemp:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(node:*), Bash(find:*), AskUserQuestion, Agent, Read, BashOutput, KillShell
+argument-hint: "[--effort <low|medium|high|xhigh|max|ultra>] [--full] [--profile <name>] [--models \"<csv>\"]"
 description: Codex-driven deep code review producing the same artifact.json shape as :review (drop-in for /matthewsreview:fix, :add, :walkthrough, :promote).
 disable-model-invocation: false
 ---
@@ -110,9 +110,9 @@ readiness probe.
 
 Every `Agent` tool-use specifies:
 - `subagent_type: general-purpose`
-- `model: sonnet` (default for shape-fixer / normalizer roles in this
-  command — Phase 3 scoring uses chunked-batch Sonnet exactly as
-  `:review` does)
+- `model:` the model segment of the role string (`normalizer` for
+  shape-fixer / normalizer dispatches; `scoring` for Phase 3 — both
+  default claude:sonnet)
 
 Parallel fan-outs happen by firing multiple Agent tool-use blocks in a
 single orchestrator turn.
@@ -120,9 +120,16 @@ single orchestrator turn.
 ## Argument handling
 
 Parse `$ARGUMENTS` (whitespace-split) for:
-- `--effort <value>` → `effort=<value>` (validate against `low|medium|high|xhigh`; reject other values with a usage message)
+- `--effort <value>` → `effort=<value>` (validate against `low|medium|high|xhigh|max|ultra`; reject other values with a usage message)
 - `--full` → `force_full=true` (else `false`)
+- `--profile <name>` → `profile=<name>` (else unset)
+- `--models "<csv>"` → `models_csv=<csv>` (else unset)
 - Any other token → stop and ask the user to clarify.
+
+`--effort` overrides the effort segment of the `codex_detect` /
+`codex_validate` / `codex_crosscut` roles after Phase 0 step 0.14b
+resolves the model plan (see the preflight fragment). `--profile` and
+`--models` behave as in `:review`.
 
 If `--effort` is omitted, set `effort=high`.
 

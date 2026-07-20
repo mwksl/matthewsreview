@@ -127,8 +127,9 @@ run concurrently. Phase 5.5 wall-clock latency is
 `sum(chunk_durations) * 2`. Treating each chunk as its own turn
 serializes the lane.
 
-For each chunk file, launch ONE `Agent` tool-use with `model: sonnet`,
-`subagent_type: general-purpose`. Each gen sub-agent receives the
+For each chunk file, launch ONE sub-agent with role `fix_hint`
+(default claude:sonnet), `subagent_type: general-purpose`. Each gen
+sub-agent receives the
 chunk's findings (file content), `claude_md_paths` (absolute paths
 captured in Phase 0), and `repo_root`.
 
@@ -161,7 +162,7 @@ output:
 log-tokens.sh \
   --review-dir "$review_dir" --phase phase_5_5_gen \
   --agent-role auto_fix_hint_gen \
-  --agent-id <id-from-Agent-result> --model sonnet \
+  --agent-id <id-from-Agent-result> --model "$role_fix_hint" \
   --tokens <N or null>
 ```
 
@@ -181,8 +182,8 @@ verification sub-agents are independent of one another — fan them out
 in a SINGLE orchestrator turn.
 
 For each chunk that has a `${chunk_id}-gen.json` file (chunks dropped
-in §5.5.2 are skipped here), launch ONE `Agent` tool-use with
-`model: sonnet`. Each verify sub-agent receives:
+in §5.5.2 are skipped here), launch ONE sub-agent with role
+`fix_hint` (default claude:sonnet). Each verify sub-agent receives:
 
 - The chunk's original findings (`${chunk_id}.json`).
 - The gen pass's hints for that chunk (`${chunk_id}-gen.json`) —
@@ -209,7 +210,7 @@ After each verify sub-agent returns:
 log-tokens.sh \
   --review-dir "$review_dir" --phase phase_5_5_verify \
   --agent-role auto_fix_hint_verify \
-  --agent-id <id-from-Agent-result> --model sonnet \
+  --agent-id <id-from-Agent-result> --model "$role_fix_hint" \
   --tokens <N or null>
 ```
 

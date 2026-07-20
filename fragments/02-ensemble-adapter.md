@@ -223,7 +223,7 @@ on the no-input early-skip path.
 Pass the normalizer both inputs in its prompt. The sub-agent produces
 one unified candidate list. This follows §19.2a verbatim.
 
-Dispatch via `Agent` with `model: sonnet`. Prompt essence:
+Dispatch with role `normalizer` (default claude:sonnet). Prompt essence:
 
 > You are normalizing external-reviewer output into the matthewsreview
 > candidate schema. You receive two inputs:
@@ -325,7 +325,7 @@ Log the normalizer's tokens under `phase_1_5`:
 log-tokens.sh \
   --review-dir "$review_dir" --phase phase_1_5 \
   --agent-role external_normalizer --agent-id <id> \
-  --model sonnet --tokens <N or null>
+  --model "$role_normalizer" --tokens <N or null>
 ```
 
 ### 1.5.6b. Clean up scratch_dir

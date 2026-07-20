@@ -211,13 +211,13 @@ Rules:
   pick a winner.
 ```
 
-Dispatch ONE `Agent` tool-use with `subagent_type: general-purpose`,
-`model: opus`.
+Dispatch ONE sub-agent with `subagent_type: general-purpose`, role
+`reconcile` (default claude:opus).
 
 After the agent returns:
 
 1. **Log tokens** via `log-tokens.sh --phase phase_9_reconcile
-   --agent-role reconcile --model opus`. (Match Phase 8 §8.6 step 1 —
+   --agent-role reconcile --model "$role_reconcile"`. (Match Phase 8 §8.6 step 1 —
    always log tokens before branching on content so cost is accounted
    even when output fails to parse.)
 
@@ -507,8 +507,8 @@ Reached from `abort`, delete-leak short-circuit, or reconcile fallback.
 
 ### 9a. Phase 9 post-fix review (one Opus sub-agent)
 
-Dispatch ONE `Agent` (`subagent_type: general-purpose`, `model: opus`)
-carrying the §19.9 prompt. Embeds all attempted findings, Phase 8 per-group
+Dispatch ONE sub-agent (`subagent_type: general-purpose`, role
+`post_fix_review` — default claude:opus) carrying the §19.9 prompt. Embeds all attempted findings, Phase 8 per-group
 results, and the unstaged working-tree diff.
 
 Capture the diff snapshot before dispatch:
@@ -663,7 +663,7 @@ Return JSON of exactly this shape:
 After the agent returns:
 
 1. **Log tokens** via `log-tokens.sh --phase phase_9 --agent-role
-   post_fix_review --model opus`.
+   post_fix_review --model "$role_post_fix_review"`.
 2. Parse JSON; light repair + one retry on parse failure.
 3. Full parse failure after retry: mark every attempted finding as
    `outcome: partial` with `phase_9_finding: "phase 9 reviewer parse

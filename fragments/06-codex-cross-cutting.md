@@ -245,7 +245,7 @@ Log shape-fixer tokens:
 log-tokens.sh \
   --review-dir "$review_dir" --phase phase_5 \
   --agent-role cross_cutting_shape_fixer --agent-id <id> \
-  --model sonnet --tokens <N or null>
+  --model "$role_normalizer" --tokens <N or null>
 ```
 
 ### 5.3. Apply the cross-cutting groups

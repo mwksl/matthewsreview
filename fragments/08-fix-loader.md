@@ -7,8 +7,9 @@ Parse `$ARGUMENTS` (whitespace-split):
 - `--granular-commits` → `granular_commits=true` (else `false`).
 - Any other token → stop and ask the user to clarify.
 
-If no integer was provided, `threshold=60`. Record both
-in your working context.
+If no integer was provided, `threshold` is set by step 7.2b from the
+resolved `gates.fix_threshold` (default 60). Record both in your
+working context.
 
 ### 7.2. Locate the artifact via `latest.txt`
 
@@ -38,6 +39,39 @@ Otherwise read `review_id` from it:
 review_id=$(tr -d '[:space:]' < "$latest_path")
 review_dir="$reviews_root/$repo_slug/$head_branch/$review_id"
 artifact_path="$review_dir/artifact.json"
+```
+
+### 7.2b. Resolve the model plan
+
+Resolve fresh for this invocation (a `:fix` days after the review uses
+today's config, not the review-time plan), store it, and print the
+table so the user sees which models the fix agents will run:
+
+```bash
+plan_args=(--repo-root "$repo_root" --orchestrator "$harness_id")
+[[ -n "${profile:-}" ]] && plan_args+=(--profile "$profile")
+[[ -n "${models_csv:-}" ]] && plan_args+=(--models "$models_csv")
+model_plan_json=$(review-config.sh "${plan_args[@]}")
+plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX)
+printf '%s' "$model_plan_json" > "$plan_tmp"
+artifact-patch.py --path "$artifact_path" \
+  --set-json model_plan=@"$plan_tmp" \
+  --set-json "gates=$(printf '%s' "$model_plan_json" | jq -c '.gates')"
+rm -f "$plan_tmp"
+
+printf '%s' "$model_plan_json" | jq -r '
+  "| Role | Engine | Model | Effort | Source |",
+  "|---|---|---|---|---|",
+  (.roles | to_entries[]
+   | "| \(.key) | \(.value.engine) | \(.value.model | if . == "" then "(cli default)" else . end) | \(.value.effort // "—") | \(.value.source) |"),
+  (.warnings[]? | "warning: \(.)")'
+```
+
+On non-zero from `review-config.sh`: surface the error-as-prompt
+stderr verbatim and stop. `$harness_id` is the Dispatch Protocol
+identity (`claude-code` / `omp` / `codex`).
+
+```bash
 trace_log_path="$review_dir/trace.md"
 phases_log_path="$review_dir/phases.jsonl"
 tokens_log_path="$review_dir/tokens.jsonl"

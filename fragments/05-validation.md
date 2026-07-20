@@ -45,9 +45,9 @@ on `impact_type`):
 > `sum(opus_durations)`. Serializing turns the deep lane into a
 > per-candidate timer.
 
-For each deep-lane candidate, launch ONE `Agent` tool-use with
-`model: opus`, `subagent_type: general-purpose`. Dispatch all in one
-orchestrator turn for concurrency.
+For each deep-lane candidate, launch ONE sub-agent with role
+`deep_validate` (default claude:opus), `subagent_type: general-purpose`.
+Dispatch all in one orchestrator turn for concurrency.
 
 **Never batch deep-lane candidates into one Opus call.** Each candidate needs independent blast-radius and fix-proposal work. The `--apply-decisions --expected $N` guard catches under-count violations but cannot catch the collapse-then-correct-unwrap failure mode (batching N candidates into one Opus call, then unwrapping the response into N tuples to satisfy the guard). The discipline is yours.
 
@@ -200,7 +200,8 @@ Prompt essence:
 Split light-lane candidates (including every candidate under
 `trivial_mode`) into chunks of **at most 25 candidates per chunk**,
 balanced as evenly as feasible. For each chunk, launch ONE `Agent`
-tool-use with `model: sonnet`. Dispatch all chunk-agents in one
+with role `light_validate` (default claude:sonnet). Dispatch all
+chunk-agents in one
 orchestrator turn for concurrency.
 
 Light-lane batches well — rubric-checking against CLAUDE.md, not per-candidate blast-radius investigation. Cap chunks at 25: unbounded batches collapse score resolution onto the rubric anchors and stop using parallelism on large reviews. The §4.4 `--apply-decisions --expected $N` guard catches a chunk-agent dropping a finding the same way it catches collapsed deep-lane Opus calls.
@@ -258,14 +259,14 @@ matching the Phase 3 pattern in §3.3 step 1):
 log-tokens.sh \
   --review-dir "$review_dir" --phase phase_4a \
   --agent-role validator --finding-id "$id" \
-  --agent-id <id> --model opus \
+  --agent-id <id> --model "$role_deep_validate" \
   --tokens <N or null>
 
 # Light lane (per chunk-agent — --finding-id omitted):
 log-tokens.sh \
   --review-dir "$review_dir" --phase phase_4b \
   --agent-role validator \
-  --agent-id <id> --model sonnet \
+  --agent-id <id> --model "$role_light_validate" \
   --tokens <N or null>
 ```
 
@@ -282,14 +283,17 @@ sees a single summary line instead of N per-finding prose blocks.
 | Score | Rule | Disposition | is_actionable | Other |
 |---|---|---|---|---|
 | `null` | parse failure | `uncertain` | false | reason default: "uncertain (Phase 4 inconclusive)" |
-| `< 45` | disproven | `disproven` | false | reason default: "disproven by Phase 4" |
-| `45-59` | uncertain | `uncertain` | false | reason default: "uncertain (Phase 4 inconclusive)" |
-| `60-74` AND `actionability=auto_fixable` | | `confirmed_mechanical` | true | confirmed_strength: moderate |
-| `60-74` AND `actionability=manual` | | `confirmed_manual` | false | confirmed_strength: moderate |
-| `60-74` AND `actionability=report_only` | | `confirmed_report` | false | confirmed_strength: moderate |
-| `75+` AND `actionability=auto_fixable` | | `confirmed_mechanical` | true | confirmed_strength: strong |
-| `75+` AND `actionability=manual` | | `confirmed_manual` | false | confirmed_strength: strong |
-| `75+` AND `actionability=report_only` | | `confirmed_report` | false | confirmed_strength: strong |
+| `< B1` | disproven | `disproven` | false | reason default: "disproven by Phase 4" |
+| `B1..B2-1` | uncertain | `uncertain` | false | reason default: "uncertain (Phase 4 inconclusive)" |
+| `B2..B3-1` AND `actionability=auto_fixable` | | `confirmed_mechanical` | true | confirmed_strength: moderate |
+| `B2..B3-1` AND `actionability=manual` | | `confirmed_manual` | false | confirmed_strength: moderate |
+| `B2..B3-1` AND `actionability=report_only` | | `confirmed_report` | false | confirmed_strength: moderate |
+| `B3+` AND `actionability=auto_fixable` | | `confirmed_mechanical` | true | confirmed_strength: strong |
+| `B3+` AND `actionability=manual` | | `confirmed_manual` | false | confirmed_strength: strong |
+| `B3+` AND `actionability=report_only` | | `confirmed_report` | false | confirmed_strength: strong |
+
+`B1`/`B2`/`B3` are the resolved `gates.phase4_bands` values (default
+`[45, 60, 75]`).
 
 Include the raw `decision` field in each tuple for audit-trail
 legibility — it's accepted by the helper but not authoritative; when

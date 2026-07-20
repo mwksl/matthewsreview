@@ -344,7 +344,7 @@ phase relies on: Phase 1 wall-clock latency goes from
 fan-out's background CLI loses its overlap window with the lens
 dispatches.
 
-#### L1 — diff-local scan (Sonnet)
+#### L1 — diff-local scan (role `light_lens`)
 
 > **Read L1–L7 before issuing any Agent tool-use.** The per-lens sub-sections
 > below are spec data (model, prompt body, substitutions). Issue every
@@ -352,17 +352,17 @@ dispatches.
 > end of this section — one orchestrator turn, not seven. Phase 1 latency is
 > `max(lens_durations)`, not `sum(lens_durations)`.
 
-Dispatch spec: `model: sonnet`, `subagent_type: general-purpose`.
+Dispatch spec: role `light_lens` (default claude:sonnet), `subagent_type: general-purpose`.
 
 Prompt body: `fragments/lens-prompts/L1.md` (read in step 1.3's bulk
 pre-read; its content is the L1 prompt body verbatim). Final prompt =
 shared invariants (from step 1.2.1) + lens body.
 
-#### L2 — structural / blast-radius (Opus; skipped if `trivial_mode`)
+#### L2 — structural / blast-radius (role `deep_lens`; skipped if `trivial_mode`)
 
 > **Spec data — issue this lens's `Agent` block in the single `#### Dispatch turn` at the end of §1.3, not here.**
 
-Dispatch spec: `model: opus`, `subagent_type: general-purpose`. The
+Dispatch spec: role `deep_lens` (default claude:opus), `subagent_type: general-purpose`. The
 sub-agent inherits the parent command's `Read` + `Bash(git:*)` +
 `Bash(grep:*)` grants (this already covers it).
 
@@ -374,11 +374,11 @@ substitution: `$prior_fix_suspects` → the JSON array captured at step
 1.2b. Final prompt = shared invariants (from step 1.2.1) + lens body
 (with substitution applied).
 
-#### L3 — CLAUDE.md compliance (Sonnet)
+#### L3 — CLAUDE.md compliance (role `light_lens`)
 
 > **Spec data — issue this lens's `Agent` block in the single `#### Dispatch turn` at the end of §1.3, not here.**
 
-Dispatch spec: `model: sonnet`.
+Dispatch spec: role `light_lens` (default claude:sonnet).
 
 Prompt body: `fragments/lens-prompts/L3.md` (read in step 1.3's bulk
 pre-read; its content is the L3 prompt body verbatim). Per-lens
@@ -386,11 +386,11 @@ substitution: `$claude_md_paths` → the newline-joined list from Phase
 0 step 0.7. Final prompt = shared invariants (from step 1.2.1) + lens
 body (with substitution applied).
 
-#### L4 — comment compliance (Sonnet)
+#### L4 — comment compliance (role `light_lens`)
 
 > **Spec data — issue this lens's `Agent` block in the single `#### Dispatch turn` at the end of §1.3, not here.**
 
-Dispatch spec: `model: sonnet`.
+Dispatch spec: role `light_lens` (default claude:sonnet).
 
 L4 additionally reads the current content of every modified file.
 
@@ -398,11 +398,11 @@ Prompt body: `fragments/lens-prompts/L4.md` (read in step 1.3's bulk
 pre-read; its content is the L4 prompt body verbatim). Final prompt =
 shared invariants (from step 1.2.1) + lens body.
 
-#### L5 — UX (Sonnet; skipped if `trivial_mode` or `user_facing == false`)
+#### L5 — UX (role `light_lens`; skipped if `trivial_mode` or `user_facing == false`)
 
 > **Spec data — issue this lens's `Agent` block in the single `#### Dispatch turn` at the end of §1.3, not here.**
 
-Dispatch spec: `model: sonnet`.
+Dispatch spec: role `light_lens` (default claude:sonnet).
 
 Prompt body: `fragments/lens-prompts/L5.md` (read in step 1.3's bulk
 pre-read; its content is the L5 prompt body verbatim — the canonical
@@ -411,11 +411,11 @@ for now to avoid scope creep). Per-lens substitution: `$claude_md_paths`
 → the newline-joined list from Phase 0 step 0.7. Final prompt = shared
 invariants (from step 1.2.1) + lens body (with substitution applied).
 
-#### L6 — lightweight security (Sonnet; skipped if `trivial_mode`)
+#### L6 — lightweight security (role `light_lens`; skipped if `trivial_mode`)
 
 > **Spec data — issue this lens's `Agent` block in the single `#### Dispatch turn` at the end of §1.3, not here.**
 
-Dispatch spec: `model: sonnet`.
+Dispatch spec: role `light_lens` (default claude:sonnet).
 
 Prompt body: `fragments/lens-prompts/L6.md` (read in step 1.3's bulk
 pre-read; its content is the L6 prompt body verbatim — the canonical
@@ -427,7 +427,7 @@ invariants (from step 1.2.1) + lens body.
 
 > **Spec data — issue this lens's `Agent` block in the single `#### Dispatch turn` at the end of §1.3, not here.**
 
-Dispatch spec: `model: opus`, `subagent_type: general-purpose`.
+Dispatch spec: role `deep_lens` (default claude:opus), `subagent_type: general-purpose`.
 Inherits the parent command's Read + Bash(git:*) + Bash(grep:*) grants —
 same permissions as L2.
 
