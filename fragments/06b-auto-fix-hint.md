@@ -2,8 +2,8 @@
 
 A two-pass Sonnet generation+verification chain produces an
 `auto_fix_hint` per eligible finding — pre-computing what
-`/adamsreview:walkthrough`'s per-finding briefer would write so that
-downstream `/adamsreview:fix` and `:walkthrough` can surface a
+`/matthewsreview:walkthrough`'s per-finding briefer would write so that
+downstream `/matthewsreview:fix` and `:walkthrough` can surface a
 batch-confirm UI instead of a per-finding interactive loop.
 
 Runs after Phase 5 cross-cutting and before Phase 6 finalize. Single

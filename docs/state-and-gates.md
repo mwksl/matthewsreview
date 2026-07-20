@@ -1,7 +1,7 @@
 # Finding state, score gates, and lanes
 
 Normative spec for finding state, score-gate routing, and lane partitioning.
-CLAUDE.md keeps a TL;DR; this file is the reference. `bin/schema-v1.json` is
+AGENTS.md keeps a TL;DR; this file is the reference. `bin/schema-v1.json` is
 the on-disk source of truth for artifact shape — this doc is the
 human-readable companion.
 

@@ -123,11 +123,11 @@ Write the groups to a tmpfile so `--set-json` can use `@file` form
 # fallback preserves the value. If it returned the outer envelope,
 # we pluck the inner array.
 jq -c '.cross_cutting_groups // .' <<<"$subagent_response_json" \
-    > "/tmp/adams-review-ccg-$review_id.json"
+    > "/tmp/matthews-review-ccg-$review_id.json"
 artifact-patch.py \
   --path "$artifact_path" \
-  --set-json "cross_cutting_groups=@/tmp/adams-review-ccg-$review_id.json"
-rm -f "/tmp/adams-review-ccg-$review_id.json"
+  --set-json "cross_cutting_groups=@/tmp/matthews-review-ccg-$review_id.json"
+rm -f "/tmp/matthews-review-ccg-$review_id.json"
 ```
 
 The schema validates each group: id must match `^G[0-9]+$`,

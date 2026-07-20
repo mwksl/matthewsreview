@@ -1,9 +1,9 @@
 # Pipeline detail
 
 Detailed phase trees for each lifecycle command, plus the token-tally semantics.
-CLAUDE.md keeps a one-paragraph summary per command; this file is the reference.
+AGENTS.md keeps a one-paragraph summary per command; this file is the reference.
 
-## `/adamsreview:review [--ensemble] [--full]`
+## `/matthewsreview:review [--ensemble] [--full]`
 
 ```
 ├── Phase 0 — Pre-flight (branch/PR detect, base-branch freshness,
@@ -35,7 +35,7 @@ CLAUDE.md keeps a one-paragraph summary per command; this file is the reference.
                render, PR comment POST)
 ```
 
-## `/adamsreview:codex-review [--effort <low|medium|high|xhigh>] [--full]`
+## `/matthewsreview:codex-review [--effort <low|medium|high|xhigh>] [--full]`
 
 ```
 ├── Codex readiness gate (find codex-companion.mjs; `setup --json` ready?
@@ -84,7 +84,7 @@ CLAUDE.md keeps a one-paragraph summary per command; this file is the reference.
                precedent)
 ```
 
-## `/adamsreview:fix [threshold] [--granular-commits]`
+## `/matthewsreview:fix [threshold] [--granular-commits]`
 
 ```
 ├── Phase 7 — Load artifact; leftover-attempted abort; clean-tree gate;
@@ -103,7 +103,7 @@ CLAUDE.md keeps a one-paragraph summary per command; this file is the reference.
                fix_group_id preserved per-finding in fix_attempts)
 ```
 
-## `/adamsreview:add [<paste...>] [--file path --line N --claim "..."] [--impact <type>] [--no-dedup]`
+## `/matthewsreview:add [<paste...>] [--file path --line N --claim "..."] [--impact <type>] [--no-dedup]`
 
 ```
 └── Locate artifact (latest.txt) → leftover-attempted gate →
@@ -125,7 +125,7 @@ CLAUDE.md keeps a one-paragraph summary per command; this file is the reference.
 
 **`:fix` Phase 7** loads the artifact and adds: `run_id` (ULID, `fixrun_<ULID>`), `threshold`, `latest_known_sha`, `stash_taken`, `input_sha` (pre-edit). Phase 8 adds `eligible_finding_ids` (step 8.1) and `fix_groups` (step 8.3, from `group-fixes.py`). Phase 9 adds `phase_9a_outcomes`, `overlap_files`, `reverted_groups`, `surviving_groups`, `commit_sha`.
 
-Path-handling invariants (helpers receive absolute paths; fragments never assume a cwd; `log-phase.sh` writes to the Phase-0-known path) are operational doctrine — see CLAUDE.md Rule 11.
+Path-handling invariants (helpers receive absolute paths; fragments never assume a cwd; `log-phase.sh` writes to the Phase-0-known path) are operational doctrine — see AGENTS.md Rule 11.
 
 ## Token tally — `subagent_tokens` and `orchestrator_tokens`
 
@@ -143,7 +143,7 @@ add / walkthrough arc:
   turn, filtered by timestamp ≥ `review_started_at`). Captures what
   `subagent_tokens` deliberately excludes: the orchestrator's own per-turn spend,
   which is what the statusline's live `ctx:` badge is measuring the depth of.
-  **Opt-in via `ADAMS_REVIEW_TALLY_ORCHESTRATOR=1`** — defaults to skip because
+  **Opt-in via `MATTHEWS_REVIEW_TALLY_ORCHESTRATOR=1`** — defaults to skip because
   the transcript scan trips the macOS Sequoia/Tahoe "access data from other apps"
   prompt (Claude Code marks every transcript with the `com.apple.provenance`
   xattr). When opted out, the helper exits 0 with a `skipped` stdout line and
@@ -159,14 +159,14 @@ surface in the rendered PR-comment line: cache-read and cache-creation are
 prompt-cache plumbing, not user-facing signal. All four remain in
 `artifact.orchestrator_tokens` for offline cost analysis.
 
-`/adamsreview:walkthrough` re-tallies both in §6.1 before §6.2's re-publish;
+`/matthewsreview:walkthrough` re-tallies both in §6.1 before §6.2's re-publish;
 issue-filer agents dispatched in §6.5 (and the orchestrator turns that dispatch
 them) land in the logs/transcript after the tally, so their cost surfaces on the
 next lifecycle command's tally.
 
 ### Over-count modes (v1 accepted, opted-in only)
 
-When `ADAMS_REVIEW_TALLY_ORCHESTRATOR=1` is set, the time-window filter
+When `MATTHEWS_REVIEW_TALLY_ORCHESTRATOR=1` is set, the time-window filter
 (`timestamp >= review_started_at`) counts every assistant turn in any transcript
 under `~/.claude/projects/<cwd-slug>/`, regardless of whether it belongs to this
 review. Clean cases: review → fix back-to-back; review → new review on the
@@ -183,7 +183,7 @@ filter was accepted over a `SessionStart`-hook-based fix.
 ### Stale-data preservation across opt-in toggles
 
 Skip on opt-out deliberately does not wipe a previously-written
-`orchestrator_tokens` value. So an opted-in `/adamsreview:review` followed by
-an opted-out `/adamsreview:fix` will publish the cumulative-cost line with the
+`orchestrator_tokens` value. So an opted-in `/matthewsreview:review` followed by
+an opted-out `/matthewsreview:fix` will publish the cumulative-cost line with the
 review-time value, not a refreshed one — the rendered number can lag actual
 spend. Re-opt-in on the next lifecycle command refreshes.

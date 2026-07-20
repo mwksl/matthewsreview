@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import _common as c  # noqa: E402
 
 
-MARKER = "<!-- adams-review-v1 -->"
+MARKER = "<!-- matthews-review-v1 -->"
 
 # Disposition → (section ordering key, section label, glyph, short label).
 # `section label` titles sections; `short label` appears in summary bullets and
@@ -212,7 +212,7 @@ def render_header(artifact):
     if freshness_line:
         lines.append(freshness_line)
     if not any_fix_attempts(artifact):
-        lines.append("**Fix threshold:** not yet set (run `/adamsreview:fix [threshold]` to apply fixes)")
+        lines.append("**Fix threshold:** not yet set (run `/matthewsreview:fix [threshold]` to apply fixes)")
     tokens = artifact.get("subagent_tokens") or {}
     total = tokens.get("total")
     invs = tokens.get("invocations")
@@ -222,7 +222,7 @@ def render_header(artifact):
     turn_count = orch.get("turn_count")
     # Suppress on missing AND on zero-turn. Missing means the helper
     # hasn't run (pre-feature artifacts, or opted-out runs since the
-    # ADAMS_REVIEW_TALLY_ORCHESTRATOR opt-in landed). Zero-turn means
+    # MATTHEWS_REVIEW_TALLY_ORCHESTRATOR opt-in landed). Zero-turn means
     # either a legacy artifact carrying the dropped Phase-0 zero seed,
     # or an opted-in run whose time window matched no turns — both
     # render as content-free noise. The four counters stay in the
@@ -550,8 +550,8 @@ def render_auto_recommendations(buckets):
     lines = [f"### Auto-recommendations ({len(rows)})", ""]
     lines.append(
         "_AI-authored fix directions for findings that aren't auto-fixable today. "
-        "Run `/adamsreview:fix` to batch-apply with one confirmation, or "
-        "`/adamsreview:walkthrough` to review one-by-one._"
+        "Run `/matthewsreview:fix` to batch-apply with one confirmation, or "
+        "`/matthewsreview:walkthrough` to review one-by-one._"
     )
     lines.append("")
     lines.append("| # | Score | Disp | File | Recommendation |")
@@ -587,9 +587,9 @@ def render_deep_other(buckets, disposition):
     lines = [f"### {glyph} {label} ({len(rows)})", ""]
     if disposition == "confirmed_manual":
         lines.append(
-            "_Not auto-applied by `/adamsreview:fix` directly — these need a confirmation step. "
+            "_Not auto-applied by `/matthewsreview:fix` directly — these need a confirmation step. "
             "Findings with an auto-recommendation get batch-confirmed at `:fix`'s Phase 7.5 "
-            "preflight (or `:walkthrough` Step 4.5); use `/adamsreview:promote <finding_id>` "
+            "preflight (or `:walkthrough` Step 4.5); use `/matthewsreview:promote <finding_id>` "
             "for a single-finding manual override._"
         )
         lines.append("")
@@ -611,7 +611,7 @@ def render_deep_other(buckets, disposition):
             )
     if disposition == "uncertain":
         lines.append("")
-        lines.append("Phase 4 couldn't confirm decisively. Re-run `/adamsreview:review` if you suspect this deserves")
+        lines.append("Phase 4 couldn't confirm decisively. Re-run `/matthewsreview:review` if you suspect this deserves")
         lines.append("further investigation with fresh context.")
     return "\n".join(lines)
 
@@ -639,9 +639,9 @@ def render_light_lane(buckets):
     if any(f.get("disposition") in ("confirmed_mechanical", "confirmed_manual") for f in rows):
         lines.append(
             "_Light-lane findings — including rows labeled auto-fixable — aren't applied by "
-            "`/adamsreview:fix` directly. Findings with an auto-recommendation get "
+            "`/matthewsreview:fix` directly. Findings with an auto-recommendation get "
             "batch-confirmed at `:fix`'s Phase 7.5 preflight (or `:walkthrough` Step 4.5); "
-            "use `/adamsreview:promote <finding_id>` for a single-finding manual override._"
+            "use `/matthewsreview:promote <finding_id>` for a single-finding manual override._"
         )
         lines.append("")
     lines.append("| # | Score | Impact | File | Finding | Disposition |")
@@ -817,7 +817,7 @@ def render_fix_runs(artifact):
 
 
 def render_footer(artifact):
-    return "🤖 Generated with the [adamsreview](https://github.com/adamjgmiller/adamsreview) Claude Code Review Plugin"
+    return "🤖 Generated with the [matthewsreview](https://github.com/mwksl/matthewsreview) Claude Code Review Plugin"
 
 
 # ----- Assembly ---------------------------------------------------------

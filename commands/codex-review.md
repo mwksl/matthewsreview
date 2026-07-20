@@ -1,7 +1,7 @@
 ---
 allowed-tools: Bash(artifact-read.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(claude-md-paths.sh:*), Bash(staleness.sh:*), Bash(prior-fix-diff.sh:*), Bash(line-range-check.sh:*), Bash(assign-finding-ids.sh:*), Bash(origin-crosscheck.sh:*), Bash(parse-with-repair.py:*), Bash(parse-validator-result.py:*), Bash(source-family-map.py:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(freshness-gate.sh:*), Bash(trivial-check.sh:*), Bash(artifact-seed.sh:*), Bash(codex-poll.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(mktemp:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(node:*), Bash(find:*), AskUserQuestion, Agent, Read, BashOutput, KillShell
 argument-hint: "[--effort <low|medium|high|xhigh>] [--full]"
-description: Codex-driven deep code review producing the same artifact.json shape as :review (drop-in for /adamsreview:fix, :add, :walkthrough, :promote).
+description: Codex-driven deep code review producing the same artifact.json shape as :review (drop-in for /matthewsreview:fix, :add, :walkthrough, :promote).
 disable-model-invocation: false
 ---
 
@@ -14,7 +14,7 @@ Flags (optional):
 
 Note: this command has **no `--ensemble` flag** — it is purpose-built
 for Codex-only review. If you want internal Claude lenses pooled with
-the Codex CLI + a PR bot-comment scrape, run `/adamsreview:review
+the Codex CLI + a PR bot-comment scrape, run `/matthewsreview:review
 --ensemble` instead.
 
 **Read `fragments/_prelude-shared.md` before proceeding — it lists
@@ -23,7 +23,7 @@ helper-script error-as-prompt).**
 
 ## Execution overview
 
-This command orchestrates the same phases as `/adamsreview:review`
+This command orchestrates the same phases as `/matthewsreview:review`
 (Phases 0–6 plus Phase 5.5 auto-fix-hint generation), swapping the
 Claude sub-agent dispatches for **Codex jobs** (via the
 `codex-companion.mjs` plugin's `task --background` primitive) at:
@@ -76,7 +76,7 @@ Two dispatch primitives in this command:
 
 ```
 node "$CODEX_COMPANION" task --background --effort "$effort" \
-    --prompt-file "/tmp/adams-review-codex-<review_id>-<slot>.md"
+    --prompt-file "/tmp/matthews-review-codex-<review_id>-<slot>.md"
 ```
 
 The companion returns the launch payload on stdout (extract the id
@@ -215,7 +215,7 @@ and execute the instructions inside before proceeding to Phase 2.
 external sources are pooled. Log one line to `trace.md`:
 
 ```
-Phase 1.5 skipped — /adamsreview:codex-review has no external sources
+Phase 1.5 skipped — /matthewsreview:codex-review has no external sources
 ```
 
 ---
@@ -265,5 +265,5 @@ the instructions inside.
   shared-mode cold-start broker-ENOENT bypass (which surfaces at first
   lens dispatch instead).
 - No Phase 1.5 external-source pooling (PR-comment scrape, secondary
-  Codex CLI). Run `/adamsreview:review --ensemble` if you want that on
+  Codex CLI). Run `/matthewsreview:review --ensemble` if you want that on
   top of internal Claude lenses.

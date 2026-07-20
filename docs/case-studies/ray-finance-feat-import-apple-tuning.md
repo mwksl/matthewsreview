@@ -1,8 +1,8 @@
-# Tuning `/adams-review` against `feat/import-apple` — three-cycle A/B/C
+# Tuning `/matthews-review` against `feat/import-apple` — three-cycle A/B/C
 
 Companion to [`ray-finance-feat-import-apple.md`](ray-finance-feat-import-apple.md).
-Where that doc compares `/adams-review` to `/ultrareview` across moving
-snapshots of the branch, **this doc compares `/adams-review` to itself**
+Where that doc compares `/matthews-review` to `/ultrareview` across moving
+snapshots of the branch, **this doc compares `/matthews-review` to itself**
 across three consecutive runs against a fixed target, as pipeline-tuning
 commits landed between them.
 
@@ -58,14 +58,14 @@ From `git log` on `main`, in chronological order:
   `origin-crosscheck.sh`, and counts dropped lenses + skipped
   helper-calls in the Phase 1 summary.
 - `ddef667` — _Fix/post-fix: expand validator + sibling context for
-  fix and review agents._ Affects `/adams-review-fix` Phases 8–9 only.
-  **No effect on `/adams-review` alone.**
+  fix and review agents._ Affects `/matthews-review-fix` Phases 8–9 only.
+  **No effect on `/matthews-review` alone.**
 - `b5108df` — _Detection: fix A3 grep fallback producing `0\n0` on
   no-match._ Follow-up bug fix on `ea35753`'s counters.
 
 The crucial point: between review-2 and review-3, **no commits
 modified any lens or validator prompt**. Item A is pure observability;
-Items B/C/D don't fire in a bare `/adams-review` run. Any
+Items B/C/D don't fire in a bare `/matthews-review` run. Any
 coverage delta between review-2 and review-3 is attributable to
 sampling variance, not to reviewer design.
 
@@ -243,7 +243,7 @@ that would push toward that specific reasoning path.
   review-2b or review-3b with the same commit and same prompts to
   directly measure prompt-held-fixed variance. Next cycle's first
   action should be N=3–5 no-change runs to establish a baseline.
-- **`/adams-review-fix` wasn't exercised.** Items B/C/D landed in
+- **`/matthews-review-fix` wasn't exercised.** Items B/C/D landed in
   `ddef667` but their effect on fix-agent context is not yet
   measured. The next evaluation point for those is an actual fix run
   on review-3's confirmed_auto set.

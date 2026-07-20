@@ -8,7 +8,7 @@ artifact-validate.sh --path "$artifact_path"
 
 On non-zero exit: log the validator stderr verbatim to `trace.md`;
 surface to the user as "Final artifact fails schema validation — see
-trace.md." Dump a copy to `/tmp/adams-review-invalid-$(date -u +%Y%m%dT%H%M%SZ).json`
+trace.md." Dump a copy to `/tmp/matthews-review-invalid-$(date -u +%Y%m%dT%H%M%SZ).json`
 for debugging. Do NOT proceed to publish — a broken artifact
 should not shadow the PR comment.
 
@@ -22,7 +22,7 @@ tally-subagent-tokens.sh \
 
 `tokens: null` entries coerce to 0; an empty log produces a zero
 rollup rather than an error. The three lifecycle commands
-(`/adamsreview:fix`, `/adamsreview:add`, `/adamsreview:walkthrough`)
+(`/matthewsreview:fix`, `/matthewsreview:add`, `/matthewsreview:walkthrough`)
 each re-invoke it before their final render so the published PR
 comment reflects cumulative sub-agent spend.
 
@@ -43,7 +43,7 @@ the transcript directory is absent (zero rollup, no error). Same
 cumulative-across-lifecycle-terminus pattern as the sub-agent tally:
 each lifecycle command re-invokes it before its final render.
 
-The helper is **opt-in** via `ADAMS_REVIEW_TALLY_ORCHESTRATOR=1`
+The helper is **opt-in** via `MATTHEWS_REVIEW_TALLY_ORCHESTRATOR=1`
 (default skip). When opted out it exits 0 with one
 `orchestrator-tally: skipped (...)` stdout line and does not touch
 the artifact, so the rendered PR comment simply omits the
@@ -57,7 +57,7 @@ at least one candidate. Compute it from `findings[].sources[]`:
 - `internal` — present when any lens produced a candidate (any
   `sources[]` entry matches `L[0-9]+-.*` — L1–L7 today, forward-compat for future lenses).
 - `internal-codex` — same `L<N>-` lens-tag pattern, but emitted by
-  `/adamsreview:codex-review` rather than `/adamsreview:review`. The
+  `/matthewsreview:codex-review` rather than `/matthewsreview:review`. The
   seeded artifact (Phase 0 step 0.15) carries this label when the
   top-level command set `reviewer_sources_label=internal-codex`;
   preserve it here instead of mapping back to `internal`.
@@ -91,11 +91,11 @@ reviewer_sources=$(jq -c --arg internal "$internal_label" '
   | unique
 ' "$artifact_path")
 
-printf '%s\n' "$reviewer_sources" > "/tmp/adams-review-rs-$review_id.json"
+printf '%s\n' "$reviewer_sources" > "/tmp/matthews-review-rs-$review_id.json"
 artifact-patch.py \
   --path "$artifact_path" \
-  --set-json "reviewer_sources=@/tmp/adams-review-rs-$review_id.json"
-rm -f "/tmp/adams-review-rs-$review_id.json"
+  --set-json "reviewer_sources=@/tmp/matthews-review-rs-$review_id.json"
+rm -f "/tmp/matthews-review-rs-$review_id.json"
 ```
 
 If `findings[]` is empty (no candidates detected), the union is `[]` —
@@ -113,7 +113,7 @@ now_epoch=$(date +%s)
 elapsed=$((now_epoch - start_epoch))
 
 # At review time (Stage 2), phase_9_verified_pct and required_followup
-# are null — they're set by /adamsreview:fix's Phase 9.
+# are null — they're set by /matthewsreview:fix's Phase 9.
 metrics=$(jq -n \
   --argjson elapsed "$elapsed" \
   --argjson files_changed "$num_files" \
@@ -125,11 +125,11 @@ metrics=$(jq -n \
     pr_size_buckets: {files_changed: $files_changed, lines_changed: $lines_changed}
   }')
 
-echo "$metrics" > "/tmp/adams-review-metrics-$review_id.json"
+echo "$metrics" > "/tmp/matthews-review-metrics-$review_id.json"
 artifact-patch.py \
   --path "$artifact_path" \
-  --set-json "metrics=@/tmp/adams-review-metrics-$review_id.json"
-rm -f "/tmp/adams-review-metrics-$review_id.json"
+  --set-json "metrics=@/tmp/matthews-review-metrics-$review_id.json"
+rm -f "/tmp/matthews-review-metrics-$review_id.json"
 ```
 
 ### 6.4. Append Phase 6 record to `phases.jsonl`
@@ -178,7 +178,7 @@ called in every mode, with local mode as a no-op.
 **PR mode:**
 
 First capture any `comment_id` that was persisted to the artifact
-during this run. On a fresh `/adamsreview:review` this is normally empty —
+during this run. On a fresh `/matthewsreview:review` this is normally empty —
 the seed at step 0.15 writes `comment_id: null` unless step 0.14's
 recovery prompt populated `existing_comment_id` (user chose "replace
 prior comment in place"):
@@ -204,7 +204,7 @@ publish_args=(
     --review-dir "$review_dir"
 )
 # Prefer artifact-recorded comment_id; fall back to existing_comment_id
-# directly. Omitting --comment-id on a fresh /adamsreview:review is
+# directly. Omitting --comment-id on a fresh /matthewsreview:review is
 # intentional — the publisher will POST a new comment.
 if [[ -n "$comment_id_from_artifact" ]]; then
     publish_args+=(--comment-id "$comment_id_from_artifact")
@@ -269,18 +269,18 @@ default):
 
 **Next steps**
 
-- **Apply the auto-eligible findings** — `/adamsreview:fix 60`
+- **Apply the auto-eligible findings** — `/matthewsreview:fix 60`
   applies every finding in the deep-lane "✓ Auto-fixable" table
   that scores at or above the threshold. Light-lane rows are
   skipped by default; promote them first with the walkthrough.
 
-- **Walk through the skipped findings** — `/adamsreview:walkthrough`
+- **Walk through the skipped findings** — `/matthewsreview:walkthrough`
   presents each deep-lane manual finding and every light-lane row
   one at a time with a briefing (what it's about, options, a
   recommendation) and promotes the ones you approve with tailored
   fix-hints. Posts a decisions log to the PR for audit. Works
   same-session, later, or in a new session — the artifact persists
-  under `~/.adams-reviews/`.
+  under `~/.matthews-reviews/`.
 
 You can run either step independently, or both in either order.
 ```
@@ -289,7 +289,7 @@ Then add (still chat-only, not in `artifact.md`):
 
 - If PR mode: a one-line "Full artifact: `$artifact_path`" (so the user
   knows where the JSON lives).
-- If local mode: "Fix commit will land locally if you run /adamsreview:fix.
+- If local mode: "Fix commit will land locally if you run /matthewsreview:fix.
   It will not be pushed without `--push` (Stage 3 future flag)."
 
 (None of these trailing lines are part of `artifact.md` itself — keeps

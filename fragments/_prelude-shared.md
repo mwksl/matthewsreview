@@ -1,6 +1,6 @@
-# Shared prelude — applies to every `/adamsreview:*` command
+# Shared prelude — applies to every `/matthewsreview:*` command
 
-These rules apply across every phase of every adamsreview command that
+These rules apply across every phase of every matthewsreview command that
 dispatches sub-agents or invokes helper scripts.
 
 ## 1. After every sub-agent returns

@@ -2,7 +2,7 @@
 # repo-slug.sh — canonical repo-slug derivation (DESIGN §9.2).
 #
 # Single source of truth for the directory-name slug used under
-# `$ADAMS_REVIEW_REVIEWS_ROOT` (or `~/.adams-reviews`). Called by
+# `$MATTHEWS_REVIEW_REVIEWS_ROOT` (or `~/.matthews-reviews`). Called by
 # Phase 0 (preflight) and Phase 7 (fix-loader); see also the
 # §25.1 working-set entry for `repo_slug`.
 #

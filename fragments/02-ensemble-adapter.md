@@ -65,7 +65,7 @@ The prompt file was already written in 01-detection.md step 1.2a (the
 readiness gate). Just invoke the CLI:
 
 ```bash
-node "$CODEX_COMPANION" task --prompt-file "/tmp/adams-review-codex-$review_id.md" \
+node "$CODEX_COMPANION" task --prompt-file "/tmp/matthews-review-codex-$review_id.md" \
   > "$scratch_dir/codex.out" 2> "$scratch_dir/codex.err"
 ```
 
@@ -122,7 +122,7 @@ success, pass stdout to the normalizer.
 Clean up the Codex prompt file:
 
 ```bash
-rm -f "/tmp/adams-review-codex-$review_id.md"
+rm -f "/tmp/matthews-review-codex-$review_id.md"
 ```
 
 ### 1.5.4. PR comment scrape (PR mode only)
@@ -225,7 +225,7 @@ one unified candidate list. This follows §19.2a verbatim.
 
 Dispatch via `Agent` with `model: sonnet`. Prompt essence:
 
-> You are normalizing external-reviewer output into the adamsreview
+> You are normalizing external-reviewer output into the matthewsreview
 > candidate schema. You receive two inputs:
 >
 > **1. PR bot comments** (JSON array; may be empty):

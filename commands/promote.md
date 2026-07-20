@@ -5,9 +5,9 @@ description: Promote a finding to auto-fixable via human override. Patches artif
 disable-model-invocation: false
 ---
 
-Promote a single finding from the most recent `/adamsreview:review` on this
+Promote a single finding from the most recent `/matthewsreview:review` on this
 branch to `disposition=confirmed_mechanical`, recording full provenance in
-`human_confirmation` so `/adamsreview:fix` will pick it up on its next
+`human_confirmation` so `/matthewsreview:fix` will pick it up on its next
 run.
 
 **Read `fragments/_prelude-shared.md` before proceeding — it lists
@@ -38,11 +38,11 @@ helper-script error-as-prompt).**
   (re-publish to PR), and 10 (user-visible summary). The artifact
   patch and trace entry still land. Useful for scripted promote
   loops where render+publish should run once at the end rather than
-  per-iteration; `/adamsreview:walkthrough` (§28) uses this
+  per-iteration; `/matthewsreview:walkthrough` (§28) uses this
   internally. When set, the caller is responsible for running
   `artifact-render.py` and `artifact-publish.sh` afterward.
 
-Does NOT run `/adamsreview:fix` for you. Run it yourself when you're
+Does NOT run `/matthewsreview:fix` for you. Run it yourself when you're
 ready to apply promoted findings.
 
 ## Execution
@@ -69,7 +69,7 @@ for `--reason` and `--fix-hint`):
 If no `finding_id` was provided, error-as-prompt:
 
 > ERROR: missing finding_id.
-> Valid input: /adamsreview:promote F037 [--reason "..."] [--fix-hint "..."] [--force]
+> Valid input: /matthewsreview:promote F037 [--reason "..."] [--fix-hint "..."] [--force]
 > Action: pass a finding id (matching `^F[0-9]+$`) as the first arg.
 
 If `--reason` was not provided, dispatch `AskUserQuestion` once with
@@ -86,7 +86,7 @@ canned options, use the option text as `reason`. Capture the final
 ### 2. Locate the artifact
 
 ```bash
-reviews_root="${ADAMS_REVIEW_REVIEWS_ROOT:-$HOME/.adams-reviews}"
+reviews_root="${MATTHEWS_REVIEW_REVIEWS_ROOT:-$HOME/.matthews-reviews}"
 head_branch=$(git rev-parse --abbrev-ref HEAD)
 repo_root=$(git rev-parse --show-toplevel)
 repo_slug=$(repo-slug.sh --repo-root "$repo_root")
@@ -97,7 +97,7 @@ If `latest.txt` is missing or empty, error-as-prompt:
 
 > ERROR: no review found for branch `$head_branch` under
 > `$reviews_root/$repo_slug/`.
-> Action: run /adamsreview:review against this branch first.
+> Action: run /matthewsreview:review against this branch first.
 
 Otherwise:
 
@@ -178,7 +178,7 @@ persists; user can manually re-publish with the helper).
 ### 10. User-visible summary
 
 When `defer_publish == true`, print only a terse one-liner so the
-caller's own summary (e.g. `/adamsreview:walkthrough`'s decisions
+caller's own summary (e.g. `/matthewsreview:walkthrough`'s decisions
 log) isn't drowned out:
 
 ```
@@ -198,7 +198,7 @@ Promoted $finding_id:
   reviewer:       $reviewer
   reason:         $reason
 
-Next: run /adamsreview:fix to apply this and any other
+Next: run /matthewsreview:fix to apply this and any other
 confirmed_mechanical/partial/regression findings.
 ```
 
@@ -225,12 +225,12 @@ promote_publish_failed). The artifact patch stands; to republish run:
 
 - **No batch promotion.** One finding per invocation. Loop from the
   shell if you need multiple:
-  `for id in F003 F037 F039; do /adamsreview:promote $id --reason "..."; done`
-- **No demotion / undo.** There is no `/adamsreview:demote`. If you
-  change your mind BEFORE running `/adamsreview:fix`, manually patch
+  `for id in F003 F037 F039; do /matthewsreview:promote $id --reason "..."; done`
+- **No demotion / undo.** There is no `/matthewsreview:demote`. If you
+  change your mind BEFORE running `/matthewsreview:fix`, manually patch
   the artifact:
   `artifact-patch.py --path <artifact> --finding-id F037 --set-json human_confirmation=null --set disposition=<prior> --set actionability=<prior>`
-- **No persistence across fresh `/adamsreview:review` runs.** A new review
+- **No persistence across fresh `/matthewsreview:review` runs.** A new review
   overwrites the artifact; promotions are lost. Re-promote if needed.
 - **No argument for changing `score_phase4`.** The validator's score is
   preserved for audit. Phase 8 eligibility bypasses the score threshold

@@ -451,7 +451,7 @@ def cmd_add_findings(args):
                   Distinct from 64 so a downstream caller can branch on
                   "every finding was bad" vs. "your input shape was
                   wrong." Phase 1's fragment handler treats both the
-                  same; /adamsreview:add migration may want to branch.
+                  same; /matthewsreview:add migration may want to branch.
       - 64      : EXIT_USAGE — malformed input up front. Three pathways
                   share this: (a) `read_json_arg()` already exits 64
                   when stdin / @file / inline isn't parseable JSON;
@@ -1265,7 +1265,7 @@ def cmd_apply_fix_start(args):
                     "a 'resolved' finding should have been filtered out of eligibility."
                 ),
                 valid_values=(sorted(allowed) or ["(none — terminal state)"]),
-                action="run /adamsreview:fix fresh; if this persists, check the Phase 8 step 8.1 eligibility filter."
+                action="run /matthewsreview:fix fresh; if this persists, check the Phase 8 step 8.1 eligibility filter."
             )
             sys.exit(c.EXIT_INVALID_TRANSITION)
 
@@ -1458,8 +1458,8 @@ def cmd_apply_fix_outcomes(args):
 # These two modes cover the auto-fix-hint feature (umbrella plan
 # `more-auto.md`). The first writes Phase 5.5's generation+verification
 # output into finding.auto_fix_hint; the second batch-promotes findings
-# whose auto_fix_hint the user accepted at /adamsreview:fix preflight or
-# /adamsreview:walkthrough Step 4.5.
+# whose auto_fix_hint the user accepted at /matthewsreview:fix preflight or
+# /matthewsreview:walkthrough Step 4.5.
 #
 # Distinct error models on purpose:
 #
@@ -1467,7 +1467,7 @@ def cmd_apply_fix_outcomes(args):
 #                               Per-finding rejections are reportable but
 #                               not fatal — Phase 5.5 input may include
 #                               stale ids (artifact mutated mid-run by a
-#                               concurrent /adamsreview:add) or findings
+#                               concurrent /matthewsreview:add) or findings
 #                               whose state shifted out of eligibility
 #                               between dispatch and patch-time. The wave
 #                               still lands the salvageable subset.
@@ -1753,7 +1753,7 @@ def cmd_apply_auto_fix_hints(args):
             ],
             action=(
                 "investigate the rejection reasons. Common causes: stale ids from a "
-                "concurrent /adamsreview:add; findings already promoted between Phase "
+                "concurrent /matthewsreview:add; findings already promoted between Phase "
                 "5.5 generation and patch-time; Phase 5.5 schema-fixer drift on hint/"
                 "confidence/second_opinion. Pass --overwrite to replace existing "
                 "auto_fix_hint values."
@@ -1908,7 +1908,7 @@ def cmd_apply_auto_rec_promotions(args):
             c.err_prompt(
                 f"--apply-auto-rec-promotions entry #{idx} ({fid}): finding has no auto_fix_hint to source fix_hint from",
                 context="auto-rec promotions require Phase 5.5 to have populated finding.auto_fix_hint.hint first.",
-                action="re-run /adamsreview:review (Phase 5.5 generates auto_fix_hint), or use /adamsreview:promote for a manual promote."
+                action="re-run /matthewsreview:review (Phase 5.5 generates auto_fix_hint), or use /matthewsreview:promote for a manual promote."
             )
             return c.EXIT_VALIDATION
 
@@ -1937,7 +1937,7 @@ def cmd_apply_auto_rec_promotions(args):
             c.err_prompt(
                 f"--apply-auto-rec-promotions entry #{idx} ({fid}): disposition='{disp}' is not auto-rec promotable",
                 valid_values=sorted(_AUTO_REC_PROMOTABLE_DISPOSITIONS),
-                action="auto-rec eligibility (§5.5) requires confirmed_mechanical / confirmed_manual / confirmed_report. Use /adamsreview:promote for other dispositions."
+                action="auto-rec eligibility (§5.5) requires confirmed_mechanical / confirmed_manual / confirmed_report. Use /matthewsreview:promote for other dispositions."
             )
             return c.EXIT_VALIDATION
 

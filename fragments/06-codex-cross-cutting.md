@@ -48,7 +48,7 @@ Otherwise, capture the list as `xc_input_json` and proceed.
 #### 5.2.1. Build the prompt
 
 ```bash
-prompt_file="/tmp/adams-review-codex-${review_id}-XC.md"
+prompt_file="/tmp/matthews-review-codex-${review_id}-XC.md"
 
 cat > "$prompt_file" <<'PROMPT'
 You are reviewing a set of confirmed, actionable deep-lane findings to
@@ -194,7 +194,7 @@ Dispatch ONE Sonnet `Agent` to canonicalize Codex's freeform output
 into the structured shape:
 
 > You are normalizing one Codex cross-cutting analysis output into the
-> adamsreview cross_cutting_groups schema.
+> matthewsreview cross_cutting_groups schema.
 >
 > **Codex output (freeform):**
 >
@@ -263,23 +263,23 @@ valid bare-array response.
 
 ```bash
 jq -c '.cross_cutting_groups // .' <<<"$xc_response_json" \
-    > "/tmp/adams-review-ccg-$review_id.json"
+    > "/tmp/matthews-review-ccg-$review_id.json"
 
 # Defensive type-guard: if neither path produced an array (e.g. the
 # shape-fixer emitted a string or object), fall back to [] before
 # applying so artifact-patch.py's set-json doesn't choke on the type
 # mismatch and we still log a clean trace tag.
-if ! jq -e 'type == "array"' "/tmp/adams-review-ccg-$review_id.json" >/dev/null; then
+if ! jq -e 'type == "array"' "/tmp/matthews-review-ccg-$review_id.json" >/dev/null; then
     printf 'phase_5_codex_groups_unparseable: shape-fixer output not an array; setting to []\n' \
         >> "$trace_log_path"
-    echo '[]' > "/tmp/adams-review-ccg-$review_id.json"
+    echo '[]' > "/tmp/matthews-review-ccg-$review_id.json"
 fi
 
 artifact-patch.py \
   --path "$artifact_path" \
-  --set-json "cross_cutting_groups=@/tmp/adams-review-ccg-$review_id.json"
+  --set-json "cross_cutting_groups=@/tmp/matthews-review-ccg-$review_id.json"
 
-rm -f "/tmp/adams-review-ccg-$review_id.json"
+rm -f "/tmp/matthews-review-ccg-$review_id.json"
 ```
 
 If `artifact-patch.py` rejects the write (schema validation — invalid
@@ -290,8 +290,8 @@ cross_cutting_groups. Same fallback as the original Opus path.
 Clean up the Phase 5 Codex prompt + output files:
 
 ```bash
-rm -f "/tmp/adams-review-codex-${review_id}-XC.md" \
-      "/tmp/adams-review-codex-${review_id}-XC.out.json"
+rm -f "/tmp/matthews-review-codex-${review_id}-XC.md" \
+      "/tmp/matthews-review-codex-${review_id}-XC.out.json"
 ```
 
 ### 5.4. Log Phase 5 summary

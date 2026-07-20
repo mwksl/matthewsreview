@@ -4,11 +4,11 @@
 
 The Phase 8 fix gate filters on current_state + disposition +
 impact_type (deep lane only — §13.2) + `score_phase4 >= threshold`.
-A non-null `human_confirmation` (set by `/adamsreview:promote`, §27)
+A non-null `human_confirmation` (set by `/matthewsreview:promote`, §27)
 bypasses both the impact_type lane filter AND the score threshold —
 the human has overridden the validator's conservative defaults.
 
-The `/adamsreview:walkthrough` scope filter is the inverse of this selector; keep the two in sync (see `commands/walkthrough.md` §3).
+The `/matthewsreview:walkthrough` scope filter is the inverse of this selector; keep the two in sync (see `commands/walkthrough.md` §3).
 
 ```bash
 eligible_finding_ids=$(jq -r --argjson thr "$threshold" '
@@ -146,9 +146,9 @@ Findings in this group:
  full id, file, line_range, claim, validation_result (evidence,
  blast_radius, fix_proposal, verification_context), and — when the
  finding has human_confirmation.fix_hint set (promoted via
- /adamsreview:promote --fix-hint, §27) — a labeled block:
+ /matthewsreview:promote --fix-hint, §27) — a labeled block:
 
-   Human-authored fix direction (set via /adamsreview:promote --fix-hint):
+   Human-authored fix direction (set via /matthewsreview:promote --fix-hint):
    <fix_hint verbatim>
 
    This is an explicit instruction from the reviewer. It takes

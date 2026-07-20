@@ -1,14 +1,14 @@
-# Case study — `/adams-review` vs. Claude Code's `/ultrareview` on `feat/import-apple`
+# Case study — `/matthews-review` vs. Claude Code's `/ultrareview` on `feat/import-apple`
 
 ## Why this case study exists
 
 If you're deciding whether to reach for Claude Code's `/ultrareview` on
-your next PR — or whether `/adams-review` covers the same ground — this
+your next PR — or whether `/matthews-review` covers the same ground — this
 document is the head-to-head data behind the decision.
 
 The cost framing matters up front. `/ultrareview` is **expensive per
 invocation** on PR-sized diffs: a review of a ~2,000-line change is a
-substantial charge against your Claude usage budget. `/adams-review`, by
+substantial charge against your Claude usage budget. `/matthews-review`, by
 contrast, runs entirely inside Claude Code — and for users on the Claude
 Code **Max plan, the weekly allowance absorbs full reviews** of this size,
 including `--ensemble` runs that bring Codex and CodeRabbit in alongside
@@ -16,14 +16,14 @@ Claude. Over a month of active PR flow, that's a meaningful cost delta.
 
 The empirical question this doc answers is: **for `/ultrareview`'s extra
 cost, what do you get?** Three head-to-head snapshots on the same branch
-produced **16 / 21 / 32 findings from `/adams-review`** vs. **0 / 4 / 2
+produced **16 / 21 / 32 findings from `/matthews-review`** vs. **0 / 4 / 2
 findings from `/ultrareview`**. Every high-confidence `/ultrareview`
-finding was one `/adams-review` had already surfaced — with a single
+finding was one `/matthews-review` had already surfaced — with a single
 instructive exception (`bug_006` on Case 2, a subtle dedup-invariant bug
-the `/adams-review` ensemble missed on that run, though the same ensemble
+the `/matthews-review` ensemble missed on that run, though the same ensemble
 caught the twin on the next snapshot).
 
-What this adds up to: `/adams-review` generally carries the weight on
+What this adds up to: `/matthews-review` generally carries the weight on
 this codebase, and `/ultrareview`'s contribution is occasional rather
 than systematic. Whether that occasional contribution is worth the
 per-run cost depends on how often "occasional" shows up on diffs that
@@ -35,7 +35,7 @@ and a concrete recommendation at the end.
   `--replace-range`, a recategorization-rule wiring pass, and a streak-
   scoring gap policy change.
 - **Dates:** 2026-04-18 through 2026-04-19.
-- **Reviewer under test:** `/adams-review` (the pipeline described in
+- **Reviewer under test:** `/matthews-review` (the pipeline described in
   `CLAUDE.md`; the full spec is the frozen `docs/archive/DESIGN.md`) vs.
   `/ultrareview` (Claude Code's built-in).
 
@@ -44,8 +44,8 @@ and a concrete recommendation at the end.
 | Signal | Case 1 (`ad23419`) | Case 2 (`2dfafa7`) | Case 3 (`c2232c6`) |
 |---|---|---|---|
 | Diff size vs. `main` | 16 files · +1627 / −126 | 18 files · +2126 / −128 | 18 files · +2259 / −133 |
-| `/adams-review` mode | Claude-only | Ensemble (Claude + Codex + CodeRabbit) | Ensemble (Claude + Codex + CodeRabbit) |
-| `/adams-review` findings | 16 (1 auto-fixed, 3 manual, 2 uncertain, 1 pre-existing, 9 below gate) | 21 (11 fixed+verified, 10 below-gate/disproven) | 32 (7 confirmed_auto, 4 uncertain, 2 pre-existing-report, 2 disproven, 17 below-gate) |
+| `/matthews-review` mode | Claude-only | Ensemble (Claude + Codex + CodeRabbit) | Ensemble (Claude + Codex + CodeRabbit) |
+| `/matthews-review` findings | 16 (1 auto-fixed, 3 manual, 2 uncertain, 1 pre-existing, 9 below gate) | 21 (11 fixed+verified, 10 below-gate/disproven) | 32 (7 confirmed_auto, 4 uncertain, 2 pre-existing-report, 2 disproven, 17 below-gate) |
 | `/ultrareview` findings | **0** | 4 (3 normal, 1 nit) | 2 (both nit) |
 | Overlap with `/ultrareview` | — (empty report) | 2 identical bugs (F016 ≡ bug_001, F017 ≡ bug_004) | 0 overlaps |
 | `/ultrareview` uniquely caught | — | **bug_006** — silent data-corruption bug all three ensemble reviewers missed on this run | bug_004 (try/catch missing around warning-log write), merged_bug_001 (4 cosmetic polish items) |
@@ -53,12 +53,12 @@ and a concrete recommendation at the end.
 
 Headline takeaways:
 
-1. On all three diffs, `/adams-review` surfaced findings that
+1. On all three diffs, `/matthews-review` surfaced findings that
    `/ultrareview` didn't — including one auto-fixable `getDebts` correctness
    bug on Case 1 (empty ultrareview) and two confirmed_auto correctness bugs
    on Case 3 (ultrareview returned 2 cosmetic nits).
 2. `/ultrareview` earned its keep on Case 2 by catching **one subtle bug
-   that the entire `/adams-review` ensemble missed** (`bug_006`,
+   that the entire `/matthews-review` ensemble missed** (`bug_006`,
    occurrence-index sort-position collision causing silent row duplication
    on partial Apple-Card re-imports). But the same ensemble caught that
    bug's twin on the next snapshot (Case 3 F001) — so the "miss" was
@@ -76,21 +76,21 @@ Headline takeaways:
   - Case 2 snapshot: `2dfafa75ccac307dacf80c438bfdd10d74df79b3`
     (`ray-finance-pre-recent-fixes` worktree) — three commits downstream of
     Case 1, with a mid-branch `d35628e` manual-fix round and a `d9b9eae`
-    `/adams-review-fix` round in between.
+    `/matthews-review-fix` round in between.
   - Case 3 snapshot: `c2232c6ff5883964bcd1be4372dea0b3ba0827b3` (current
     `feat/import-apple` head) — two commits downstream of Case 2 (the
     `031e04d` auto-fix batch applying 11 findings from Case 2, and
     `c2232c6` itself, a one-line stale-comment fix near the `ray recat`
     warning).
-- **Both tools reviewed the same working tree each time.** For `/adams-review`
+- **Both tools reviewed the same working tree each time.** For `/matthews-review`
   the artifacts live at
-  `~/.adams-reviews/github.com-cdinnison-ray-finance/feat/import-apple/rev_*/`.
+  `~/.matthews-reviews/github.com-cdinnison-ray-finance/feat/import-apple/rev_*/`.
   For `/ultrareview` the output files sit alongside each snapshot (Case 1
   and Case 2 in their respective worktrees as `ultrareview_findings.md`;
   Case 3 at `~/tmp/ultrareview/ultrareview_report.md`).
 - **No re-runs for this case study.** Both tools were invoked during normal
   development flow; this study analyzes the artifacts as they landed.
-- **Ensemble config** on Case 2 and Case 3: `/adams-review --ensemble`
+- **Ensemble config** on Case 2 and Case 3: `/matthews-review --ensemble`
   (Codex CLI + CodeRabbit via the shared reviewer adapter). The artifact's
   `reviewer_sources` field records which external adapters contributed.
 
@@ -113,7 +113,7 @@ work and was ready for review. 16 files changed, +1627/−126 against `main`.
 Touches Apple CSV import, recategorization rewiring, `getDebts` unification,
 and a streak-policy change.
 
-### `/adams-review` output (Claude-only, rev_01KPH6ABQM67844RAA2H0TPHWC)
+### `/matthews-review` output (Claude-only, rev_01KPH6ABQM67844RAA2H0TPHWC)
 
 16 findings. Lane breakdown:
 
@@ -170,7 +170,7 @@ Whether this cleared `/ultrareview`'s confidence threshold is unknowable
 from the artifact — but a silent correctness bug in a consumer-facing debt
 total is the shape of finding that's most valuable to catch pre-merge.
 F015 (no `--yes` flag blocks scripted `--replace-range`) is the other
-high-confidence item `/adams-review` surfaced and `/ultrareview` did not.
+high-confidence item `/matthews-review` surfaced and `/ultrareview` did not.
 
 Neither tool had an ensemble on Case 1, so Case 1 is Claude-vs-Claude on
 reviewer design, not on model count.
@@ -186,15 +186,15 @@ unrelated Apple-payment refactor). 18 files changed, +2126/−128 against
 `main`. Adds test coverage, carries forward the `--replace-range`
 confirmation flow, and keeps the streak-scoring gap policy from Case 1.
 
-The `/adams-review` run was invoked with `--ensemble`, producing a combined
+The `/matthews-review` run was invoked with `--ensemble`, producing a combined
 review with Codex and CodeRabbit.
 
-### `/adams-review` output (ensemble, rev_20260419T050709Z70e9b8)
+### `/matthews-review` output (ensemble, rev_20260419T050709Z70e9b8)
 
 21 findings total (ids are sparse — F011 / F022 / F023 were dropped during
 dedup). 11 fixed-and-verified in `fixrun_01KPM3CJZQA24G6AAS0DPNKP5E`
 → commit `031e04d`. Two findings (F003 and F017) were promoted from
-lower-actionability dispositions to auto-fixable via `/adams-review-promote`
+lower-actionability dispositions to auto-fixable via `/matthews-review-promote`
 after human confirmation.
 
 Attribution and disposition:
@@ -242,15 +242,15 @@ From `/Users/adammiller/Projects/ray/ray-finance-pre-recent-fixes/ultrareview_fi
 
 ### Overlap matrix
 
-| ultrareview | `/adams-review` match | Notes |
+| ultrareview | `/matthews-review` match | Notes |
 |---|---|---|
-| bug_001 | **F016** (Claude L5-ux, resolved 80) | Same bug. Ultrareview cites `294-296` (the 3-line warning span); the adams-review artifact pins it to line 295 (the exact string). Both flagged the `ray recat` guidance as broken. |
+| bug_001 | **F016** (Claude L5-ux, resolved 80) | Same bug. Ultrareview cites `294-296` (the 3-line warning span); the matthews-review artifact pins it to line 295 (the exact string). Both flagged the `ray recat` guidance as broken. |
 | bug_004 | **F017** (Claude L5-ux + Codex, resolved 100) | Same bug, same file:line. Both flagged the missing `isTTY` guard on the destructive prompt. |
-| bug_005 | no match | Novel. Dry-run note contradiction — `/adams-review` didn't surface this nit in Case 2. |
+| bug_005 | no match | Novel. Dry-run note contradiction — `/matthews-review` didn't surface this nit in Case 2. |
 | bug_006 | **no match** | Novel and high-impact. All three reviewers in the ensemble missed it. |
 
 Two of `/ultrareview`'s four findings duplicated findings that
-`/adams-review` had already produced and scored for auto-fix. One was a nit.
+`/matthews-review` had already produced and scored for auto-fix. One was a nit.
 One was the genuine miss analyzed below.
 
 ### The one that got away — `bug_006`
@@ -325,7 +325,7 @@ when the same tools do eventually catch the bug.
   L2-structural lane. CodeRabbit's signal was useful because it corroborated
   a finding that Claude-internal had scored at 60 (below the deep-lane
   auto-fix threshold in some configurations) — the corroboration, combined
-  with a human-override `/adams-review-promote` citing *"single-missed-sync
+  with a human-override `/matthews-review-promote` citing *"single-missed-sync
   gap-reset is a silent UX regression"*, pushed F003 into the auto-fixable
   set where it was then fixed via `031e04d`.
 - **F024** — CHANGELOG blank-line formatting. CodeRabbit-unique.
@@ -379,7 +379,7 @@ itself, a one-line stale-comment fix. 18 files changed, +2259/−133 against
 
 Same `--ensemble` config as Case 2 (Claude + Codex + CodeRabbit).
 
-### `/adams-review` output (ensemble, rev_01KPMBB6KR5P19N4WHCHNFHXZE)
+### `/matthews-review` output (ensemble, rev_01KPMBB6KR5P19N4WHCHNFHXZE)
 
 32 findings total — the largest of the three reviews. Disposition
 breakdown: 7 confirmed_auto, 4 uncertain, 2 pre_existing_report,
@@ -431,9 +431,9 @@ the 18 files and ~2,259 inserted lines.
 
 ### Overlap matrix
 
-| ultrareview | `/adams-review` match | Notes |
+| ultrareview | `/matthews-review` match | Notes |
 |---|---|---|
-| bug_004 | no match | Novel. No adams-review finding flags the crash-after-commit behavior. F029 (L6-security, below_gate) touches the same lines but concerns PII in log file *contents*, not error propagation — different bug. |
+| bug_004 | no match | Novel. No matthews-review finding flags the crash-after-commit behavior. F029 (L6-security, below_gate) touches the same lines but concerns PII in log file *contents*, not error propagation — different bug. |
 | merged_bug_001 | no match | Novel. None of the 4 polish items (formatting, spacing, dead singular branch, spinner wording) appear in the 32 findings. |
 
 Both ultrareview findings are nit severity; both are cosmetic or
@@ -482,7 +482,7 @@ The Case 3 ensemble is **additive, not merely corroborative**:
 
 ## Cross-case observations
 
-1. **`/adams-review` surfaced more above-gate findings than `/ultrareview`
+1. **`/matthews-review` surfaced more above-gate findings than `/ultrareview`
    on all three diffs.** Case 1: 16 vs 0. Case 2: 21 vs 4. Case 3: 32 vs 2
    (both nit). The gap is widest on Case 3, where `/ultrareview`'s 2
    cosmetic nits coexist with 2 confirmed_auto correctness bugs (F032 NULL-
@@ -532,27 +532,27 @@ The Case 3 ensemble is **additive, not merely corroborative**:
    update). Same config, same code, different findings. This matters for
    reliability claims about any reviewer tool.
 
-## Conclusion — what `/adams-review` adds, and when `/ultrareview` earns its cost
+## Conclusion — what `/matthews-review` adds, and when `/ultrareview` earns its cost
 
-### What `/adams-review` adds over a bare Claude review
+### What `/matthews-review` adds over a bare Claude review
 
 Three datapoints on the same branch:
 
 - **More above-gate findings per run.** 16 / 21 / 32 vs. `/ultrareview`'s
   0 / 4 / 2. Every high-confidence finding `/ultrareview` surfaced in
-  Case 2 was a bug `/adams-review` had already surfaced. On Cases 1 and 3
+  Case 2 was a bug `/matthews-review` had already surfaced. On Cases 1 and 3
   `/ultrareview` produced either empty output or cosmetic nits on diffs
-  where `/adams-review` had confirmed_auto correctness bugs at score 75+.
-- **An auto-fix loop.** `/adams-review-fix` closed 11 findings in one
+  where `/matthews-review` had confirmed_auto correctness bugs at score 75+.
+- **An auto-fix loop.** `/matthews-review-fix` closed 11 findings in one
   ensemble-run cycle on Case 2 (commit `031e04d`). `/ultrareview`
-  produces a report; `/adams-review` produces an artifact that the fix
+  produces a report; `/matthews-review` produces an artifact that the fix
   loop can consume, with per-finding scoring, lane attribution, and
-  a human-override path (`/adams-review-promote`).
+  a human-override path (`/matthews-review-promote`).
 - **Lane specialization.** The 32 Case-3 findings span correctness
   (L1-diff, L2-structural), policy (L4-comments), UX (L5-ux), and
   security (L6-security). `/ultrareview`'s two Case-3 findings were both
   cosmetic nits in the same file. Different coverage shapes.
-- **Ensemble support.** `/adams-review --ensemble` brings Codex and
+- **Ensemble support.** `/matthews-review --ensemble` brings Codex and
   CodeRabbit in alongside Claude. On Case 3 that surfaced two unique
   confirmed_auto correctness findings (F032 NULL-category silent drop at
   score 85, F034 parseFloat truncation at score 75) that no Claude lane
@@ -565,13 +565,13 @@ Three datapoints on the same branch:
 The clearest `/ultrareview` contribution across the three snapshots was
 `bug_006` on Case 2 — the `assignOccurrenceIndices` sort-position bug
 that silently duplicates rows on partial Apple CSV re-imports. No
-`/adams-review` reviewer caught it on that run. The same ensemble caught
+`/matthews-review` reviewer caught it on that run. The same ensemble caught
 the twin bug on Case 3, so the gap wasn't structural — but it was still
 a meaningful one-run miss, and a second independent reviewer is exactly
 the class of safeguard that earns its cost when a miss is expensive.
 
 On Case 3 `/ultrareview` also surfaced two nit-severity findings that
-`/adams-review` missed — `bug_004` (missing try/catch around the warning-
+`/matthews-review` missed — `bug_004` (missing try/catch around the warning-
 log write, so a post-commit filesystem error looks like a failed
 import) and `merged_bug_001` (four polish items: formatting
 inconsistency, spacing ternary, unreachable dead-code branch, hardcoded
@@ -585,7 +585,7 @@ miss on its side.
 ### The cost side
 
 `/ultrareview` is expensive per invocation — a PR-sized diff is a
-substantial Claude usage charge. `/adams-review` runs in Claude Code; a
+substantial Claude usage charge. `/matthews-review` runs in Claude Code; a
 Max-plan subscriber can run full `--ensemble` reviews on PR-sized diffs
 within the weekly allowance. Over a month of active development, that's
 a meaningful cost differential for roughly overlapping, and in the
@@ -595,7 +595,7 @@ majority of cases better, coverage.
 
 Based on this n=3 dataset:
 
-1. **Default to `/adams-review --ensemble` for any non-trivial PR.** It
+1. **Default to `/matthews-review --ensemble` for any non-trivial PR.** It
    produces more findings, covers everything high-confidence
    `/ultrareview` would catch, occasionally surfaces unique correctness
    findings via Codex, and costs nothing beyond a Max subscription.
@@ -605,11 +605,11 @@ Based on this n=3 dataset:
    a subtle bug the ensemble missed on a given run, and on that class of
    change the cost is worth paying.
 3. **Don't treat either tool as sufficient on its own.** Case 2 shows
-   `/adams-review` missed `bug_006`; Case 3 shows `/ultrareview` missed
+   `/matthews-review` missed `bug_006`; Case 3 shows `/ultrareview` missed
    F032 and F034. Human review remains load-bearing.
 
 The broader picture, with appropriate humility for an n=3 study: on
-correctness-heavy diffs with UX surface, `/adams-review` carries the
+correctness-heavy diffs with UX surface, `/matthews-review` carries the
 weight, and `/ultrareview`'s contribution is occasional rather than
 systematic.
 
@@ -629,19 +629,19 @@ systematic.
   substantially — 1 co-sign in Case 2, 4 findings (2 co-signs, 2 uniques)
   in Case 3. This is a real limitation of any one-shot tool comparison.
 - **No re-runs for ablation.** Neither tool was re-invoked to test
-  stability. The branch also had an intermediate `/adams-review` run
+  stability. The branch also had an intermediate `/matthews-review` run
   (rev_01KPHF849Q9W4Y61A599YQJNKZ at `d35628e`, 34 findings) not included
   here — no `/ultrareview` snapshot was captured for that SHA.
 - **Human-promote on F003 (Case 2).** F003's trajectory from score-60 →
-  auto-fix involved an explicit human override via `/adams-review-promote`.
+  auto-fix involved an explicit human override via `/matthews-review-promote`.
   This is a supported path in the pipeline (DESIGN §27) but worth naming:
   the ensemble corroboration made the promote decision easier, but the
   promote itself was a human call.
 
 ## Pointers
 
-- `/adams-review` artifacts live at
-  `~/.adams-reviews/github.com-cdinnison-ray-finance/feat/import-apple/rev_*/`.
+- `/matthews-review` artifacts live at
+  `~/.matthews-reviews/github.com-cdinnison-ray-finance/feat/import-apple/rev_*/`.
 - `/ultrareview` artifacts are at
   `/Users/adammiller/Projects/ray/ray-finance-pre-review/ultrareview_findings.md`
   (Case 1),

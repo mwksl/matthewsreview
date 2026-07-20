@@ -10,7 +10,7 @@
 #   - fragments/05-codex-validation.md  §4.3.2 (Phase 4b light chunked-batch)
 #   - fragments/06-codex-cross-cutting.md §5.2.2 (Phase 5 cross-cutting)
 #
-# Required by `/adamsreview:codex-review`. See plans/codex-watchdog.md
+# Required by `/matthewsreview:codex-review`. See plans/codex-watchdog.md
 # for the bug class this helper defends against (broker reports
 # `running` long after the underlying codex turn has died — a desync
 # between the broker's in-memory state and its on-disk job store).
@@ -192,7 +192,7 @@ compute_mtime_age() {
 
 # ---- 1. status --json ---------------------------------------------------
 
-status_err=$(mktemp -t adams-codex-poll.XXXXXX)
+status_err=$(mktemp -t matthews-codex-poll.XXXXXX)
 status_out=$(node "$COMPANION" status "$JOB" --json 2>"$status_err") || {
     rc=$?
     err=$(tr '\n' ' ' <"$status_err" 2>/dev/null || true)
@@ -255,7 +255,7 @@ case "$job_status" in
         # Pluck raw_output via the same chain the fragments use today
         # (the disk-persisted store is the source of truth even when
         # the broker reports completed).
-        result_err=$(mktemp -t adams-codex-poll-result.XXXXXX)
+        result_err=$(mktemp -t matthews-codex-poll-result.XXXXXX)
         result_out=$(node "$COMPANION" result "$JOB" --json 2>"$result_err" || true)
         rm -f "$result_err"
         raw=$(printf '%s' "$result_out" | jq -r '
@@ -311,7 +311,7 @@ fi
 # active-job path) is NOT a desync — it just means broker and disk
 # agree the job is alive. Stay in stalled_suspect for those.
 
-result_err=$(mktemp -t adams-codex-poll-result.XXXXXX)
+result_err=$(mktemp -t matthews-codex-poll-result.XXXXXX)
 result_rc=0
 node "$COMPANION" result "$JOB" --json >/dev/null 2>"$result_err" || result_rc=$?
 result_stderr=$(cat "$result_err" 2>/dev/null || true)

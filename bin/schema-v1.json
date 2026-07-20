@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://adamsreview/schema-v1.json",
-  "title": "adamsreview artifact (v1)",
-  "description": "Canonical machine-state artifact produced by /adamsreview:review and mutated by /adamsreview:fix. Codifies docs/archive/DESIGN.md §5 (state model) and §6 (artifact schema). Rev 8.",
+  "$id": "https://matthewsreview/schema-v1.json",
+  "title": "matthewsreview artifact (v1)",
+  "description": "Canonical machine-state artifact produced by /matthewsreview:review and mutated by /matthewsreview:fix. Codifies docs/archive/DESIGN.md §5 (state model) and §6 (artifact schema). Rev 8.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -265,7 +265,7 @@
           ]
         },
         "auto_fix_hint": {
-          "description": "Set by Phase 5.5 (auto-fix-hint generation). Validator-derived recommendation that mirrors what /adamsreview:walkthrough's per-finding briefer would produce, but pre-computed with a second-opinion verification pass. When present, /adamsreview:fix preflight and /adamsreview:walkthrough Step 4.5 surface a batch-confirm UI that promotes the finding via human_confirmation.fix_hint=auto_fix_hint.hint. Optional — absence means no auto-rec was generated for this finding (ineligible per §5.5 filter, or generation skipped/failed).",
+          "description": "Set by Phase 5.5 (auto-fix-hint generation). Validator-derived recommendation that mirrors what /matthewsreview:walkthrough's per-finding briefer would produce, but pre-computed with a second-opinion verification pass. When present, /matthewsreview:fix preflight and /matthewsreview:walkthrough Step 4.5 surface a batch-confirm UI that promotes the finding via human_confirmation.fix_hint=auto_fix_hint.hint. Optional — absence means no auto-rec was generated for this finding (ineligible per §5.5 filter, or generation skipped/failed).",
           "type": "object",
           "additionalProperties": false,
           "required": ["hint", "confidence", "second_opinion", "ts"],
@@ -317,7 +317,7 @@
           ]
         },
         "human_confirmation": {
-          "description": "Set by /adamsreview:promote. Present-and-non-null means a human has promoted this finding to auto-fixable; Phase 8 eligibility (§5.2.1) bypasses the impact_type lane filter and score threshold. Optional/nullable — pre-promote findings omit the field entirely.",
+          "description": "Set by /matthewsreview:promote. Present-and-non-null means a human has promoted this finding to auto-fixable; Phase 8 eligibility (§5.2.1) bypasses the impact_type lane filter and score threshold. Optional/nullable — pre-promote findings omit the field entirely.",
           "anyOf": [
             { "type": "null" },
             {

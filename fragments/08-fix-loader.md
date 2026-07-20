@@ -13,7 +13,7 @@ in your working context.
 ### 7.2. Locate the artifact via `latest.txt`
 
 ```bash
-reviews_root="${ADAMS_REVIEW_REVIEWS_ROOT:-$HOME/.adams-reviews}"
+reviews_root="${MATTHEWS_REVIEW_REVIEWS_ROOT:-$HOME/.matthews-reviews}"
 head_branch=$(git rev-parse --abbrev-ref HEAD)
 repo_root=$(git rev-parse --show-toplevel)
 ```
@@ -30,7 +30,7 @@ If `latest.txt` is missing or empty → abort with the user-visible
 message:
 
 > No review found for this branch (`$head_branch`) under
-> `$reviews_root/$repo_slug/`. Run `/adamsreview:review` first.
+> `$reviews_root/$repo_slug/`. Run `/matthewsreview:review` first.
 
 Otherwise read `review_id` from it:
 
@@ -58,7 +58,7 @@ artifact-validate.sh --path "$artifact_path"
 ```
 
 On non-zero: log the validator stderr to `trace.md`, dump a copy to
-`/tmp/adams-review-invalid-$(date -u +%Y%m%dT%H%M%SZ).json`,
+`/tmp/matthews-review-invalid-$(date -u +%Y%m%dT%H%M%SZ).json`,
 and abort. A schema-invalid artifact means something upstream broke
 the invariant; do NOT try to "fix" by patching — surface to the user.
 
@@ -73,7 +73,7 @@ leftover_ids=$(artifact-read.sh \
 If `leftover_ids` is non-empty, print the deterministic recovery
 message and abort (do NOT mutate state; the user decides):
 
-> ERROR: previous /adamsreview:fix run did not finish (N findings
+> ERROR: previous /matthewsreview:fix run did not finish (N findings
 > still in 'attempted').
 > The working tree may still contain partial fix edits from that run.
 >
@@ -85,7 +85,7 @@ message and abort (do NOT mutate state; the user decides):
 >      commit or stash them yourself if you want to keep them.
 >   3. For each leftover 'attempted' finding, reset state manually:
 >      artifact-patch.py --finding-id <id> --set current_state=open
->   4. Re-run /adamsreview:fix.
+>   4. Re-run /matthewsreview:fix.
 >
 > Leftover 'attempted' finding ids: `$leftover_ids`
 
@@ -110,7 +110,7 @@ Otherwise categorize (filenames only — do NOT dump diffs) and prompt:
 Dispatch `AskUserQuestion` once with two options:
 
 - **Stash my changes, run fix, restore** (recommended). Run
-  `git stash push --include-untracked -m "pre-adams-review-fix-stash"`
+  `git stash push --include-untracked -m "pre-matthews-review-fix-stash"`
   immediately. Capture `stash_taken=true`. If the stash command fails
   (lock contention, invalid state): log stderr, abort —
   user resolves.
@@ -164,7 +164,7 @@ else
         printf 'staleness: %s\n' "$staleness_stdout" >> "$trace_log_path"
         echo "Reviewed files have changed since the last known-good SHA." >&2
         echo "$staleness_stdout" >&2
-        echo "Re-run /adamsreview:review, or check 'git log $latest_known_sha..HEAD' to see what moved." >&2
+        echo "Re-run /matthewsreview:review, or check 'git log $latest_known_sha..HEAD' to see what moved." >&2
         # Pop stash if we took one — don't leave the user's tree
         # behind a stash because we aborted before Phase 8 ran.
         if [[ "${stash_taken:-false}" == "true" ]]; then
@@ -282,7 +282,7 @@ If `$behind > 0`, `AskUserQuestion` once:
 
 - **(a) Stop — I'll merge `$merge_ref` into `$head_branch` first, then re-run.** Run the stash-pop block
   below if step 7.5 took one, then emit a `branch_behind_base stopped`
-  trace line, then exit 0 with: `Stopping. Run \`git merge $merge_ref\` (or fast-forward) on \`$head_branch\`, then re-run /adamsreview:fix.`
+  trace line, then exit 0 with: `Stopping. Run \`git merge $merge_ref\` (or fast-forward) on \`$head_branch\`, then re-run /matthewsreview:fix.`
   If `stash_pop_conflict=true`, append: `Stashed changes preserved — \`git stash list\` / \`git stash apply\` once tree is in desired state.`
   ```bash
   stash_pop_conflict=false
@@ -843,11 +843,11 @@ populated are degenerate and shouldn't post a no-op comment).
 ```bash
 if [[ "$mode" == "pr" && -n "$pr_number" ]] && \
    (( ${#promoted_ids[@]} > 0 || ${#edited_ids[@]} > 0 )); then
-    decisions_body=$(mktemp -t adams-fix-autorec-body.XXXXXX)
-    err_tmp=$(mktemp -t adams-fix-autorec-gh-err.XXXXXX)
+    decisions_body=$(mktemp -t matthews-fix-autorec-body.XXXXXX)
+    err_tmp=$(mktemp -t matthews-fix-autorec-gh-err.XXXXXX)
 
     {
-        printf '<!-- adams-review-fix-autorec-v1 -->\n'
+        printf '<!-- matthews-review-fix-autorec-v1 -->\n'
         printf '### Auto-recommendation acceptance\n\n'
         printf '`%s` · run_id=%s · choice=%s · threshold=%s · reviewer=%s · ts=%s\n\n' \
             "$review_id" "$run_id" "$auto_rec_choice" "$threshold" "$auto_rec_reviewer" "$auto_rec_ts"
@@ -890,7 +890,7 @@ if [[ "$mode" == "pr" && -n "$pr_number" ]] && \
             printf '\n'
         fi
         printf '---\n\n'
-        printf 'Auto-recommendation acceptance: append-only audit. Each `/adamsreview:fix` run posts a fresh entry. Promoted findings are now `confirmed_mechanical` with `human_confirmation` set; Phase 8 dispatches them next.\n'
+        printf 'Auto-recommendation acceptance: append-only audit. Each `/matthewsreview:fix` run posts a fresh entry. Promoted findings are now `confirmed_mechanical` with `human_confirmation` set; Phase 8 dispatches them next.\n'
     } > "$decisions_body"
 
     set +e

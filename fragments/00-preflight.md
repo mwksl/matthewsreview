@@ -21,15 +21,15 @@ and `force_full=true/false` in your context.
 
 If the top-level command already parsed top-level-only flags into your
 working context BEFORE invoking this fragment (e.g., `effort` from
-`/adamsreview:codex-review --effort high`), trust those values and
+`/matthewsreview:codex-review --effort high`), trust those values and
 ignore the corresponding tokens in `$ARGUMENTS`. Recognized
 top-level-only flags whose value tokens this step skips silently
 **only when the upstream parser actually owns the flag** (i.e., the
 corresponding working-context value is set):
 
-- `--effort <value>` — owned by `/adamsreview:codex-review`'s argument
+- `--effort <value>` — owned by `/matthewsreview:codex-review`'s argument
   handler. Skip the flag and its value token only when working-context
-  `effort` is set. If `effort` is unset (e.g., `/adamsreview:review
+  `effort` is set. If `effort` is unset (e.g., `/matthewsreview:review
   --effort high` — `:review` has no `--effort` parser), `--effort` is
   an unexpected token and falls through to the clarify path below.
   Working-context `effort` being set is the proof that an upstream
@@ -223,7 +223,7 @@ If `$behind > 0`, `AskUserQuestion` once:
 > merging `$comparison_ref` into `$head_branch` first — this updates
 > your feature branch tip, separate from any earlier diff-base choice.
 
-- **(a) Stop — I'll merge `$comparison_ref` into `$head_branch` first, then re-run.** Exit 0 with: `Stopping. Run \`git merge $comparison_ref\` (or fast-forward) on \`$head_branch\`, then re-run /adamsreview:review.` (No `review_dir` exists yet — nothing to clean up.)
+- **(a) Stop — I'll merge `$comparison_ref` into `$head_branch` first, then re-run.** Exit 0 with: `Stopping. Run \`git merge $comparison_ref\` (or fast-forward) on \`$head_branch\`, then re-run /matthewsreview:review.` (No `review_dir` exists yet — nothing to clean up.)
 - **(b) Proceed.** Append a buffered warning and continue:
   ```bash
   preflight_warnings+=("branch_behind_base proceeded behind=$behind comparison_ref=$comparison_ref")
@@ -252,7 +252,7 @@ uncommitted (filenames only, categorized as Modified / Staged / Untracked —
 do NOT dump the diff). Then use `AskUserQuestion` once with three options:
 
 - **Stash my changes, run review, restore** (recommended). Run
-  `git stash push -u -m "pre-adams-review-stash"` now; at end of Phase 6,
+  `git stash push -u -m "pre-matthews-review-stash"` now; at end of Phase 6,
   run `git stash pop`. Capture `stash_taken=true` so Phase 6 knows to pop.
 - **Include uncommitted changes in the review** — the review will include
   whatever's in the tree as-is; no stash. In PR mode this is rarely what
@@ -353,8 +353,8 @@ a real UX finding).
 
 ### 0.13. Prior-artifact detection
 
-Resolve the reviews root: `$ADAMS_REVIEW_REVIEWS_ROOT` if set, else
-`~/.adams-reviews`. Build the path:
+Resolve the reviews root: `$MATTHEWS_REVIEW_REVIEWS_ROOT` if set, else
+`~/.matthews-reviews`. Build the path:
 `<reviews_root>/<repo_slug>/<head_branch>/latest.txt`.
 
 If the file exists and is non-empty, read its contents as
@@ -365,7 +365,7 @@ and determine the prior state:
 |---|---|
 | `prior.reviewed_sha == reviewed_sha` AND no `fix_attempts` on any finding | "You have a review for this exact commit from `<date>`. Re-run fresh, or abort?" |
 | `prior.reviewed_sha == reviewed_sha` AND some finding has a `fix_attempts[-1]` whose `output_sha` matches `HEAD` | "You have a review that was already fixed at this commit. Re-run fresh, or abort?" |
-| Any finding has `current_state=open` AND `is_actionable=true` | "Previous review has unresolved actionable findings. Options: (a) run `/adamsreview:fix` first, (b) proceed with fresh review, (c) abort." |
+| Any finding has `current_state=open` AND `is_actionable=true` | "Previous review has unresolved actionable findings. Options: (a) run `/matthewsreview:fix` first, (b) proceed with fresh review, (c) abort." |
 | Otherwise (prior exists but HEAD has moved beyond any known sha) | "Prior review at `<prior.reviewed_sha>`. Current HEAD is `<reviewed_sha>`. Proceed with fresh review?" |
 
 A "fresh review" supersedes the prior local artifact (new `review_id`,
@@ -390,7 +390,7 @@ If `mode=pr` AND step 0.13 found no prior local artifact, run:
 ```bash
 gh api --paginate "repos/$(gh repo view --json nameWithOwner -q .nameWithOwner)/issues/$pr_number/comments" \
   | jq -r --arg user "$(gh api user -q .login)" \
-         --arg marker "<!-- adams-review-v1 -->" \
+         --arg marker "<!-- matthews-review-v1 -->" \
       '[.[] | select(.user.login == $user) | select(.body | contains($marker))]
        | last // empty | .id'
 ```
@@ -406,7 +406,7 @@ If a comment id is returned, run `AskUserQuestion` with three choices:
   and want the single canonical review comment updated.
 - **(c) Abort** and recover the prior artifact first.
 
-Suggested prompt: "A prior `/adamsreview:review` comment exists on this PR
+Suggested prompt: "A prior `/matthewsreview:review` comment exists on this PR
 (`<comment_url>`) but no local artifact was found. (a) post a new
 comment (prior stays), (b) replace the prior comment in place, (c)
 abort to recover the prior artifact first."
@@ -437,7 +437,7 @@ Capture as `review_id`.
 Build the artifact directory:
 
 ```bash
-reviews_root="${ADAMS_REVIEW_REVIEWS_ROOT:-$HOME/.adams-reviews}"
+reviews_root="${MATTHEWS_REVIEW_REVIEWS_ROOT:-$HOME/.matthews-reviews}"
 review_dir="$reviews_root/$repo_slug/$head_branch/$review_id"
 mkdir -p "$review_dir"
 artifact_path="$review_dir/artifact.json"

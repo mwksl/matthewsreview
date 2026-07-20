@@ -1,14 +1,14 @@
 ---
 allowed-tools: Bash(artifact-read.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(assign-finding-ids.sh:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(git:*), Bash(jq:*), Bash(date:*), Bash(timeout:*), Bash(sleep:*), Bash(kill:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(cat:*), Bash(printf:*), Bash(tr:*), Bash(awk:*), Bash(grep:*), Bash(mktemp:*), Read, Agent, AskUserQuestion
 argument-hint: "[<paste...>] [--file path --line N --claim \"...\"] [--impact <type>] [--no-dedup]"
-description: Inject externally-sourced findings (cloud /ultrareview, manual finds, etc.) into the most recent /adamsreview:review artifact for this branch. Validates via Phase 4, re-renders, re-publishes.
+description: Inject externally-sourced findings (cloud /ultrareview, manual finds, etc.) into the most recent /matthewsreview:review artifact for this branch. Validates via Phase 4, re-renders, re-publishes.
 disable-model-invocation: false
 ---
 
 This command is **additive** — it does NOT re-run Phase 1 detection,
 Phase 2 dedup against the original lens output, Phase 5 cross-cutting
 analysis, or any fix loop. To re-derive everything from the diff, run
-`/adamsreview:review` (which overwrites the artifact).
+`/matthewsreview:review` (which overwrites the artifact).
 
 ## Arguments
 
@@ -76,8 +76,8 @@ Determine `mode_input`:
 - Anything else (e.g. only `cli_file` set, or all empty) → error-as-prompt:
 
   > ERROR: no input. Provide either:
-  >   1. Free-form paste:    `/adamsreview:add <paste body...>`
-  >   2. Structured one-shot: `/adamsreview:add --file <path> --line <N> --claim "<one-sentence claim>"`
+  >   1. Free-form paste:    `/matthewsreview:add <paste body...>`
+  >   2. Structured one-shot: `/matthewsreview:add --file <path> --line <N> --claim "<one-sentence claim>"`
   > Optional flags on either form: `--impact correctness|security|ux|policy|architecture` `--no-dedup`
   > Action: re-invoke with at least one of the two input shapes.
 
@@ -89,7 +89,7 @@ Validate `cli_impact` against the enum (`correctness`, `security`, `ux`,
 ### 2. Locate the artifact
 
 ```bash
-reviews_root="${ADAMS_REVIEW_REVIEWS_ROOT:-$HOME/.adams-reviews}"
+reviews_root="${MATTHEWS_REVIEW_REVIEWS_ROOT:-$HOME/.matthews-reviews}"
 head_branch=$(git rev-parse --abbrev-ref HEAD)
 repo_root=$(git rev-parse --show-toplevel)
 repo_slug=$(repo-slug.sh --repo-root "$repo_root")
@@ -100,7 +100,7 @@ If `latest.txt` is missing or empty → error-as-prompt:
 
 > ERROR: no review found for branch `$head_branch` under
 > `$reviews_root/$repo_slug/`.
-> Action: run /adamsreview:review against this branch first.
+> Action: run /matthewsreview:review against this branch first.
 
 Otherwise:
 
@@ -143,7 +143,7 @@ If `leftover_ids` is non-empty, print the deterministic recovery
 message and abort (same shape as Phase 7 step 4 in
 `08-fix-loader.md`):
 
-> ERROR: previous /adamsreview:fix run did not finish (N findings
+> ERROR: previous /matthewsreview:fix run did not finish (N findings
 > still in 'attempted'). The working tree may still contain partial
 > fix edits from that run.
 >
@@ -154,7 +154,7 @@ message and abort (same shape as Phase 7 step 4 in
 >      them.
 >   3. For each leftover 'attempted' finding, reset state manually:
 >      artifact-patch.py --finding-id <id> --set current_state=open
->   4. Re-run /adamsreview:add.
+>   4. Re-run /matthewsreview:add.
 >
 > Leftover 'attempted' finding ids: `$leftover_ids`
 
@@ -266,7 +266,7 @@ If `$behind > 0`, `AskUserQuestion` once:
 > (callers or helpers on `$base_branch` that have changed since).
 > Recommend merging `$merge_ref` into `$head_branch` first.
 
-- **(a) Stop — I'll merge `$merge_ref` into `$head_branch` first, then re-run.** Emit a `branch_behind_base stopped` trace line, then exit 0 with: `Stopping. Run \`git merge $merge_ref\` (or fast-forward) on \`$head_branch\`, then re-run /adamsreview:add.`
+- **(a) Stop — I'll merge `$merge_ref` into `$head_branch` first, then re-run.** Emit a `branch_behind_base stopped` trace line, then exit 0 with: `Stopping. Run \`git merge $merge_ref\` (or fast-forward) on \`$head_branch\`, then re-run /matthewsreview:add.`
   ```bash
   printf '[%s] branch_behind_base stopped behind=%s merge_ref=%s fetch_ok=%s\n' \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$behind" "$merge_ref" "$fetch_ok" \
@@ -414,7 +414,7 @@ new_source=$(echo "$candidate" | jq -r '.sources[0]')
 merged_sources=$(echo "$existing_sources" \
     | jq -c --arg s "$new_source" '. + [$s] | unique')
 
-src_tmp=$(mktemp -t adams-add-srcs.XXXXXX)
+src_tmp=$(mktemp -t matthews-add-srcs.XXXXXX)
 echo "$merged_sources" > "$src_tmp"
 artifact-patch.py \
     --path "$artifact_path" --finding-id "$match_id" \
@@ -567,7 +567,7 @@ Capture `phase_4_start_epoch=$(date +%s)`.
 Snapshot the working tree's cleanliness before dispatch. Step 7.5's
 belt-and-braces sweep reverts any dirty state detected after
 validators run — but only when the tree was clean going in. Unlike
-`/adamsreview:review` Phase 0, `/adamsreview:add` has no clean-tree gate.
+`/matthewsreview:review` Phase 0, `/matthewsreview:add` has no clean-tree gate.
 If the user has their own uncommitted work when they invoke this
 command, a blind sweep would clobber it.
 
@@ -630,7 +630,7 @@ into a single batched Opus call.** §7.6's `--apply-decisions --expected
 $total_dispatched` rejects under-sized batches with a recovery action.
 Each candidate needs its own blast-radius trace and fix-proposal context.
 
-Prompt essence — kept self-contained here; do NOT dispatch through `fragments/05-validation.md` (it pulls in Wave-2 / §4.6 / §4.4.5 logic that doesn't apply to the `/adamsreview:add` path).
+Prompt essence — kept self-contained here; do NOT dispatch through `fragments/05-validation.md` (it pulls in Wave-2 / §4.6 / §4.4.5 logic that doesn't apply to the `/matthewsreview:add` path).
 
 Prompt:
 
@@ -659,7 +659,7 @@ Prompt:
 > 5. **Produce `verification_context`:** `how_to_verify_fix`,
 >    `edge_cases_to_preserve`, `what_would_break_if_incomplete`.
 > 6. **Re-score 0–100** using the §20 rubric — based on what you found.
-> 7. This finding was injected by `/adamsreview:add` from an external
+> 7. This finding was injected by `/matthewsreview:add` from an external
 >    source; do NOT emit `related_candidates_to_investigate` (no Wave 2
 >    in this code path). If you notice adjacents, mention them in
 >    `evidence` for the user's awareness only.
@@ -748,7 +748,7 @@ validators are read-only by contract — any post-validation dirt is
 validator-sourced and safely revertable. When `pre_validator_clean ==
 false`, skip the sweep: without a clean baseline we can't distinguish
 user state from validator writes, and a blind revert would clobber
-user work. `/adamsreview:add` has no Phase-0 dirty-tree gate, so this
+user work. `/matthewsreview:add` has no Phase-0 dirty-tree gate, so this
 conditional is the only safeguard against that data-loss class.
 
 ```bash
@@ -787,7 +787,7 @@ Compose the tuple array in orchestrator context and emit it to
 `{id, score_phase4, decision, actionability, reason, validation_result}`).
 
 ```bash
-scratch="/tmp/adams-review-add-$review_id"
+scratch="/tmp/matthews-review-add-$review_id"
 mkdir -p "$scratch"
 
 # Compose the tuple array in orchestrator context and write it to
@@ -893,9 +893,9 @@ without bookkeeping here.
 
 Re-tally first so the rendered report (and the downstream PR comment
 update in step 9) reflects this run's new sub-agent + orchestrator
-spend on top of the prior `/adamsreview:review` baseline. The paste
+spend on top of the prior `/matthewsreview:review` baseline. The paste
 normalizer (§4b) and any Phase-4 re-validators that ran during this
-`/adamsreview:add` invocation already logged their sub-agent usage to
+`/matthewsreview:add` invocation already logged their sub-agent usage to
 `tokens.jsonl`; the orchestrator transcript on disk captured every
 main-session turn. Both helpers are pure readbacks:
 
@@ -994,8 +994,8 @@ Cumulative sub-agent spend: <total> tokens across <invs> invocations.
 Cumulative orchestrator spend: <output> output / <input> input across <turns> turns.
 
 Next:
-  - /adamsreview:fix             apply auto-eligible findings (deep confirmed_mechanical) plus auto-recommendations via Phase 7.5 batch-accept
-  - /adamsreview:walkthrough     review any remaining non-promoted findings (light-lane / manual / uncertain)
+  - /matthewsreview:fix             apply auto-eligible findings (deep confirmed_mechanical) plus auto-recommendations via Phase 7.5 batch-accept
+  - /matthewsreview:walkthrough     review any remaining non-promoted findings (light-lane / manual / uncertain)
 ```
 
 Build the per-finding lines from `artifact-read.sh`:
@@ -1044,7 +1044,7 @@ The artifact patches stand; to republish run:
   retroactively grouped into existing `cross_cutting_groups`.
   Documented small loss; the rendered report still shows them in the
   standard per-finding tables.
-- **No persistence across fresh `/adamsreview:review` runs.** A re-review
+- **No persistence across fresh `/matthewsreview:review` runs.** A re-review
   overwrites the artifact; added findings are lost. Re-add if needed.
 
 ## Sub-agent prompts (used by steps 4 and 5)
@@ -1052,7 +1052,7 @@ The artifact patches stand; to republish run:
 ### Paste-mode normalizer prompt (Sonnet)
 
 > You are normalizing an externally-sourced code-review note into the
-> adamsreview candidate schema. The reviewer has either pasted a chat
+> matthewsreview candidate schema. The reviewer has either pasted a chat
 > transcript / review summary from another tool (Claude Code
 > /ultrareview, Opus chat, CodeRabbit text output, a teammate's Slack
 > message) or hand-written a list of bugs they want added.

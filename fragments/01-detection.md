@@ -66,7 +66,7 @@ prepends this shared block when assembling the dispatch prompt.
 The orchestrator dispatches `<shared invariants> + <lens body>` as the
 sub-agent prompt. The shared invariants and the lens body both live in
 files now (extracted per `plans/codex-review.md` §4.1 so
-`/adamsreview:codex-review` can consume the same source).
+`/matthewsreview:codex-review` can consume the same source).
 
 Shared invariants: Read `fragments/lens-prompts/_shared-invariants.md`
 — its content is the shared block prepended to every lens's prompt
@@ -147,7 +147,7 @@ Create the scratch directory for CLI output (keeps `$review_dir`
 free of transient noise):
 
 ```bash
-scratch_dir="/tmp/adams-review-$review_id"
+scratch_dir="/tmp/matthews-review-$review_id"
 mkdir -p "$scratch_dir"
 ```
 
@@ -227,7 +227,7 @@ gate ahead of dispatch.
 the dispatch turn at 1.3 is pure launches with no side effects:
 
 ```bash
-cat > "/tmp/adams-review-codex-$review_id.md" <<PROMPT
+cat > "/tmp/matthews-review-codex-$review_id.md" <<PROMPT
 Review this PR as a skeptical careful reader — the kind of reviewer who
 catches bugs a linter and the test suite miss. Range: the diff between
 $comparison_ref and HEAD, plus surrounding code you need to understand it.

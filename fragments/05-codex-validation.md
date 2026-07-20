@@ -16,7 +16,7 @@ dispatch shape:
   runs through one chunk-level Sonnet shape-fixer that emits the tuple
   array.
 - **Wave 2 (chain retry) is DISABLED**. Plan §2 — keeps wall-clock
-  bounded for codex-review, mirrors `/adamsreview:add`'s no-Wave-2
+  bounded for codex-review, mirrors `/matthewsreview:add`'s no-Wave-2
   policy.
 
 Capture `phase_4_start_epoch=$(date +%s)` as the first action of this
@@ -39,14 +39,14 @@ If `trivial_mode == true`: force ALL candidates into the light lane
 ### 4.2. Phase 4a — deep lane (Codex per candidate)
 
 For each deep-lane candidate, build a Codex prompt file at
-`/tmp/adams-review-codex-${review_id}-V-${finding_id}.md` and launch a
+`/tmp/matthews-review-codex-${review_id}-V-${finding_id}.md` and launch a
 Codex job. Dispatch ALL deep-lane Codex jobs in one orchestrator turn
 for concurrency.
 
 #### 4.2.1. Build the per-candidate prompt
 
 ```bash
-prompt_file="/tmp/adams-review-codex-${review_id}-V-${finding_id}.md"
+prompt_file="/tmp/matthews-review-codex-${review_id}-V-${finding_id}.md"
 finding_json=$(artifact-read.sh \
   --path "$artifact_path" --finding-id "$finding_id")
 
@@ -156,7 +156,7 @@ For each deep-lane finding, fire one Bash tool-use:
 
 ```bash
 node "$CODEX_COMPANION" task --background --effort "$effort" \
-    --prompt-file "/tmp/adams-review-codex-${review_id}-V-${finding_id}.md" \
+    --prompt-file "/tmp/matthews-review-codex-${review_id}-V-${finding_id}.md" \
     --json
 ```
 
@@ -165,7 +165,7 @@ keyed by `finding_id`:
 
 ```bash
 job_id=$(node "$CODEX_COMPANION" task --background --effort "$effort" \
-    --prompt-file "/tmp/adams-review-codex-${review_id}-V-${finding_id}.md" \
+    --prompt-file "/tmp/matthews-review-codex-${review_id}-V-${finding_id}.md" \
     --json | jq -r '.jobId')
 ```
 
@@ -236,7 +236,7 @@ Dispatch all shape-fixers in one orchestrator turn for concurrency.
 Shape-fixer prompt essence:
 
 > You are normalizing one Codex deep-validator output into the
-> adamsreview validation tuple schema.
+> matthewsreview validation tuple schema.
 >
 > **Codex output (freeform):**
 >
@@ -354,7 +354,7 @@ jobs in one orchestrator turn for concurrency.
 ```bash
 chunk_json=$(jq -nc --argjson cands "$chunk_candidates" '$cands')
 
-prompt_file="/tmp/adams-review-codex-${review_id}-LB-chunk${chunk_n}.md"
+prompt_file="/tmp/matthews-review-codex-${review_id}-LB-chunk${chunk_n}.md"
 
 # Use an UNQUOTED heredoc so $trivial_mode expands to its actual value
 # at write time. (A quoted heredoc would emit the literal text
@@ -422,7 +422,7 @@ Launch each chunk's Codex job:
 
 ```bash
 node "$CODEX_COMPANION" task --background --effort "$effort" \
-    --prompt-file "/tmp/adams-review-codex-${review_id}-LB-chunk${chunk_n}.md" \
+    --prompt-file "/tmp/matthews-review-codex-${review_id}-LB-chunk${chunk_n}.md" \
     --json
 ```
 
@@ -430,7 +430,7 @@ Capture each launch payload's `.jobId` keyed by chunk number:
 
 ```bash
 job_id=$(node "$CODEX_COMPANION" task --background --effort "$effort" \
-    --prompt-file "/tmp/adams-review-codex-${review_id}-LB-chunk${chunk_n}.md" \
+    --prompt-file "/tmp/matthews-review-codex-${review_id}-LB-chunk${chunk_n}.md" \
     --json | jq -r '.jobId')
 ```
 
@@ -548,10 +548,10 @@ pattern in `fragments/05-validation.md`.)
 Identical to `fragments/05-validation.md` §4.4. Concatenate every
 shape-fixer's tuples (deep-lane: one tuple per finding; light-lane:
 chunk shape-fixer arrays flattened) into a single JSON array at
-`/tmp/adams-review-${review_id}/phase4-decisions.json`, then invoke:
+`/tmp/matthews-review-${review_id}/phase4-decisions.json`, then invoke:
 
 ```bash
-scratch="/tmp/adams-review-$review_id"
+scratch="/tmp/matthews-review-$review_id"
 mkdir -p "$scratch"
 # Compose tuple array; write to $scratch/phase4-decisions.json.
 
@@ -747,11 +747,11 @@ Clean up Phase 4's scratch dir AND the per-finding / per-chunk Codex
 prompt + output files:
 
 ```bash
-rm -rf -- "/tmp/adams-review-$review_id"
-rm -f "/tmp/adams-review-codex-${review_id}-V-"*.md \
-      "/tmp/adams-review-codex-${review_id}-V-"*.out.json \
-      "/tmp/adams-review-codex-${review_id}-LB-chunk"*.md \
-      "/tmp/adams-review-codex-${review_id}-LB-chunk"*.out.json
+rm -rf -- "/tmp/matthews-review-$review_id"
+rm -f "/tmp/matthews-review-codex-${review_id}-V-"*.md \
+      "/tmp/matthews-review-codex-${review_id}-V-"*.out.json \
+      "/tmp/matthews-review-codex-${review_id}-LB-chunk"*.md \
+      "/tmp/matthews-review-codex-${review_id}-LB-chunk"*.out.json
 ```
 
 ### 4.7. Log Phase 4 summary

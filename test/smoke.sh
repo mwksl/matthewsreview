@@ -261,7 +261,7 @@ FAKE_ROOT="$WORK/reviews"
 mkdir -p "$FAKE_ROOT/fake-slug/fake-branch/rev_fake"
 echo "rev_fake" > "$FAKE_ROOT/fake-slug/fake-branch/latest.txt"
 echo "# rendered" > "$FAKE_ROOT/fake-slug/fake-branch/rev_fake/artifact.md"
-out=$(ADAMS_REVIEW_REVIEWS_ROOT="$FAKE_ROOT" "$TOOLS/artifact-publish.sh" \
+out=$(MATTHEWS_REVIEW_REVIEWS_ROOT="$FAKE_ROOT" "$TOOLS/artifact-publish.sh" \
         --mode pr --review-id rev_fake --pr 1 \
         --repo-slug fake-slug --branch fake-branch --dry-run 2>&1); code=$?
 expected_path="$FAKE_ROOT/fake-slug/fake-branch/rev_fake/artifact.md"
@@ -272,7 +272,7 @@ else
 fi
 
 # B5. publish --mode pr with latest.txt disagreeing with --review-id → non-zero + staleness note
-stderr=$(ADAMS_REVIEW_REVIEWS_ROOT="$FAKE_ROOT" "$TOOLS/artifact-publish.sh" \
+stderr=$(MATTHEWS_REVIEW_REVIEWS_ROOT="$FAKE_ROOT" "$TOOLS/artifact-publish.sh" \
         --mode pr --review-id rev_stale --pr 1 \
         --repo-slug fake-slug --branch fake-branch --dry-run 2>&1 >/dev/null); code=$?
 if [[ "$code" != "0" ]] && echo "$stderr" | grep -q "latest.txt points to review_id='rev_fake'"; then
@@ -281,26 +281,56 @@ else
     fail "B5: expected staleness error, got code=$code stderr=$stderr"
 fi
 
-# B6. publish default root (no ADAMS_REVIEW_REVIEWS_ROOT override) → ~/.adams-reviews.
+# B6. publish default root (no MATTHEWS_REVIEW_REVIEWS_ROOT override) → ~/.matthews-reviews.
 # Stage 2.5.A relocated the default root outside ~/.claude/ so that Claude Code's
 # hardcoded sensitive-file gate for ~/.claude/... paths doesn't fire. Assert the
 # new default by triggering a latest.txt-not-found error against a slug guaranteed
 # not to exist under the real home dir; the error message names the resolved path
-# so we can grep for ~/.adams-reviews without polluting actual state.
-ghost_slug="adams-review-smoke-missing-$$-$(date +%s)"
-stderr=$(env -u ADAMS_REVIEW_REVIEWS_ROOT "$TOOLS/artifact-publish.sh" \
+# so we can grep for ~/.matthews-reviews without polluting actual state.
+ghost_slug="matthews-review-smoke-missing-$$-$(date +%s)"
+# Isolate HOME so a real ~/.adams-reviews on the machine can't trip the
+# legacy-state fallback and shadow the default-root assertion.
+B6_HOME="$WORK/b6home"
+mkdir -p "$B6_HOME"
+stderr=$(env -u MATTHEWS_REVIEW_REVIEWS_ROOT -u ADAMS_REVIEW_REVIEWS_ROOT HOME="$B6_HOME" "$TOOLS/artifact-publish.sh" \
         --mode pr --review-id rev_ghost --pr 1 \
         --repo-slug "$ghost_slug" --branch ghost-branch --dry-run 2>&1 >/dev/null); code=$?
-if [[ "$code" != "0" ]] && echo "$stderr" | grep -q "\.adams-reviews/$ghost_slug/ghost-branch/latest.txt"; then
-    pass "B6: publish default reviews root resolves under ~/.adams-reviews (Stage 2.5.A)"
+if [[ "$code" != "0" ]] && echo "$stderr" | grep -q "\.matthews-reviews/$ghost_slug/ghost-branch/latest.txt"; then
+    pass "B6: publish default reviews root resolves under ~/.matthews-reviews (Stage 2.5.A)"
 else
-    fail "B6: expected error naming ~/.adams-reviews/$ghost_slug/ghost-branch/latest.txt; code=$code stderr=$stderr"
+    fail "B6: expected error naming ~/.matthews-reviews/$ghost_slug/ghost-branch/latest.txt; code=$code stderr=$stderr"
+fi
+
+# B7. publish honors legacy ADAMS_REVIEW_REVIEWS_ROOT when the new var is unset
+# (backward-compat fallback; FAKE_ROOT fixture from B4 reused).
+out=$(env -u MATTHEWS_REVIEW_REVIEWS_ROOT ADAMS_REVIEW_REVIEWS_ROOT="$FAKE_ROOT" "$TOOLS/artifact-publish.sh" \
+        --mode pr --review-id rev_fake --pr 1 \
+        --repo-slug fake-slug --branch fake-branch --dry-run 2>/dev/null); code=$?
+if [[ "$code" == "0" ]] && [[ "$out" == "$expected_path" ]]; then
+    pass "B7: publish falls back to ADAMS_REVIEW_REVIEWS_ROOT when MATTHEWS_REVIEW_REVIEWS_ROOT unset"
+else
+    fail "B7: legacy env-var fallback mismatch" "code=$code out=$out expected=$expected_path"
+fi
+
+# B8. publish falls back to legacy ~/.adams-reviews state root (with migrate
+# nudge) when neither env var is set and only the legacy dir exists.
+LEGACY_HOME="$WORK/legacyhome"
+mkdir -p "$LEGACY_HOME/.adams-reviews/fake-slug/fake-branch/rev_fake"
+echo "rev_fake" > "$LEGACY_HOME/.adams-reviews/fake-slug/fake-branch/latest.txt"
+echo "# rendered" > "$LEGACY_HOME/.adams-reviews/fake-slug/fake-branch/rev_fake/artifact.md"
+out=$(env -u MATTHEWS_REVIEW_REVIEWS_ROOT -u ADAMS_REVIEW_REVIEWS_ROOT HOME="$LEGACY_HOME" "$TOOLS/artifact-publish.sh" \
+        --mode pr --review-id rev_fake --pr 1 \
+        --repo-slug fake-slug --branch fake-branch --dry-run 2>&1); code=$?
+if [[ "$code" == "0" ]] && echo "$out" | grep -q "migrate: mv" && echo "$out" | grep -q "\.adams-reviews/fake-slug/fake-branch/rev_fake/artifact.md"; then
+    pass "B8: publish falls back to ~/.adams-reviews with migrate nudge when no root configured"
+else
+    fail "B8: legacy dir fallback mismatch" "code=$code out=$out"
 fi
 
 # OC. Fresh-run-won't-overwrite (DESIGN §13.4, rev 7).
 # The publisher no longer auto-discovers a prior comment by marker. Each
-# command carries its own continuation intent: fresh /adamsreview:review
-# omits --comment-id (→ POST); /adamsreview:fix and /adamsreview:promote
+# command carries its own continuation intent: fresh /matthewsreview:review
+# omits --comment-id (→ POST); /matthewsreview:fix and /matthewsreview:promote
 # pass --comment-id read from the artifact (→ PATCH).
 
 # OC-1: find_by_marker function is gone from the publisher.
@@ -343,10 +373,10 @@ else
     fail "OC-5: artifact-publish.sh has syntax errors"
 fi
 
-# OC-6: DESIGN §13.4 documents the new rule (fresh /adamsreview:review POSTs).
+# OC-6: DESIGN §13.4 documents the new rule (fresh /matthewsreview:review POSTs).
 # Path repointed to docs/archive/ after the 2026-04-19 docs-consolidation move.
 if grep -q 'always .POST. a new comment' "$REPO/docs/archive/DESIGN.md"; then
-    pass "OC-6: DESIGN §13.4 documents fresh-/adamsreview:review-POSTs rule"
+    pass "OC-6: DESIGN §13.4 documents fresh-/matthewsreview:review-POSTs rule"
 else
     fail "OC-6: DESIGN §13.4 missing new POST-on-fresh-review rule"
 fi
@@ -537,13 +567,41 @@ JSON
 echo '[]' > "$EXT/reviews.json"
 echo '[]' > "$EXT/review_comments.json"
 # Default config (no --config) — DEFAULT_DENY applies, allow=null.
-out=$(ADAMS_REVIEW_FIXTURES_USER=smokeuser "$TOOLS/external-scrape.sh" \
+out=$(MATTHEWS_REVIEW_FIXTURES_USER=smokeuser "$TOOLS/external-scrape.sh" \
         --fixtures-dir "$EXT")
 ids=$(echo "$out" | jq -c '[.[].id] | sort')
 if [[ "$ids" == "[2,5]" ]]; then
     pass "G: external-scrape fixture replay keeps both coderabbit records, drops human + dep-bump"
 else
     fail "G: expected ids [2,5], got $ids" "out=$out"
+fi
+
+# G2. external-scrape honors legacy ADAMS_REVIEW_CONFIG_ROOT when the new var
+# is unset (backward-compat fallback). A config-supplied deny list REPLACES
+# DEFAULT_DENY, so denying coderabbit alone drops records 2+5 and dependabot
+# (id 3) survives — [3] proves the legacy config root was read (the default
+# chain would yield [2,5]).
+LEGACY_CFG="$WORK/legacy-cfg"
+mkdir -p "$LEGACY_CFG"
+echo '{"external_reviewer_bots":{"deny":["coderabbit-ai[bot]"]}}' > "$LEGACY_CFG/review-config.json"
+out=$(env -u MATTHEWS_REVIEW_CONFIG_ROOT ADAMS_REVIEW_CONFIG_ROOT="$LEGACY_CFG" \
+        MATTHEWS_REVIEW_FIXTURES_USER=smokeuser "$TOOLS/external-scrape.sh" --fixtures-dir "$EXT")
+ids=$(echo "$out" | jq -c '[.[].id] | sort')
+if [[ "$ids" == "[3]" ]]; then
+    pass "G2: external-scrape falls back to ADAMS_REVIEW_CONFIG_ROOT (config deny replaces default)"
+else
+    fail "G2: legacy config-root fallback mismatch" "ids=$ids"
+fi
+
+# G3. external-scrape honors legacy ADAMS_REVIEW_FIXTURES_USER when the new
+# var is unset (backward-compat fallback).
+out=$(env -u MATTHEWS_REVIEW_FIXTURES_USER ADAMS_REVIEW_FIXTURES_USER=smokeuser \
+        "$TOOLS/external-scrape.sh" --fixtures-dir "$EXT")
+ids=$(echo "$out" | jq -c '[.[].id] | sort')
+if [[ "$ids" == "[2,5]" ]]; then
+    pass "G3: external-scrape falls back to ADAMS_REVIEW_FIXTURES_USER"
+else
+    fail "G3: legacy fixtures-user fallback mismatch" "ids=$ids"
 fi
 
 # N. pending_validation is a valid disposition enum (R2 fix)
@@ -1895,7 +1953,7 @@ fi
 
 # ------------------------------------------------------------------ Stage 3
 #
-# Stage 3 introduces `/adamsreview:fix`. These assertions cover the helper
+# Stage 3 introduces `/matthewsreview:fix`. These assertions cover the helper
 # contracts it depends on — `group-fixes.py` (§21.5) fix-group union-find
 # and `artifact-patch.py` batched fix-outcome modes. Fragment-level prose
 # (Phase 7/8/9 orchestration) is not machine-tested here; real-repo runs
@@ -2539,7 +2597,7 @@ fi
 # previously a usage error before Stage 2.8 because --since was required.
 
 # CF-ES-1: external-scrape.sh --fixtures-dir succeeds without --since.
-es_out=$(ADAMS_REVIEW_FIXTURES_USER=smokeuser "$TOOLS/external-scrape.sh" \
+es_out=$(MATTHEWS_REVIEW_FIXTURES_USER=smokeuser "$TOOLS/external-scrape.sh" \
             --fixtures-dir "$EXT" 2>"$CF_DIR/es1.err")
 es_rc=$?
 es_type=$(echo "$es_out" | jq -r 'type' 2>/dev/null)
@@ -2558,7 +2616,7 @@ else
     fail "CF-ES-2: expected exit 64 + unknown-arg; got code=$es_code stderr=$es_stderr"
 fi
 
-# ------------------------------------------------------------------ MP-* /adamsreview:promote (§27)
+# ------------------------------------------------------------------ MP-* /matthewsreview:promote (§27)
 #
 # Covers the human_confirmation field, Phase 8 eligibility bypass
 # (§5.2.1, §13.1, §13.2), and the renderer's (human-confirmed) tag.
@@ -2675,7 +2733,7 @@ fi
 
 # MP-7: schema accepts human_confirmation with non-empty fix_hint string. Covers
 # the §27.3 / schema rev-adding-fix_hint path — this is the on-disk shape
-# /adamsreview:promote --fix-hint "..." produces after step 5's jq build.
+# /matthewsreview:promote --fix-hint "..." produces after step 5's jq build.
 MP_HC_WITH_HINT=$(jq -nc '{
     reviewer: "tester@example.com",
     reason:   "promote with steering",
@@ -3102,9 +3160,9 @@ fi
 
 # ---------------------------------------------------------------- walkthrough
 #
-# WT-* cover the /adamsreview:walkthrough command surface. WT-1..WT-4 exercise
+# WT-* cover the /matthewsreview:walkthrough command surface. WT-1..WT-4 exercise
 # the scope-filter jq (the inverse of 09-fix-execution.md step 8.1); WT-5 is a
-# structural check on /adamsreview:promote's --defer-publish + shared-fragment
+# structural check on /matthewsreview:promote's --defer-publish + shared-fragment
 # wiring. The scope jq MUST stay in sync with Phase 8 eligibility — any drift
 # surfaces here.
 
@@ -3259,13 +3317,13 @@ else
     fail "WT-4: expected W030 only (score floor 60 excludes W031@50 and W032@40); got '$wt4_ids'"
 fi
 
-# WT-6: /adamsreview:walkthrough decisions-log template contains the required
+# WT-6: /matthewsreview:walkthrough decisions-log template contains the required
 # structural markers. Since the markdown is rendered inline by Claude at
 # runtime (the command file is a prompt, not a shell script), this is a
 # template-integrity check — guards against accidental removal of any
 # section so the posted PR comment stays auditable.
 WALK_MD="$REPO/commands/walkthrough.md"
-if grep -q 'adams-review-walkthrough-v1' "$WALK_MD" \
+if grep -q 'matthews-review-walkthrough-v1' "$WALK_MD" \
    && grep -q '### Walkthrough decisions' "$WALK_MD" \
    && grep -q '#### Promoted' "$WALK_MD" \
    && grep -q '#### Skipped' "$WALK_MD" \
@@ -3276,7 +3334,7 @@ else
     fail "WT-6: walkthrough decisions-log template missing required sections in $WALK_MD"
 fi
 
-# WT-5: /adamsreview:promote wires --defer-publish and includes promote-core.md.
+# WT-5: /matthewsreview:promote wires --defer-publish and includes promote-core.md.
 # Structural check guarding against accidental removal of either piece (plans/
 # walkthrough-mode.md §5, §6). If a future refactor merges the shared fragment
 # back inline or drops the --defer-publish flag, this assertion surfaces it
@@ -3696,7 +3754,7 @@ else
 fi
 
 # ------------------------------------------------------------------ assign-finding-ids --start-from
-# AS-* assertions cover the --start-from flag added for /adamsreview:add (so
+# AS-* assertions cover the --start-from flag added for /matthewsreview:add (so
 # new findings injected into an existing artifact continue the id sequence
 # instead of colliding from F001). The default-no-flag behavior must remain
 # F001..F0NN to keep Phase 1's pooled-candidate join unchanged.
@@ -3727,7 +3785,7 @@ else
     fail "AS-3: expected exit 64, got $code"
 fi
 
-# ------------------------------------------------------------------ /adamsreview:add command
+# ------------------------------------------------------------------ /matthewsreview:add command
 # RA-* assertions cover the structural shape of the new top-level command
 # (commands/add.md). The command is a prose markdown file
 # that Claude Code interprets — these assertions verify the load-bearing
@@ -3744,7 +3802,7 @@ fi
 
 # RA-2: leftover-attempted hard abort present (mirrors Phase 7 step 4).
 # Re-uses the same "attempted" detection + recovery message shape so a
-# /adamsreview:fix run in flight cannot be silently extended by an add.
+# /matthewsreview:fix run in flight cannot be silently extended by an add.
 if grep -qF 'select(.current_state == "attempted")' "$ADD_MD" \
     && grep -qF 'leftover_ids' "$ADD_MD"; then
     pass "RA-2: leftover-attempted hard abort present (mirrors Phase 7)"
@@ -3874,7 +3932,7 @@ fi
 
 # RA-12: step 7.5 tree-cleanliness sweep is GATED on pre_validator_clean
 # so the sweep does not clobber the user's own uncommitted work.
-# /adamsreview:add has no clean-tree gate (§3.8 design decision) — if
+# /matthewsreview:add has no clean-tree gate (§3.8 design decision) — if
 # the user had dirty state going in, the sweep would revert it. The
 # gate + skip-branch + distinct trace tag together prove the guard is
 # wired correctly.
@@ -4396,8 +4454,8 @@ else
     fail "TK-4: expected total=13000 invs=6 phase_9=5000; got total=$tk4_total invs=$tk4_invs phase_9=$tk4_p9"
 fi
 
-# TK-5: the chat-summary jq -r filter used by adamsreview:add step 10 and
-# adamsreview:walkthrough step 9. Must produce a clean (unquoted) line on
+# TK-5: the chat-summary jq -r filter used by matthewsreview:add step 10 and
+# matthewsreview:walkthrough step 9. Must produce a clean (unquoted) line on
 # a populated artifact and empty stdout when subagent_tokens is absent.
 token_filter='if (.subagent_tokens.total // null) != null and (.subagent_tokens.invocations // null) != null
     then "Cumulative sub-agent spend: \(.subagent_tokens.total) tokens across \(.subagent_tokens.invocations) invocations."
@@ -4444,11 +4502,11 @@ fi
 # ------------------------------------------------------------------ orchestrator-tokens.sh
 
 # OT-1 through OT-7 exercise the populated tally path; the helper now
-# defaults to skip unless ADAMS_REVIEW_TALLY_ORCHESTRATOR is set, so
+# defaults to skip unless MATTHEWS_REVIEW_TALLY_ORCHESTRATOR is set, so
 # scope-export it here. OT-8 (added below) covers the opt-out skip path
 # explicitly via `env -u` so test ordering doesn't matter. The trailing
 # `unset` keeps the export from leaking into downstream test blocks.
-export ADAMS_REVIEW_TALLY_ORCHESTRATOR=1
+export MATTHEWS_REVIEW_TALLY_ORCHESTRATOR=1
 
 OT_DIR="$WORK/ot"
 mkdir -p "$OT_DIR"
@@ -4459,8 +4517,8 @@ cp "$FIX/artifact-seed.json" "$OT_DIR/artifact.json"
 # path too, but `/.claude/` must become `--claude-` (double hyphen from
 # the slash+dot pair), not `-.claude-`. Guard the algorithm directly so
 # a future refactor can't break it silently.
-ot1_slug=$(printf '%s' "/Users/x/Projects/adams-review/.claude/worktrees/y" | tr '/.' '-')
-ot1_expected="-Users-x-Projects-adams-review--claude-worktrees-y"
+ot1_slug=$(printf '%s' "/Users/x/Projects/matthews-review/.claude/worktrees/y" | tr '/.' '-')
+ot1_expected="-Users-x-Projects-matthews-review--claude-worktrees-y"
 if [[ "$ot1_slug" == "$ot1_expected" ]]; then
     pass "OT-1: slug derivation (tr '/.' '-') — both chars collapse correctly"
 else
@@ -4619,7 +4677,7 @@ else
     fail "OT-6: filter let non-assistant lines through" "turns=$ot6_turns in=$ot6_in out=$ot6_out"
 fi
 
-# OT-8: opt-out skip path. With ADAMS_REVIEW_TALLY_ORCHESTRATOR unset
+# OT-8: opt-out skip path. With MATTHEWS_REVIEW_TALLY_ORCHESTRATOR unset
 # the helper must exit 0, print a one-line "skipped" notice, and leave
 # the artifact's orchestrator_tokens field absent (default opt-out is
 # the user-facing behavior since macOS Sequoia/Tahoe prompts for any
@@ -4631,7 +4689,7 @@ fi
 OT8_DIR="$OT_DIR/t8"
 mkdir -p "$OT_DIR/art8" "$OT8_DIR"
 cp "$FIX/artifact-seed.json" "$OT_DIR/art8/artifact.json"
-ot8_stdout=$(env -u ADAMS_REVIEW_TALLY_ORCHESTRATOR \
+ot8_stdout=$(env -u MATTHEWS_REVIEW_TALLY_ORCHESTRATOR \
     "$TOOLS/orchestrator-tokens.sh" \
         --artifact "$OT_DIR/art8/artifact.json" \
         --since    "2026-04-21T00:00:00.000Z" \
@@ -4640,7 +4698,7 @@ ot8_exit=$?
 ot8_field=$(jq -r '.orchestrator_tokens // "absent"' "$OT_DIR/art8/artifact.json")
 if [[ $ot8_exit -eq 0 ]] \
    && [[ "$ot8_stdout" == *"skipped"* ]] \
-   && [[ "$ot8_stdout" == *"ADAMS_REVIEW_TALLY_ORCHESTRATOR"* ]] \
+   && [[ "$ot8_stdout" == *"MATTHEWS_REVIEW_TALLY_ORCHESTRATOR"* ]] \
    && [[ "$ot8_field" == "absent" ]] \
    && "$TOOLS/artifact-validate.sh" --path "$OT_DIR/art8/artifact.json" >/dev/null 2>&1; then
     pass "OT-8: opt-out (env unset) skips tally — exit 0, 'skipped' stdout, no artifact mutation, schema-valid"
@@ -4651,7 +4709,25 @@ fi
 # Hygiene: drop the export so it doesn't leak into downstream test
 # blocks (none currently consume it, but future blocks shouldn't have
 # to know this one set it).
-unset ADAMS_REVIEW_TALLY_ORCHESTRATOR
+# OT-9: legacy ADAMS_REVIEW_TALLY_ORCHESTRATOR=1 opt-in fallback. When the
+# new var is unset but the pre-rename var is set, the tally must run (same
+# one-line chain shape G3 covers for FIXTURES_USER).
+OT9_DIR="$OT_DIR/t9"
+mkdir -p "$OT_DIR/art9" "$OT9_DIR"
+cp "$FIX/artifact-seed.json" "$OT_DIR/art9/artifact.json"
+ot9_stdout=$(env -u MATTHEWS_REVIEW_TALLY_ORCHESTRATOR ADAMS_REVIEW_TALLY_ORCHESTRATOR=1 \
+    "$TOOLS/orchestrator-tokens.sh" \
+        --artifact "$OT_DIR/art9/artifact.json" \
+        --since    "2026-04-21T00:00:00.000Z" \
+        --transcript-dir "$OT9_DIR" 2>&1)
+ot9_exit=$?
+if [[ $ot9_exit -eq 0 ]] && [[ "$ot9_stdout" != *"skipped"* ]]; then
+    pass "OT-9: legacy ADAMS_REVIEW_TALLY_ORCHESTRATOR=1 opt-in runs the tally (no skip)"
+else
+    fail "OT-9: legacy opt-in fallback mismatch" "exit=$ot9_exit stdout=$ot9_stdout"
+fi
+
+unset MATTHEWS_REVIEW_TALLY_ORCHESTRATOR
 
 # ------------------------------------------------------------------ Project F: LLM output normalization
 #
@@ -5658,7 +5734,7 @@ if grep -q '### 0.6a. Branch-behind-base advisory' <<<"$BB_PRE_BODY" \
    && grep -qF 'git merge $comparison_ref' <<<"$BB_PRE_BODY" \
    && grep -q 'preflight_warnings+=("branch_behind_base proceeded' <<<"$BB_PRE_BODY" \
    && grep -qF 'branch_behind_base unresolvable comparison_ref=' <<<"$BB_PRE_BODY"; then
-    pass "BB-1: /adamsreview:review §0.6a branch-behind-base gate present (passive count vs comparison_ref + Stop guidance merges comparison_ref + preflight_warnings buffer + unresolvable-path warning)"
+    pass "BB-1: /matthewsreview:review §0.6a branch-behind-base gate present (passive count vs comparison_ref + Stop guidance merges comparison_ref + preflight_warnings buffer + unresolvable-path warning)"
 else
     fail "BB-1: §0.6a header/rev-list/Stop-merge-comparison_ref/preflight_warnings/unresolvable-path warning missing in $BB_PRE (§0.6a slice)"
 fi
@@ -5723,7 +5799,7 @@ if grep -q '### 7.6a. Branch-behind-base advisory' <<<"$BB_FIX_BODY" \
    && grep -qF 'stash_pop_conflict=false' <<<"$BB_FIX_ABORT_BODY" \
    && grep -qF 'git stash pop 2>>"$trace_log_path"' <<<"$BB_FIX_ABORT_BODY" \
    && grep -qF 'branch_behind_base aborted behind=%s merge_ref=%s fetch_ok=%s stash_pop_conflict=%s' <<<"$BB_FIX_ABORT_BODY"; then
-    pass "BB-2: /adamsreview:fix §7.6a branch-behind-base gate present (active fetch with 30s timeout + fetch_ok routing structure + merge_ref tracked AND consumed in Stop guidance + fetch_note + stash-pop conflict-aware block + Stop AND Abort references + Proceed/Stop/Abort traces + unresolvable-path warning both fetch_ok branches + degraded-path warning + Abort-bullet stash-pop literals pinned)"
+    pass "BB-2: /matthewsreview:fix §7.6a branch-behind-base gate present (active fetch with 30s timeout + fetch_ok routing structure + merge_ref tracked AND consumed in Stop guidance + fetch_note + stash-pop conflict-aware block + Stop AND Abort references + Proceed/Stop/Abort traces + unresolvable-path warning both fetch_ok branches + degraded-path warning + Abort-bullet stash-pop literals pinned)"
 else
     fail "BB-2: §7.6a header/fetch with 30s timeout/fetch_ok routing/merge_ref assignment AND Stop-consumer/fetch_note/stash-pop conflict-aware block/Stop AND Abort references/Proceed/Stop/Abort traces/unresolvable-path warning/degraded-path warning/Abort-bullet stash-pop literals missing in $BB_FIX (§7.6a slice)"
 fi
@@ -5756,7 +5832,7 @@ if grep -q '### 3a. Branch-behind-base advisory' <<<"$BB_ADD_BODY" \
    && grep -qF 'branch_behind_base unresolvable fetch_ok=true local_resolve=false' <<<"$BB_ADD_BODY" \
    && grep -qF 'branch_behind_base unresolvable fetch_ok=false local_resolve=false' <<<"$BB_ADD_BODY" \
    && grep -qF 'branch_behind_base degraded fetch_ok=false local_resolve=true behind=0' <<<"$BB_ADD_BODY"; then
-    pass "BB-3: /adamsreview:add §3a branch-behind-base gate present (active fetch with 30s timeout + fetch_ok routing structure + merge_ref tracked AND consumed in Stop guidance + fetch_note + AskUserQuestion grant + §3a invocation prose + Proceed/Stop/Abort traces + unresolvable-path warning both fetch_ok branches + degraded-path warning)"
+    pass "BB-3: /matthewsreview:add §3a branch-behind-base gate present (active fetch with 30s timeout + fetch_ok routing structure + merge_ref tracked AND consumed in Stop guidance + fetch_note + AskUserQuestion grant + §3a invocation prose + Proceed/Stop/Abort traces + unresolvable-path warning both fetch_ok branches + degraded-path warning)"
 else
     fail "BB-3: §3a header/fetch with 30s timeout/fetch_ok routing/merge_ref assignment AND Stop-consumer/fetch_note/AskUserQuestion grant AND §3a invocation/Proceed/Stop/Abort traces/unresolvable-path warning/degraded-path warning missing in $BB_ADD (§3a slice)"
 fi
@@ -5814,9 +5890,9 @@ else
     fail "SG-1: missing §3.4 null-handling phrases in $SG_MD: ${sg1_missing[*]}"
 fi
 
-# ------------------------------------------------------------------ CR-* /adamsreview:codex-review structural assertions
+# ------------------------------------------------------------------ CR-* /matthewsreview:codex-review structural assertions
 # Plan: codex-review (plans/codex-review.md). Codex-driven peer to
-# /adamsreview:review. These assertions guard the static structure of
+# /matthewsreview:review. These assertions guard the static structure of
 # the new command + fragments — full end-to-end behavior requires real
 # Codex jobs and real git diffs and is exercised by the user's
 # pre-merge real-PR runs. Structural drift (missing flag, wrong
@@ -5947,7 +6023,7 @@ case "$PV" in
         pass "CR-8: plugin.json version bumped to $PV (>= 0.3.0 for new codex-review command)"
         ;;
     *)
-        fail "CR-8: plugin.json version is $PV — expected >= 0.3.0 for the new /adamsreview:codex-review command"
+        fail "CR-8: plugin.json version is $PV — expected >= 0.3.0 for the new /matthewsreview:codex-review command"
         ;;
 esac
 
@@ -6381,14 +6457,14 @@ else
 fi
 
 # CR-14 — fragments/00-preflight.md gates the --effort skip on working-context
-# `effort` being set. Without the gate, `/adamsreview:review --effort high`
+# `effort` being set. Without the gate, `/matthewsreview:review --effort high`
 # silently consumes the flag (no upstream parser owns it on :review) instead
 # of falling through to the unexpected-token clarify path.
 # Two-signal check: the multi-line gate prose mentions both "only when" the
 # upstream parser owns the flag AND the unset-falls-through path.
 if grep -qE 'only when the upstream parser actually owns the flag' "$REPO/fragments/00-preflight.md" \
    && grep -qE 'unexpected token and falls through to the clarify path' "$REPO/fragments/00-preflight.md"; then
-    pass "CR-14: fragments/00-preflight.md gates --effort skip on working-context effort being set (\`/adamsreview:review --effort\` falls through to clarify, not silent-consume)"
+    pass "CR-14: fragments/00-preflight.md gates --effort skip on working-context effort being set (\`/matthewsreview:review --effort\` falls through to clarify, not silent-consume)"
 else
     fail "CR-14: fragments/00-preflight.md missing the working-context-effort gate around --effort skip"
 fi

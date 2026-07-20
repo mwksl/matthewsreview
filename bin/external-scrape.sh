@@ -22,11 +22,11 @@
 #   <dir>/issue_comments.json, <dir>/reviews.json, <dir>/review_comments.json
 # (missing files default to []). Skips all gh calls — useful for smoke
 # tests and ad-hoc rescoring of scraped data. Current user is read from
-# $ADAMS_REVIEW_FIXTURES_USER (default $(whoami)).
+# $MATTHEWS_REVIEW_FIXTURES_USER (default $(whoami)).
 # Default chain (first found wins):
 #   .claude/review-config.json                      (per-repo, cwd-relative)
-#   $ADAMS_REVIEW_CONFIG_ROOT/review-config.json    (override for tests)
-#   ~/.adams-reviews/review-config.json             (global)
+#   $MATTHEWS_REVIEW_CONFIG_ROOT/review-config.json    (override for tests)
+#   ~/.matthews-reviews/review-config.json             (global)
 #
 # Config shape (all keys optional):
 #   {
@@ -125,12 +125,18 @@ resolve_config_path() {
         echo ".claude/review-config.json"
         return
     fi
-    local test_root="${ADAMS_REVIEW_CONFIG_ROOT:-}"
+    local test_root="${MATTHEWS_REVIEW_CONFIG_ROOT:-${ADAMS_REVIEW_CONFIG_ROOT:-}}"
     if [[ -n "$test_root" && -f "$test_root/review-config.json" ]]; then
         echo "$test_root/review-config.json"
         return
     fi
+    if [[ -f "$HOME/.matthews-reviews/review-config.json" ]]; then
+        echo "$HOME/.matthews-reviews/review-config.json"
+        return
+    fi
+    # Pre-rename global location — honored with a migration nudge.
     if [[ -f "$HOME/.adams-reviews/review-config.json" ]]; then
+        echo "migrate: mv ~/.adams-reviews ~/.matthews-reviews" >&2
         echo "$HOME/.adams-reviews/review-config.json"
         return
     fi
@@ -151,7 +157,7 @@ else
     DENY="$DEFAULT_DENY"
 fi
 
-WORK=$(mktemp -d -t adams-review-scrape.XXXXXX)
+WORK=$(mktemp -d -t matthews-review-scrape.XXXXXX)
 trap 'rm -rf "$WORK"' EXIT
 
 ISSUE_OUT="$WORK/issue_comments.json"
@@ -162,7 +168,7 @@ if [[ -n "$FIXTURES_DIR" ]]; then
     # Offline mode — read pre-fetched JSON from a fixtures dir. Used for
     # unit-level smoke tests and ad-hoc replays. Each file must be a
     # JSON array (possibly empty); missing files are treated as [].
-    CURRENT_USER="${ADAMS_REVIEW_FIXTURES_USER:-$(whoami)}"
+    CURRENT_USER="${MATTHEWS_REVIEW_FIXTURES_USER:-${ADAMS_REVIEW_FIXTURES_USER:-$(whoami)}}"
     for name in issue_comments reviews review_comments; do
         if [[ -f "$FIXTURES_DIR/$name.json" ]]; then
             cp "$FIXTURES_DIR/$name.json" "$WORK/$name.json"
@@ -218,7 +224,7 @@ else
         done
         # Try to pull a reset time for the common rate-limit case.
         if grep -qi "rate limit" "$ISSUE_ERR" "$REVIEW_ERR" "$RVCMT_ERR" 2>/dev/null; then
-            echo "Action: wait for the rate limit to reset (see 'X-RateLimit-Reset' headers above), or re-run /adamsreview:review without --ensemble (which skips the PR-comment scrape)." >&2
+            echo "Action: wait for the rate limit to reset (see 'X-RateLimit-Reset' headers above), or re-run /matthewsreview:review without --ensemble (which skips the PR-comment scrape)." >&2
         else
             echo "Action: run 'gh auth status'; check network; retry." >&2
         fi

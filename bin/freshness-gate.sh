@@ -210,7 +210,7 @@ if [[ "$AFTER_CHOICE" == "a" ]]; then
     # is already populated by the initial fetch earlier in the helper.
     current_branch=$(git symbolic-ref --short HEAD 2>/dev/null || true)
     if [[ "$current_branch" == "$BASE_BRANCH" ]]; then
-        ff_err_file=$(mktemp -t adams-ff-err.XXXXXX)
+        ff_err_file=$(mktemp -t matthews-ff-err.XXXXXX)
         ff_rc=0
         git merge --ff-only "origin/$BASE_BRANCH" --quiet 2>"$ff_err_file" || ff_rc=$?
         if [[ $ff_rc -eq 0 ]]; then
@@ -227,7 +227,7 @@ if [[ "$AFTER_CHOICE" == "a" ]]; then
         emit_pending "$remote_sha" "$behind_count" "$warnings_json" "false"
         exit 0
     fi
-    ff_err_file=$(mktemp -t adams-ff-err.XXXXXX)
+    ff_err_file=$(mktemp -t matthews-ff-err.XXXXXX)
     ff_rc=0
     git fetch origin "$BASE_BRANCH:$BASE_BRANCH" --quiet 2>"$ff_err_file" || ff_rc=$?
     if [[ $ff_rc -eq 0 ]]; then
@@ -258,7 +258,7 @@ fi
 
 # Remote exists. Fetch with a 30s soft timeout. GNU `timeout` when
 # available; a background+watchdog pattern on macOS where it isn't.
-fetch_err_file=$(mktemp -t adams-fetch-err.XXXXXX)
+fetch_err_file=$(mktemp -t matthews-fetch-err.XXXXXX)
 fetch_rc=0
 if command -v timeout >/dev/null 2>&1; then
     timeout 30 git fetch origin "$BASE_BRANCH" --quiet 2>"$fetch_err_file" || fetch_rc=$?

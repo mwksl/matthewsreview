@@ -8,7 +8,7 @@ disable-model-invocation: false
 Arguments (optional):
 - First positional (integer 0–100) → `threshold` (default `60`). The
   Phase 8 fix gate: `confirmed_mechanical`/`partial`/`regression` findings
-  with `score_phase4 >= threshold` are eligible. `/adamsreview:fix 80`
+  with `score_phase4 >= threshold` are eligible. `/matthewsreview:fix 80`
   excludes moderate-strength findings from the run.
 - `--granular-commits` → one commit per surviving fix group. Default is
   one combined commit for all survivors.
@@ -43,7 +43,7 @@ gate is restored.
 and Phase 9e writing fix_attempts, findings sit in
 `current_state=attempted`. If the run is interrupted there — or if
 Phase 9.pre detects a touched-file overlap and the reviewer chooses
-abort (default) or inspect — the next `/adamsreview:fix` invocation's
+abort (default) or inspect — the next `/matthewsreview:fix` invocation's
 Phase 7 step 4 hard abort catches the leftover `attempted` state and
 gives the user a deterministic recovery prompt. Never clean up
 `attempted` state silently; that's the user's call. (Reconcile does

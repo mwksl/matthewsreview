@@ -1,22 +1,22 @@
-# adamsreview
+# matthewsreview
 
 Multi-stage code review for Claude Code — parallel sub-agent detection, validation passes, persistent JSON state, and an automated fix loop that re-reviews and reverts regressions before committing.
 
 On my own PRs, it's been catching dramatically more real bugs than Claude Code's built-in `/review`, `/ultrareview`, CodeRabbit, Greptile, and Codex's built-in review — while producing fewer false positives. (Anecdotal, n=me.) Modeled after the built-in `/review` and extended into a six-command pipeline. Runs against your regular Claude Code subscription (Max plan recommended) — unlike `/ultrareview`, which charges against your Extra Usage pool.
 
 ```
-/plugin marketplace add adamjgmiller/adamsreview
-/plugin install adamsreview@adamsreview
+/plugin marketplace add mwksl/matthewsreview
+/plugin install matthewsreview@matthewsreview
 ```
 
 The six commands:
 
-- **`/adamsreview:review`** — multi-lens code review of a branch or PR. Up to seven parallel sub-agent lenses (correctness, security, UX, etc.) feed a dedup pass, a cheap-then-deep validation gate, and (optionally) a holistic Opus cross-cutting pass. High-confidence auto-fix proposals are pre-computed so `:fix` and `:walkthrough` can batch-accept them in one confirm. `--ensemble` adds a Codex CLI pass and PR bot-comment scrape on top of the internal Claude lenses.
-- **`/adamsreview:codex-review`** — Codex CLI peer to `:review`. Same artifact shape, drop-in for everything downstream (`:fix`, `:add`, `:walkthrough`, `:promote`). Effort tunable via `--effort low|medium|high|xhigh` (default `high`).
-- **`/adamsreview:add`** — inject externally-sourced findings (a Claude Code cloud `/ultrareview` paste, an Opus once-over, a teammate's note) into the most recent review's artifact. Deduped against what's already there, validated by the same gates, re-published to the existing PR comment.
-- **`/adamsreview:walkthrough`** — interactive driver for findings `:fix` would skip. Uses the harness's `AskUserQuestion` UI to walk through uncertain or human-judgment items one by one — promote what you want auto-fixed, skip the rest. Pre-computed auto-fix proposals are batch-accepted up front; the remainder get per-finding briefing + options + recommendation. Posts a decisions log to the PR.
-- **`/adamsreview:fix`** — automated fix loop. Dispatches per-fix-group sub-agents in parallel, then re-reviews the work with Opus, **reverts any regressions, and commits the survivors** (one combined commit by default; `--granular-commits` for one per group).
-- **`/adamsreview:promote`** — human override that promotes a single finding to auto-fixable, bypassing the lane filter and score threshold.
+- **`/matthewsreview:review`** — multi-lens code review of a branch or PR. Up to seven parallel sub-agent lenses (correctness, security, UX, etc.) feed a dedup pass, a cheap-then-deep validation gate, and (optionally) a holistic Opus cross-cutting pass. High-confidence auto-fix proposals are pre-computed so `:fix` and `:walkthrough` can batch-accept them in one confirm. `--ensemble` adds a Codex CLI pass and PR bot-comment scrape on top of the internal Claude lenses.
+- **`/matthewsreview:codex-review`** — Codex CLI peer to `:review`. Same artifact shape, drop-in for everything downstream (`:fix`, `:add`, `:walkthrough`, `:promote`). Effort tunable via `--effort low|medium|high|xhigh` (default `high`).
+- **`/matthewsreview:add`** — inject externally-sourced findings (a Claude Code cloud `/ultrareview` paste, an Opus once-over, a teammate's note) into the most recent review's artifact. Deduped against what's already there, validated by the same gates, re-published to the existing PR comment.
+- **`/matthewsreview:walkthrough`** — interactive driver for findings `:fix` would skip. Uses the harness's `AskUserQuestion` UI to walk through uncertain or human-judgment items one by one — promote what you want auto-fixed, skip the rest. Pre-computed auto-fix proposals are batch-accepted up front; the remainder get per-finding briefing + options + recommendation. Posts a decisions log to the PR.
+- **`/matthewsreview:fix`** — automated fix loop. Dispatches per-fix-group sub-agents in parallel, then re-reviews the work with Opus, **reverts any regressions, and commits the survivors** (one combined commit by default; `--granular-commits` for one per group).
+- **`/matthewsreview:promote`** — human override that promotes a single finding to auto-fixable, bypassing the lane filter and score threshold.
 
 Command files live at bare-stem paths under `commands/`; shared phase fragments and prompt references live under `fragments/`; helper scripts and the artifact schema live under `bin/`. The plugin runtime auto-adds `bin/` to `$PATH` on load — no symlinks, no install script.
 
@@ -24,14 +24,14 @@ Command files live at bare-stem paths under `commands/`; shared phase fragments 
 
 On a non-trivial PR, the commands work best in this order:
 
-1. **Review.** `/adamsreview:review` — or `/adamsreview:review --ensemble` if you have the Codex CLI installed and want to pool a Codex pass plus a PR bot-comment scrape on top of the internal Claude lenses (higher token cost). **Or** `/adamsreview:codex-review [--effort <level>]` for a Codex-driven peer review (drop-in for everything downstream; effort tunable; no `--ensemble`).
-2. **Add.** *(optional)* `/adamsreview:add <paste...>` — if you ran a parallel review (cloud `/ultrareview`, Opus once-over, manual scan, etc.) that surfaced bugs the original review missed, paste the result here. The findings are validated by Phase 4 and land in the same artifact, deduped against what's already there. Auto-eligible additions feed step 4; non-eligible ones surface in step 3.
-3. **Walkthrough.** *(optional)* `/adamsreview:walkthrough [threshold]` — step through findings the fix command would skip (deep-manual, deep-report, and the entire light lane including light `confirmed_mechanical`), restricted to those scoring at or above `$threshold` (default 60) so low-signal items don't pad the session. Step 4.5 batch-accepts all findings carrying a pre-computed auto-fix proposal in one confirm (the fast path); the rest get per-finding briefing + options + recommendation via the harness's `AskUserQuestion` UI. Promote the ones you want auto-fixed with tailored fix-hints, skip the rest. Posts a decisions log to the PR for audit. Pass a lower threshold (e.g. `/adamsreview:walkthrough 30`) and pick the **Full** tier at the preflight prompt to audit Phase-3-demoted `below_gate` findings too.
-4. **Fix.** `/adamsreview:fix` — applies every auto-eligible finding (including whatever was added in step 2 and promoted in step 3). Phase 7.5 surfaces any remaining auto-fix proposals (light-lane / manual / report findings) for one-confirm batch-accept before Phase 8 dispatch. Default: one combined commit for all surviving fixes; pass `--granular-commits` for one commit per fix group. Per-group Phase-9 outcome lands in the commit message either way.
+1. **Review.** `/matthewsreview:review` — or `/matthewsreview:review --ensemble` if you have the Codex CLI installed and want to pool a Codex pass plus a PR bot-comment scrape on top of the internal Claude lenses (higher token cost). **Or** `/matthewsreview:codex-review [--effort <level>]` for a Codex-driven peer review (drop-in for everything downstream; effort tunable; no `--ensemble`).
+2. **Add.** *(optional)* `/matthewsreview:add <paste...>` — if you ran a parallel review (cloud `/ultrareview`, Opus once-over, manual scan, etc.) that surfaced bugs the original review missed, paste the result here. The findings are validated by Phase 4 and land in the same artifact, deduped against what's already there. Auto-eligible additions feed step 4; non-eligible ones surface in step 3.
+3. **Walkthrough.** *(optional)* `/matthewsreview:walkthrough [threshold]` — step through findings the fix command would skip (deep-manual, deep-report, and the entire light lane including light `confirmed_mechanical`), restricted to those scoring at or above `$threshold` (default 60) so low-signal items don't pad the session. Step 4.5 batch-accepts all findings carrying a pre-computed auto-fix proposal in one confirm (the fast path); the rest get per-finding briefing + options + recommendation via the harness's `AskUserQuestion` UI. Promote the ones you want auto-fixed with tailored fix-hints, skip the rest. Posts a decisions log to the PR for audit. Pass a lower threshold (e.g. `/matthewsreview:walkthrough 30`) and pick the **Full** tier at the preflight prompt to audit Phase-3-demoted `below_gate` findings too.
+4. **Fix.** `/matthewsreview:fix` — applies every auto-eligible finding (including whatever was added in step 2 and promoted in step 3). Phase 7.5 surfaces any remaining auto-fix proposals (light-lane / manual / report findings) for one-confirm batch-accept before Phase 8 dispatch. Default: one combined commit for all surviving fixes; pass `--granular-commits` for one commit per fix group. Per-group Phase-9 outcome lands in the commit message either way.
 
-Each command is independent — you can go straight from review to fix if you only care about auto-eligible findings, or skip review entirely and run `:fix` against an existing artifact. Steps 2–4 can land days or weeks after step 1; the review artifact persists under `~/.adams-reviews/<slug>/<branch>/`.
+Each command is independent — you can go straight from review to fix if you only care about auto-eligible findings, or skip review entirely and run `:fix` against an existing artifact. Steps 2–4 can land days or weeks after step 1; the review artifact persists under `~/.matthews-reviews/<slug>/<branch>/`.
 
-`/adamsreview:promote <id>` remains useful for one-off manual promotions outside the walkthrough flow (e.g. promoting a `disproven` finding with `--force`, or conceptually looping over a set of IDs — `F003`, `F037`, `F039` — with `--defer-publish` on each so only the final invocation re-publishes to the PR).
+`/matthewsreview:promote <id>` remains useful for one-off manual promotions outside the walkthrough flow (e.g. promoting a `disproven` finding with `--force`, or conceptually looping over a set of IDs — `F003`, `F037`, `F039` — with `--defer-publish` on each so only the final invocation re-publishes to the PR).
 
 ## Documents
 
@@ -61,21 +61,21 @@ Each command is independent — you can go straight from review to fix if you on
 ### macOS / Linux
 
 1. Install deps: `brew install uv jq gh git` (macOS) or the distro equivalent. (macOS's default `/bin/bash` 3.2 is fine — helpers are 3.2-portable.)
-2. In a Claude Code session: `/plugin marketplace add adamjgmiller/adamsreview`
-3. In the same session: `/plugin install adamsreview@adamsreview`
+2. In a Claude Code session: `/plugin marketplace add mwksl/matthewsreview`
+3. In the same session: `/plugin install matthewsreview@matthewsreview`
 
 ### Windows (native)
 
 1. Install [Git for Windows](https://git-scm.com/downloads/win) — provides Git Bash (bash 5+) and `git`, which Claude Code uses internally. Claude Code auto-routes `#!/usr/bin/env bash` helpers through Git Bash; set `CLAUDE_CODE_GIT_BASH_PATH` if Git Bash lives in a non-default location (see *Troubleshooting*).
 2. Install [uv](https://docs.astral.sh/uv/), [jq](https://jqlang.github.io/jq/download/), and the [GitHub CLI](https://cli.github.com/).
-3. In a Claude Code session: `/plugin marketplace add adamjgmiller/adamsreview` and `/plugin install adamsreview@adamsreview`.
+3. In a Claude Code session: `/plugin marketplace add mwksl/matthewsreview` and `/plugin install matthewsreview@matthewsreview`.
 
 ### Install from a local checkout
 
 If you've cloned this repo and prefer running from source — or you want to pin to a specific commit — two paths work without the GitHub marketplace round-trip:
 
-- **Persistent install from a local path.** In a Claude Code session, run `/plugin marketplace add /path/to/adamsreview` then `/plugin install adamsreview@adamsreview`. Same end state as the GitHub marketplace flow above — the plugin is registered under `~/.claude/` and survives restarts. Use `.` in place of the absolute path if your cwd is already the clone.
-- **One-shot via `--plugin-dir`.** `claude --plugin-dir /path/to/adamsreview` launches Claude Code with the clone loaded as a plugin for that session only. Nothing is written to `~/.claude/`; re-launch without the flag and the plugin is gone. Handy for trying the plugin without any persistent state, or for running a specific checkout side-by-side with an installed version.
+- **Persistent install from a local path.** In a Claude Code session, run `/plugin marketplace add /path/to/matthewsreview` then `/plugin install matthewsreview@matthewsreview`. Same end state as the GitHub marketplace flow above — the plugin is registered under `~/.claude/` and survives restarts. Use `.` in place of the absolute path if your cwd is already the clone.
+- **One-shot via `--plugin-dir`.** `claude --plugin-dir /path/to/matthewsreview` launches Claude Code with the clone loaded as a plugin for that session only. Nothing is written to `~/.claude/`; re-launch without the flag and the plugin is gone. Handy for trying the plugin without any persistent state, or for running a specific checkout side-by-side with an installed version.
 
 Both paths still require the runtime deps listed above (`uv`, `jq`, `gh`, `bash`, `git`).
 
@@ -83,12 +83,12 @@ Both paths still require the runtime deps listed above (`uv`, `jq`, `gh`, `bash`
 
 All invocations are plugin-namespaced:
 
-- `/adamsreview:review [--ensemble] [--full]`
-- `/adamsreview:codex-review [--effort <low|medium|high|xhigh>] [--full]`
-- `/adamsreview:add [<paste...>] [--file <path> --line <N> --claim "..."]`
-- `/adamsreview:walkthrough [threshold]`
-- `/adamsreview:fix [threshold]`
-- `/adamsreview:promote <finding_id> [--reason "..."] [--fix-hint "..."]`
+- `/matthewsreview:review [--ensemble] [--full]`
+- `/matthewsreview:codex-review [--effort <low|medium|high|xhigh>] [--full]`
+- `/matthewsreview:add [<paste...>] [--file <path> --line <N> --claim "..."]`
+- `/matthewsreview:walkthrough [threshold]`
+- `/matthewsreview:fix [threshold]`
+- `/matthewsreview:promote <finding_id> [--reason "..."] [--fix-hint "..."]`
 
 `--full` (on `:review` and `:codex-review`) opts out of the trivial-mode optimization, forcing every detection lens to run even on small or docs-only diffs. Useful when you want full coverage on a deliberately-small PR; otherwise the default trivial-mode classifier is the right call.
 
@@ -100,7 +100,7 @@ If you're hacking on the plugin itself (not just using it), `scripts/dev-run.sh`
 
 ### Review state location
 
-`/adamsreview:review` writes per-run state (artifact, trace, phase logs, token logs) under `~/.adams-reviews/<repo-slug>/<branch>/<review_id>/`. Override with `export ADAMS_REVIEW_REVIEWS_ROOT=/some/other/path` if you want state elsewhere.
+`/matthewsreview:review` writes per-run state (artifact, trace, phase logs, token logs) under `~/.matthews-reviews/<repo-slug>/<branch>/<review_id>/`. Override with `export MATTHEWS_REVIEW_REVIEWS_ROOT=/some/other/path` if you want state elsewhere.
 
 **Why not `~/.claude/reviews/`?** Claude Code hardcodes a sensitive-file permission prompt for writes to `~/.claude/...` that survives even `bypassPermissions` mode, and `~/.claude/reviews` is not on the short list of exempt subdirs (`.claude/commands`, `.claude/agents`, `.claude/skills`). Keeping review state outside `~/.claude/` avoids dozens of permission prompts per run.
 
@@ -108,10 +108,10 @@ If you're hacking on the plugin itself (not just using it), `scripts/dev-run.sh`
 
 ```bash
 # Option A: move state to the new canonical root (recommended).
-mv ~/.claude/reviews ~/.adams-reviews
+mv ~/.claude/reviews ~/.matthews-reviews
 
 # Option B: keep state at the old location via the env var (accepts the prompts).
-export ADAMS_REVIEW_REVIEWS_ROOT=~/.claude/reviews
+export MATTHEWS_REVIEW_REVIEWS_ROOT=~/.claude/reviews
 ```
 
 ### Token counts: what they measure
@@ -129,12 +129,12 @@ macOS Sequoia and Tahoe show an "*kitty (or your terminal) would like to access 
 
 To enable, do **either**:
 
-- **Recommended** — grant your terminal app **Full Disk Access** (System Settings → Privacy & Security → Full Disk Access → `+` your terminal). One toggle, permanent, silences this prompt class for everything launched from your terminal. Then `export ADAMS_REVIEW_TALLY_ORCHESTRATOR=1` in your shell rc (`~/.zshrc`, `~/.bashrc`, etc.) so the helper actually runs.
-- **Just opt in without FDA** — `export ADAMS_REVIEW_TALLY_ORCHESTRATOR=1` and accept the macOS prompts when they fire. Each grant survives until the next OS update or terminal-app update; choose this if you want narrower permissions at the cost of clicking *Allow* periodically.
+- **Recommended** — grant your terminal app **Full Disk Access** (System Settings → Privacy & Security → Full Disk Access → `+` your terminal). One toggle, permanent, silences this prompt class for everything launched from your terminal. Then `export MATTHEWS_REVIEW_TALLY_ORCHESTRATOR=1` in your shell rc (`~/.zshrc`, `~/.bashrc`, etc.) so the helper actually runs.
+- **Just opt in without FDA** — `export MATTHEWS_REVIEW_TALLY_ORCHESTRATOR=1` and accept the macOS prompts when they fire. Each grant survives until the next OS update or terminal-app update; choose this if you want narrower permissions at the cost of clicking *Allow* periodically.
 
-When opted out (the default), the helper exits 0 with one `orchestrator-tally: skipped` line and leaves the artifact's `orchestrator_tokens` field absent. The PR comment shows only **Sub-agent tokens** — still the precise per-review counter and the primary cost signal. Sub-agent tokens log under `~/.adams-reviews/`, which carries no provenance xattr, so that path triggers no prompts.
+When opted out (the default), the helper exits 0 with one `orchestrator-tally: skipped` line and leaves the artifact's `orchestrator_tokens` field absent. The PR comment shows only **Sub-agent tokens** — still the precise per-review counter and the primary cost signal. Sub-agent tokens log under `~/.matthews-reviews/`, which carries no provenance xattr, so that path triggers no prompts.
 
-**Stale-data behavior.** If you opt in for the initial review and then opt out before running `/adamsreview:fix`, the helper preserves the previously-written `orchestrator_tokens` value rather than wiping it. The rendered line shows the last-measured value, not a freshly-skipped zero — meaning it can under-report subsequent fix-time activity. Re-opt-in on the next lifecycle command refreshes. The reverse direction (opt out for review, opt in for fix) has no staleness: the fix-time tally's `--since review_started_at` window covers the full review→fix arc, so the first opt-in write captures everything.
+**Stale-data behavior.** If you opt in for the initial review and then opt out before running `/matthewsreview:fix`, the helper preserves the previously-written `orchestrator_tokens` value rather than wiping it. The rendered line shows the last-measured value, not a freshly-skipped zero — meaning it can under-report subsequent fix-time activity. Re-opt-in on the next lifecycle command refreshes. The reverse direction (opt out for review, opt in for fix) has no staleness: the fix-time tally's `--since review_started_at` window covers the full review→fix arc, so the first opt-in write captures everything.
 
 #### Orchestrator tokens can over-count (when opted in)
 
@@ -153,11 +153,11 @@ PEP 668 (Python 3.12+ with Homebrew) marks system and user site-packages as exte
 ## Layout
 
 ```
-adamsreview/                           ← this repo (plugin root)
+matthewsreview/                           ← this repo (plugin root)
 ├── CLAUDE.md                          ← operational guide (read first)
 ├── README.md                          ← this file
 ├── .claude-plugin/
-│   ├── plugin.json                    ← plugin manifest (name: adamsreview)
+│   ├── plugin.json                    ← plugin manifest (name: matthewsreview)
 │   └── marketplace.json               ← single-plugin marketplace
 ├── .gitattributes                     ← LF enforcement
 ├── docs/
@@ -168,12 +168,12 @@ adamsreview/                           ← this repo (plugin root)
 ├── plans/                             ← per-branch plan files (umbrella + optional PRD/PLAN/JOURNAL)
 ├── test/                              ← smoke harness + fixtures
 ├── commands/                          ← bare-stem command files (plugin namespacing)
-│   ├── review.md                      ← /adamsreview:review
-│   ├── codex-review.md                ← /adamsreview:codex-review
-│   ├── add.md                         ← /adamsreview:add
-│   ├── walkthrough.md                 ← /adamsreview:walkthrough
-│   ├── fix.md                         ← /adamsreview:fix
-│   └── promote.md                     ← /adamsreview:promote
+│   ├── review.md                      ← /matthewsreview:review
+│   ├── codex-review.md                ← /matthewsreview:codex-review
+│   ├── add.md                         ← /matthewsreview:add
+│   ├── walkthrough.md                 ← /matthewsreview:walkthrough
+│   ├── fix.md                         ← /matthewsreview:fix
+│   └── promote.md                     ← /matthewsreview:promote
 ├── fragments/                         ← shared phase fragments + prompt references
 │   ├── _prelude-shared.md             ← loaded by every command
 │   ├── promote-core.md                ← shared precondition + patch (promote + walkthrough)
@@ -216,7 +216,7 @@ adamsreview/                           ← this repo (plugin root)
     └── dev-run.sh                     ← `claude --plugin-dir` wrapper (plugin-author iteration)
 ```
 
-No symlinks, no install script. The plugin runtime discovers `commands/`, `fragments/`, `bin/`, and `hooks/` by convention once the plugin is installed via `/plugin install adamsreview@adamsreview`.
+No symlinks, no install script. The plugin runtime discovers `commands/`, `fragments/`, `bin/`, and `hooks/` by convention once the plugin is installed via `/plugin install matthewsreview@matthewsreview`.
 
 ## Troubleshooting
 
@@ -226,7 +226,7 @@ The Python helpers (`artifact-patch.py`, `artifact-render.py`) use a PEP 723 inl
 
 ### `--ensemble` mode requirements
 
-`/adamsreview:review --ensemble` additionally requires the `codex` Claude Code plugin (the local Codex CLI is invoked through the plugin's `codex-companion.mjs`, not as a standalone CLI on `$PATH`). Without the plugin installed, the readiness gate prompts you to either continue without Codex (in PR mode that means PR-comment scraping only; in local mode it means internal lenses only — Phase 1.5 has no work to do) or stop and run `/codex:setup` first. The default (non-ensemble) mode has no such requirement.
+`/matthewsreview:review --ensemble` additionally requires the `codex` Claude Code plugin (the local Codex CLI is invoked through the plugin's `codex-companion.mjs`, not as a standalone CLI on `$PATH`). Without the plugin installed, the readiness gate prompts you to either continue without Codex (in PR mode that means PR-comment scraping only; in local mode it means internal lenses only — Phase 1.5 has no work to do) or stop and run `/codex:setup` first. The default (non-ensemble) mode has no such requirement.
 
 ### Windows: Git Bash not found
 
@@ -240,6 +240,6 @@ or the `$env:CLAUDE_CODE_GIT_BASH_PATH = ...` equivalent in PowerShell.
 
 ## Status
 
-Current release: **v0.4.0** (auto-fix-hint feature: Phase 5.5 + Phase 7.5 + Step 4.5). All six commands are shipped and in daily use. `/adamsreview:codex-review` landed in v0.3.0; recent releases have focused on hardening (anti-serialization callouts at fan-out sites, parallel-dispatch correctness, JSON-pipeline backslash safety) and the auto-fix-hint flow that lets `:fix` and `:walkthrough` batch-accept Sonnet-proposed fixes in one confirm.
+Current release: **v0.4.0** (auto-fix-hint feature: Phase 5.5 + Phase 7.5 + Step 4.5). All six commands are shipped and in daily use. `/matthewsreview:codex-review` landed in v0.3.0; recent releases have focused on hardening (anti-serialization callouts at fan-out sites, parallel-dispatch correctness, JSON-pipeline backslash safety) and the auto-fix-hint flow that lets `:fix` and `:walkthrough` batch-accept Sonnet-proposed fixes in one confirm.
 
 Active follow-ups live in GitHub issues. Frozen historical context: `plans/old-backlog.md` and `docs/archive/`.

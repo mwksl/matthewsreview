@@ -1,4 +1,4 @@
-"""Shared helpers for adamsreview Python scripts.
+"""Shared helpers for matthewsreview Python scripts.
 
 This module is imported by sibling scripts in the same `bin/` directory
 (notably `artifact-patch.py` and `artifact-render.py`). It is NOT a uv

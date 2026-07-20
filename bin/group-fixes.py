@@ -157,7 +157,7 @@ def _check_eligible(finding, fid):
         c.err_prompt(
             f"finding {fid}: validation_result is required for fix grouping (got {type(vr).__name__ if vr is not None else 'null'})",
             context="Phase 4 deep-lane validators populate validation_result. confirmed_mechanical findings without one would have failed schema validation earlier — so this usually means a fixture or a stale patch.",
-            action="re-run /adamsreview:review to refresh validation_result, or exclude this finding from --eligible-finding-ids. (Promoted findings with null validation_result are accepted — this one is not promoted.)"
+            action="re-run /matthewsreview:review to refresh validation_result, or exclude this finding from --eligible-finding-ids. (Promoted findings with null validation_result are accepted — this one is not promoted.)"
         )
         sys.exit(c.EXIT_VALIDATION)
 
@@ -175,7 +175,7 @@ def _check_eligible(finding, fid):
     if not isinstance(ftm, list):
         c.err_prompt(
             f"finding {fid}: validation_result.fix_proposal.files_to_modify must be a list (got {type(ftm).__name__})",
-            action="schema requires this field — re-run /adamsreview:review if the artifact is malformed."
+            action="schema requires this field — re-run /matthewsreview:review if the artifact is malformed."
         )
         sys.exit(c.EXIT_VALIDATION)
 
@@ -259,7 +259,7 @@ def _compute_groups(artifact, eligible_ids):
             f"--eligible-finding-ids references unknown id(s): {unknown}",
             valid_values=f"existing ids: {existing}" if existing else "no findings in this artifact",
             did_you_mean=c.suggest(unknown[0], existing) if existing else None,
-            action="re-run /adamsreview:review or fix the orchestrator's eligibility filter."
+            action="re-run /matthewsreview:review or fix the orchestrator's eligibility filter."
         )
         sys.exit(c.EXIT_VALIDATION)
 
@@ -357,13 +357,13 @@ def main():
     except FileNotFoundError:
         c.err_prompt(
             f"artifact not found at {args.artifact}",
-            action="check --artifact; run `/adamsreview:review` if this branch has no review."
+            action="check --artifact; run `/matthewsreview:review` if this branch has no review."
         )
         return c.EXIT_VALIDATION
     except json.JSONDecodeError as e:
         c.err_prompt(
             f"artifact at {args.artifact} is not valid JSON: {e.msg} (line {e.lineno}, col {e.colno})",
-            action="the on-disk file is corrupted — restore from git or re-run /adamsreview:review."
+            action="the on-disk file is corrupted — restore from git or re-run /matthewsreview:review."
         )
         return c.EXIT_VALIDATION
 
@@ -374,7 +374,7 @@ def main():
         c.err_prompt(
             f"artifact is invalid ({len(errors)} schema violation(s))",
             context=["  " + e for e in shown] + overflow,
-            action="re-run /adamsreview:review to regenerate a valid artifact."
+            action="re-run /matthewsreview:review to regenerate a valid artifact."
         )
         return c.EXIT_VALIDATION
 

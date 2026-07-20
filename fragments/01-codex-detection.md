@@ -113,7 +113,7 @@ On helper non-zero exit, fall back to `[]`.
 ### 1.2c. Build the Codex prompt files
 
 For each lens that runs (per step 1.1's selection), the orchestrator
-assembles a prompt file at `/tmp/adams-review-codex-<review_id>-L<N>.md`.
+assembles a prompt file at `/tmp/matthews-review-codex-<review_id>-L<N>.md`.
 Codex's `task --background --prompt-file <path>` reads the file at
 launch time, so it must be on disk before §1.3.
 
@@ -166,14 +166,14 @@ Per lens that runs, the orchestrator does:
    the placeholder in the file is the literal four characters `$comparison_ref`.
 
 4. **Write** the assembled prompt to
-   `/tmp/adams-review-codex-${review_id}-L<N>.md`. Use the bash
+   `/tmp/matthews-review-codex-${review_id}-L<N>.md`. Use the bash
    `printf` pattern (the Write tool is NOT in
    `commands/codex-review.md`'s `allowed-tools` grant — recommending
    it would trip the runtime's tool-permission check before any Codex
    job launches):
 
    ```bash
-   prompt_file="/tmp/adams-review-codex-${review_id}-L${N}.md"
+   prompt_file="/tmp/matthews-review-codex-${review_id}-L${N}.md"
    { printf '%s\n\n' "$shared_invariants_body"; \
      printf '%s\n'   "$lens_body"; } > "$prompt_file"
    ```
@@ -196,7 +196,7 @@ they run concurrently. Each launch is a Bash tool-use:
 
 ```bash
 node "$CODEX_COMPANION" task --background --effort "$effort" \
-    --prompt-file "/tmp/adams-review-codex-${review_id}-L${N}.md" \
+    --prompt-file "/tmp/matthews-review-codex-${review_id}-L${N}.md" \
     --json
 ```
 
@@ -206,7 +206,7 @@ lens slot:
 
 ```bash
 codex_job_id=$(node "$CODEX_COMPANION" task --background --effort "$effort" \
-    --prompt-file "/tmp/adams-review-codex-${review_id}-L${N}.md" \
+    --prompt-file "/tmp/matthews-review-codex-${review_id}-L${N}.md" \
     --json | jq -r '.jobId')
 ```
 
@@ -375,7 +375,7 @@ Dispatch via `Agent` with `model: sonnet`, `subagent_type: general-purpose`.
 Prompt essence:
 
 > You are normalizing 7 (or fewer if any were skipped/dropped) Codex
-> lens outputs into the adamsreview candidate schema. Each output is
+> lens outputs into the matthewsreview candidate schema. Each output is
 > freeform Markdown/text describing findings; your job is to extract
 > concrete candidates and tag them with the lens that produced them.
 >
@@ -541,8 +541,8 @@ collisions — are excluded.)
 ### 1.5.3. Clean up Codex prompt files
 
 ```bash
-rm -f "/tmp/adams-review-codex-${review_id}-L"*.md \
-      "/tmp/adams-review-codex-${review_id}-L"*.out.json
+rm -f "/tmp/matthews-review-codex-${review_id}-L"*.md \
+      "/tmp/matthews-review-codex-${review_id}-L"*.out.json
 ```
 
 Any orchestrator-fatal failure before this point leaves the prompt

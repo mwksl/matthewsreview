@@ -23,7 +23,7 @@
 #
 # Flags:
 #   --start-from F<NNN>   start numbering from F<NNN> instead of F001.
-#                         Used by /adamsreview:add to continue the
+#                         Used by /matthewsreview:add to continue the
 #                         existing artifact's id sequence rather than
 #                         restarting at F001 (which would collide with
 #                         findings already in the artifact).
@@ -56,7 +56,7 @@ Stdout: the same array (sorted) with `.id` set to F<start>..F<start+N-1>.
 
 Flags:
   --start-from F<NNN>   integer offset for the first id (default 1 → F001).
-                        Used by /adamsreview:add to continue numbering
+                        Used by /matthewsreview:add to continue numbering
                         past the highest existing id in the artifact.
 USAGE
 }

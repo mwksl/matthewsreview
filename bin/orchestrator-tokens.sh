@@ -36,7 +36,7 @@
 # transcripts, or a transcript with all pre-since turns → zero rollup
 # with sessions=[] rather than an error.
 #
-# Opt-in: defaults to skip unless `ADAMS_REVIEW_TALLY_ORCHESTRATOR=1`
+# Opt-in: defaults to skip unless `MATTHEWS_REVIEW_TALLY_ORCHESTRATOR=1`
 # (or true/yes/on) is set in the environment. The transcript scan
 # triggers the macOS "access data from other apps" prompt because
 # Claude Code marks every transcript with the `com.apple.provenance`
@@ -109,11 +109,11 @@ done
 # so users aren't pestered. Opting in is one env var in your shell rc.
 # Skip preserves any previously-written orchestrator_tokens on the
 # artifact (a prior opted-in run still surfaces in the rendered line).
-opt_in="${ADAMS_REVIEW_TALLY_ORCHESTRATOR:-}"
+opt_in="${MATTHEWS_REVIEW_TALLY_ORCHESTRATOR:-${ADAMS_REVIEW_TALLY_ORCHESTRATOR:-}}"
 case "$opt_in" in
     1|true|TRUE|yes|YES|on|ON) ;;
     *)
-        echo "orchestrator-tally: skipped (set ADAMS_REVIEW_TALLY_ORCHESTRATOR=1 to enable; see README §Token counts)"
+        echo "orchestrator-tally: skipped (set MATTHEWS_REVIEW_TALLY_ORCHESTRATOR=1 to enable; see README §Token counts)"
         exit 0
         ;;
 esac

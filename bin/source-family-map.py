@@ -22,7 +22,7 @@ builders):
   - security-family      (L6)
   - holistic-family      (L7 ensemble)
   - external-deep-family (Phase 1.5 normalizer output)
-  - external-add-family  (/adamsreview:add flow — commands/add.md
+  - external-add-family  (/matthewsreview:add flow — commands/add.md
                           candidate builders for paste / structured
                           / mixed external findings)
 

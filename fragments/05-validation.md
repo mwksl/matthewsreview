@@ -57,7 +57,7 @@ Each sub-agent receives:
   plus the Read/grep tools it uses to look at the diff directly.
 - `$claude_md_paths` (absolute paths).
 - If this is a retry-mode run (Stage 3 context): the finding's prior
-  `fix_attempts` for context. In Stage 2 `/adamsreview:review`, `fix_attempts`
+  `fix_attempts` for context. In Stage 2 `/matthewsreview:review`, `fix_attempts`
   is always empty.
 
 Prompt essence:
@@ -367,7 +367,7 @@ disproven / uncertain tuples. Deep-lane confirmed tuples carry the
 full nested object.
 
 ```bash
-scratch="/tmp/adams-review-$review_id"
+scratch="/tmp/matthews-review-$review_id"
 mkdir -p "$scratch"
 
 # Compose the tuple array in orchestrator context and write it to
@@ -451,7 +451,7 @@ per §4.5 step 4), run a `git status --porcelain` sweep. Validators have no
 legitimate reason to touch the working tree — the 4.2 / 4.3 prompts
 already forbid it. This catches a prompt-override and restores the
 tree before Phase 5 so a misbehaving validator cannot poison the
-commit `/adamsreview:fix` will later produce.
+commit `/matthewsreview:fix` will later produce.
 
 **Gate on `pre_validator_clean`** (captured in Phase 0 step 0.8 after
 the dirty-tree gate resolves). When the user chose option 2
@@ -623,7 +623,7 @@ rather than `$scratch` — §4.4 may not have run if Phase 3 gated every
 candidate out:
 
 ```bash
-rm -rf -- "/tmp/adams-review-$review_id"
+rm -rf -- "/tmp/matthews-review-$review_id"
 ```
 
 ### 4.7. Log Phase 4 summary
