@@ -49,6 +49,10 @@ Prompt essence:
 > to identify cross-cutting concerns — findings whose fixes must happen
 > together because they share code, invariants, or root cause.
 >
+> **Source of truth:** read reviewed code via `git show
+> $reviewed_sha:<path>` (substituted below) — the working tree may
+> have drifted since the review started.
+>
 > **Findings (full validation_result included):**
 >
 > ```

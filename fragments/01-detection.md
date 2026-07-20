@@ -366,9 +366,23 @@ dispatches.
 
 Dispatch spec: role `light_lens` (default claude:sonnet), `subagent_type: general-purpose`.
 
+**Sharding (large diffs).** L1 reads the full diff inline and has
+twice hit the 30-minute sub-agent limit on multi-thousand-line PRs
+(killed once, resumed once at +348k tokens). When Phase 0's
+`lines_changed > 4000`, split `reviewed_files_all` into
+⌈lines_changed/4000⌉ balanced shards (never more than 3), generate one
+per-shard diff (`git diff $comparison_ref -- <shard files>`), and
+dispatch ONE L1 sub-agent per shard with only its subset's diff.
+Shard results merge at the Phase-1 join like any lens output —
+duplicates across shard boundaries are resolved by Phase 2 dedup, so
+no cross-shard coordination is needed. At 3 shards the per-shard diff
+stays ≲4000 lines regardless of PR size.
+
 Prompt body: `fragments/lens-prompts/L1.md` (read in step 1.3's bulk
 pre-read; its content is the L1 prompt body verbatim). Final prompt =
-shared invariants (from step 1.2.1) + lens body.
+shared invariants (from step 1.2.1) + lens body. When sharded, append
+to the prompt: "You are reviewing shard N of M — only the files in
+the diff below; other shards cover the rest of the PR."
 
 #### L2 — structural / blast-radius (role `deep_lens`; skipped if `trivial_mode`)
 

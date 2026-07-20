@@ -261,29 +261,49 @@ Prepend a one-line mode-aware header:
 After the main report body (the contents of `artifact.md`), add a
 **Next steps** block. Do NOT use ASK here.
 
-Render this block verbatim (with the review's actual threshold
-default):
+Build the rows from the finalized artifact's actual counts — no
+generic rows for work that doesn't exist. Compute in-context from the
+artifact:
+
+- `auto_eligible_count` — findings where `disposition ==
+  "confirmed_mechanical"` AND (`validation_lane == "deep"` OR
+  `human_confirmation != null`) AND `current_state == "open"`
+- `walkthrough_count` — open findings with `disposition` in
+  {`confirmed_manual`, `confirmed_report`} (deep) plus all open
+  light-lane `confirmed_*`
+- `preexisting_count` — open findings with `disposition ==
+  "pre_existing_report"`
+- `internal_only` — `reviewer_sources == ["internal"]`
+
+Then emit ONLY the rows whose counts are non-zero (plus the always
+row), in this order:
 
 ```markdown
 ---
 
 **Next steps**
 
-- **Apply the auto-eligible findings** — `/matthewsreview:fix 60`
-  applies every finding in the deep-lane "✓ Auto-fixable" table
-  that scores at or above the threshold. Light-lane rows are
-  skipped by default; promote them first with the walkthrough.
-
-- **Walk through the skipped findings** — `/matthewsreview:walkthrough`
-  presents each deep-lane manual finding and every light-lane row
-  one at a time with a briefing (what it's about, options, a
-  recommendation) and promotes the ones you approve with tailored
-  fix-hints. Posts a decisions log to the PR for audit. Works
-  same-session, later, or in a new session — the artifact persists
-  under `~/.matthews-reviews/`.
-
-You can run either step independently, or both in either order.
+- `/matthewsreview:fix <fix_threshold>` — applies N auto-fixable
+  finding(s), re-reviews, reverts regressions, commits survivors.
+  [only when auto_eligible_count > 0]
+- `/matthewsreview:walkthrough <walkthrough_threshold>` — M finding(s)
+  need human judgment; step through with briefings, promote the ones
+  you want auto-fixed. [only when walkthrough_count > 0]
+- K pre-existing issue(s) — the walkthrough files GitHub issues for
+  these. [only when preexisting_count > 0]
+- Add a second opinion — re-run with `--ensemble`, or
+  `/matthewsreview:add <paste>` to inject an external review.
+  [only when internal_only]
+- Work queue: `bin/artifact-render.py --input <artifact_path>
+  --format dispositions > DISPOSITIONS.md` — one row per finding with
+  suggested actions. [always]
 ```
+
+When every count is zero (clean review), the block collapses to the
+dispositions row only.
+
+`<fix_threshold>` / `<walkthrough_threshold>` are the resolved
+`gates.*` values (default 60).
 
 Then add (still chat-only, not in `artifact.md`):
 

@@ -122,9 +122,17 @@ run completes and the final structured report is flushed. A zero-byte
 `codex.out` mid-run is normal, not a failure signal — do not
 short-circuit polling based on it.
 
-Apply a reasonable timeout (e.g., 10 minutes — Codex can be slow on
-large diffs). On timeout, capture whatever output exists, mark the
-reviewer as `timed_out`, and continue.
+Deadline: size-scaled, not flat — observed manual extension on a
+10.7k-line PR:
+
+```bash
+ensemble_ceiling_sec=$(( 600 + 60 * lines_changed / 1000 ))
+[[ "$ensemble_ceiling_sec" -gt 1200 ]] && ensemble_ceiling_sec=1200
+```
+
+(default 600s + 60s per 1,000 changed lines, cap 2×.) On timeout,
+capture whatever output exists, mark the reviewer as `timed_out`, and
+continue.
 
 Capture these variables as the background shell resolves — the status
 computation below reads each one by name, so every branch must set
@@ -133,7 +141,7 @@ every variable:
 - `codex_exit_code` — integer exit code from the background shell
   (`BashOutput` exposes it when the shell exits); default `0` for the
   skipped branch.
-- `codex_timed_out` — `"true"` if the 10-minute deadline elapsed
+- `codex_timed_out` — `"true"` if the `$ensemble_ceiling_sec` deadline elapsed
   before the shell exited, else `"false"`.
 
 After the reviewer resolves, set the status variable that the

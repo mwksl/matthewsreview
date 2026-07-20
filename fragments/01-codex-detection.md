@@ -150,6 +150,14 @@ Per lens that runs, the orchestrator does:
      Phase 0 step 0.7.
    - L1, L4, L6, L7: no per-lens placeholders.
 
+   **L1 sharding (large diffs).** When Phase 0's `lines_changed >
+   4000`, dispatch L1 as ⌈lines_changed/4000⌉ balanced shards (never
+   more than 3), each with its own per-shard diff (`git diff
+   $comparison_ref -- <shard files>`) and the suffix "You are
+   reviewing shard N of M — only the files in the diff below." Same
+   rationale as the `:review` L1 shard rule (30-minute hangs on
+   multi-thousand-line PRs); shard outputs merge at the normalizer.
+
    The orchestrator can perform these substitutions in-context (string
    replace) before writing — no shell needed. If you DO want a shell
    one-liner, bash literal substitution is safe (immune to `&` /
@@ -248,8 +256,24 @@ case "$effort" in
     medium) ceiling=480 ;;    # 8 min
     high)   ceiling=900 ;;    # 15 min
     xhigh)  ceiling=1500 ;;   # 25 min
+    max)    ceiling=2100 ;;   # 35 min
+    ultra)  ceiling=2700 ;;   # 45 min
     *)      ceiling=900 ;;
 esac
+# Size scaling (observed: a 10.7k-line PR needed manual deadline
+# extension): base + 60s per 1,000 changed lines, capped at 2x base.
+size_bonus=$(( 60 * lines_changed / 1000 ))
+ceiling=$(( ceiling + size_bonus ))
+case "$effort" in
+    low)   max_ceiling=600 ;;
+    medium) max_ceiling=960 ;;
+    high)  max_ceiling=1800 ;;
+    xhigh) max_ceiling=3000 ;;
+    max)   max_ceiling=4200 ;;
+    ultra) max_ceiling=5400 ;;
+    *)     max_ceiling=1800 ;;
+esac
+[[ "$ceiling" -gt "$max_ceiling" ]] && ceiling=$max_ceiling
 
 poll=$(codex-poll.sh \
         --job "$job_id" \

@@ -154,14 +154,21 @@ For each chunk-agent's result:
    - **Extra ids** (in result but not dispatched): ignore + trace.md
      note (likely a hallucinated candidate id).
 
-4. **Write each score** per finding via `--set` (auto-appends to
-   `score_history`):
+4. **Write all scores in ONE batched call** (auto-appends each to
+    `score_history`). Do NOT loop per-finding `--set` invocations —
+    rapid sequential patch calls raced in production (values vanished
+    mid-loop on a 125-finding run); `--set-scores` does one load, N
+    mutations, one atomic write:
 
     ```bash
+    scores_tmp=$(mktemp -t matthews-scores.XXXXXX)
+    # Compose ONE JSON array across all chunks:
+    # [{"id":"F001","score_phase3":72,"reason":"<rationale>"}, ...]
+    printf '%s' "$all_chunk_tuples_json" > "$scores_tmp"
     artifact-patch.py \
-      --path "$artifact_path" --finding-id "$id" \
-      --set "score_phase3=$score" \
-      --set "reason=$score_rationale"
+      --path "$artifact_path" \
+      --set-scores @"$scores_tmp"
+    rm -f "$scores_tmp"
     ```
 
     (`reason` at this phase holds the scoring rationale; Phase 4's gate

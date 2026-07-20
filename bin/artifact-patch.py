@@ -983,6 +983,62 @@ def _derive_phase4_disposition(tup, idx, bands=DEFAULT_PHASE4_BANDS):
     }
 
 
+def cmd_set_scores(args):
+    """Batch Phase-3 score writes: one load, N mutations, one atomic write.
+
+    Replaces the per-finding `--set score_phase3=...` loop that raced on
+    rapid sequential invocations (observed: values vanished mid-loop on a
+    125-finding run). Tuples: {id, score_phase3 (number|null), reason?}.
+    First-fail-halt: any invalid tuple aborts before ANY write.
+    """
+    tuples = read_json_arg(args.set_scores, "--set-scores")
+
+    if not isinstance(tuples, list):
+        c.err_prompt(
+            f"--set-scores expects a JSON array, got {type(tuples).__name__}",
+            action="pass an array of {id, score_phase3, reason?} tuples."
+        )
+        return c.EXIT_USAGE
+
+    artifact = _load_or_fail(args.path)
+    seen = set()
+    for idx, tup in enumerate(tuples):
+        if not isinstance(tup, dict):
+            c.err_prompt(
+                f"--set-scores tuple #{idx} is not an object",
+                action="each tuple needs {id, score_phase3, reason?}."
+            )
+            return c.EXIT_VALIDATION
+        fid = tup.get("id")
+        if not fid or not isinstance(fid, str):
+            c.err_prompt(
+                f"--set-scores tuple #{idx}: missing or non-string 'id'",
+                action="every tuple names exactly one finding id."
+            )
+            return c.EXIT_VALIDATION
+        if fid in seen:
+            c.err_prompt(
+                f"--set-scores: duplicate id '{fid}' in batch",
+                action="one tuple per finding; duplicate writes would double-append score_history."
+            )
+            return c.EXIT_VALIDATION
+        seen.add(fid)
+        score = tup.get("score_phase3")
+        if score is not None and (not isinstance(score, (int, float)) or isinstance(score, bool)):
+            c.err_prompt(
+                f"--set-scores tuple #{idx} ({fid}): score_phase3 must be number or null, got {type(score).__name__}",
+                action="pass an integer 0-100, or null for the parse-failure below-gate path."
+            )
+            return c.EXIT_VALIDATION
+        finding = _find_finding(artifact, fid)
+        pairs = [("score_phase3", score)]
+        if "reason" in tup:
+            pairs.append(("reason", tup["reason"]))
+        _apply_finding_set(finding, pairs)
+
+    return _write_and_emit(args.path, artifact)
+
+
 def cmd_apply_decisions(args):
     """Apply a batch of Phase-4 decision tuples (§13.1, §21.2; Stage 2.5.B)."""
     decisions = read_json_arg(args.apply_decisions, "--apply-decisions")
@@ -2186,6 +2242,12 @@ def build_parser():
         metavar="AUTO_REC_PROMOTIONS_JSON",
         help="Phase 7.5 / walkthrough Step 4.5: batch-promote findings whose auto_fix_hint the user accepted. Array of {id, reviewer, reason?}. Inline/@file/-. First-fail-halt."
     )
+    mode.add_argument(
+        "--set-scores",
+        dest="set_scores",
+        metavar="SCORES_JSON",
+        help="Phase 3: batch score writes in ONE atomic write (replaces per-finding --set loops). Array of {id, score_phase3, reason?}. Inline/@file/-."
+    )
     return p
 
 
@@ -2277,6 +2339,12 @@ def main():
                 )
                 return c.EXIT_USAGE
             return cmd_apply_auto_fix_hints(args)
+        if args.set_scores is not None:
+            if args.set or args.set_json or args.append_fix_attempt or args.finding_id:
+                parser.error("--set-scores cannot combine with --set / --set-json / --append-fix-attempt / --finding-id (tuples carry their own finding ids)")
+            if args.dry_run:
+                parser.error("--set-scores does not support --dry-run (single atomic write; preflight on a throwaway path)")
+            return cmd_set_scores(args)
         if args.apply_auto_rec_promotions is not None:
             if args.set or args.set_json or args.append_fix_attempt or args.finding_id:
                 parser.error("--apply-auto-rec-promotions cannot combine with --set / --set-json / --append-fix-attempt / --finding-id (entries carry their own finding ids)")
@@ -2295,7 +2363,7 @@ def main():
         traceback.print_exc(file=sys.stderr)
         return c.EXIT_UNEXPECTED
 
-    parser.error("no mode selected (use --init, --add-finding, --add-findings, --delete-finding, --apply-decisions, --apply-fix-start, --apply-fix-outcomes, --apply-auto-fix-hints, --apply-auto-rec-promotions, --set, --set-json, or --append-fix-attempt)")
+    parser.error("no mode selected (use --init, --add-finding, --add-findings, --delete-finding, --apply-decisions, --apply-fix-start, --apply-fix-outcomes, --apply-auto-fix-hints, --apply-auto-rec-promotions, --set-scores, --set, --set-json, or --append-fix-attempt)")
 
 
 if __name__ == "__main__":

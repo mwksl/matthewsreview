@@ -820,6 +820,75 @@ def render_footer(artifact):
     return "🤖 Generated with the [matthewsreview](https://github.com/mwksl/matthewsreview) Claude Code Review Plugin"
 
 
+# ----- Dispositions export ----------------------------------------------
+
+def _effective_score(f):
+    return f.get("score_phase4") if f.get("score_phase4") is not None else f.get("score_phase3")
+
+
+def _suggested_action(f):
+    disp = f.get("disposition") or ""
+    if disp == "resolved":
+        return "done"
+    if disp == "pre_existing_report":
+        return "issue"
+    if disp == "uncertain":
+        return "judge"
+    if disp in ("disproven", "below_gate"):
+        return "skip"
+    if disp == "confirmed_mechanical":
+        # auto-eligible = deep lane + auto_fixable, or human-promoted
+        if f.get("human_confirmation") or (f.get("validation_lane") == "deep" and f.get("actionability") == "auto_fixable"):
+            return "fix"
+        return "walkthrough"
+    if disp in ("confirmed_manual", "confirmed_report"):
+        return "walkthrough"
+    return "judge"
+
+
+def render_dispositions(artifact):
+    """Flat ENGAGE/SKIP work-queue table — the machine-readable replacement
+    for hand-built disposition sweeps (GSD quick-task style)."""
+    findings = artifact.get("findings", [])
+    lines = [
+        f"# Dispositions — {artifact.get('review_id', '?')} ({artifact.get('head_branch', '?')})",
+        "",
+        "| # | File | Finding | Disposition | Score | State | Suggested action |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    engage = skip = 0
+    for f in findings:
+        action = _suggested_action(f)
+        disp = f.get("disposition") or ""
+        if disp.startswith("confirmed_") or disp == "uncertain":
+            engage += 1
+        else:
+            skip += 1
+        claim = (f.get("claim") or "").replace("|", "\\|").replace("\n", " ")
+        if len(claim) > 100:
+            claim = claim[:97] + "..."
+        score = _effective_score(f)
+        lines.append(
+            "| {id} | {file} | {claim} | {disp} | {score} | {state} | {action} |".format(
+                id=f.get("id", "?"),
+                file=file_link(f),
+                claim=claim,
+                disp=disp,
+                score=score if score is not None else "—",
+                state=f.get("current_state", "?"),
+                action=action,
+            )
+        )
+    lines += [
+        "",
+        f"**{engage} engage / {skip} skip** (engage = confirmed_* + uncertain; "
+        "actions: fix → `/matthewsreview:fix`, walkthrough → `/matthewsreview:walkthrough`, "
+        "issue → pre-existing, judge/skip → no action)",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 # ----- Assembly ---------------------------------------------------------
 
 def render(artifact):
@@ -859,6 +928,8 @@ def main():
     )
     p.add_argument("--input", required=True, help="path to artifact.json")
     p.add_argument("--output", help="path to artifact.md (stdout if omitted)")
+    p.add_argument("--format", choices=["markdown", "dispositions"], default="markdown",
+                   help="markdown = full report (default); dispositions = flat ENGAGE/SKIP work-queue table")
     args = p.parse_args()
 
     try:
@@ -881,7 +952,10 @@ def main():
         )
         return c.EXIT_VALIDATION
 
-    md = render(artifact)
+    if args.format == "dispositions":
+        md = render_dispositions(artifact)
+    else:
+        md = render(artifact)
     if args.output:
         Path(args.output).write_text(md)
         print(f"wrote {args.output}")

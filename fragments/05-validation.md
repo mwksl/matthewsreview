@@ -72,12 +72,24 @@ Prompt essence:
 >
 > **Candidate:** `<finding JSON>`
 > **CLAUDE.md paths:** `$claude_md_paths`
+> **Reviewed SHA:** `$reviewed_sha`
 >
 > **Read-only.** Do not use `Edit` or `Write`, and do not run Bash that
 > mutates the tree (no `git checkout`, no `git restore`, no writes into
 > tracked paths). If a fix is warranted, describe it in `fix_proposal` —
 > Phase 8 applies it. Any working-tree changes you make will be reverted
 > before Phase 5.
+>
+> **Source of truth: the reviewed commit, not the working tree.** The
+> review targets SHA `$reviewed_sha` (substituted below). The working
+> tree may have drifted since (branch switches, other sessions) — a
+> prior run produced bogus disproofs by reading a tree that had moved.
+> Read reviewed code via `git show $reviewed_sha:<path>` (and `git show
+> $reviewed_sha:<path> | sed -n 'X,Yp'` for ranges) for every file the
+> claim touches. Working-tree reads are allowed ONLY as supplementary
+> context, and must be labeled as such in your evidence. If you detect
+> `git rev-parse HEAD` != `$reviewed_sha`, note `head_drift: true` in
+> your evidence and continue against the pinned SHA regardless.
 >
 > Steps:
 > 1. **Confirm or disprove.** Trace the claim end-to-end in the code.
@@ -217,10 +229,16 @@ Prompt essence:
 > ```
 >
 > **CLAUDE.md paths:** `$claude_md_paths`
+> **Reviewed SHA:** `$reviewed_sha`
 > **trivial_mode:** `<true|false>` (when true, do NOT emit `actionability: auto_fixable` for ANY candidate — only `manual` or `report_only` per §13.9).
 >
 > **Read-only.** Do not use `Edit` or `Write`; describe any needed
 > change in each finding's `note` — it's not yours to apply.
+>
+> **Source of truth: the reviewed commit.** Read reviewed code via
+> `git show $reviewed_sha:<path>` — the working tree may have drifted
+> since the review started. Working-tree reads are supplementary
+> context only.
 >
 > Verify each finding's accuracy only: does the CLAUDE.md really
 > contain this rule? Does the adjacent comment really conflict? Adjust

@@ -557,9 +557,22 @@ You are the Phase 9 post-fix reviewer. Fix groups edited the working
 tree; nothing committed yet. Review each attempted finding against the
 current tree and classify.
 
+Source of truth (two pinned baselines — the working tree may have
+drifted since either was captured):
+- Finding evidence was validated against the review's `reviewed_sha`
+  ($reviewed_sha) — when you need the ORIGINAL code a finding
+  references, read it via `git show $reviewed_sha:<path>`.
+- Fix deltas are measured against `input_sha` ($input_sha, the tree
+  state when Phase 7 loaded) — when you need the pre-edit version of
+  a file a fix group touched, read it via `git show $input_sha:<path>`.
+If `git rev-parse HEAD` matches neither, the tree drifted mid-run —
+note `head_drift: true` in your per-finding evidence and continue
+against the pinned SHAs regardless.
+
 Run identity:
 - run_id: $run_id
 - input_sha: $input_sha
+- reviewed_sha: $reviewed_sha
 
 Attempted findings and their validation contexts:
 <jq output: each attempted finding's id, file, line_range, claim, plus
@@ -1110,6 +1123,19 @@ abort the block. `commit_sha` from 9c distinguishes the two branches.
    >
    > Commit: `$commit_sha`
    > PR comment: (URL if PR mode AND publish succeeded)
+
+   Then the state-aware hints block (rows only for work that exists):
+   count from the artifact — `remaining_walkthrough` = open
+   `confirmed_manual` / `confirmed_report` / light-lane `confirmed_*`;
+   `reverted_names` = the reverted groups' ids. Emit only non-zero rows:
+
+   > **Still open**
+   > - `/matthewsreview:walkthrough` — M finding(s) need human judgment.
+   >   [only when remaining_walkthrough > 0]
+   > - Reverted group(s) $reverted_names need manual attention — the
+   >   Phase 9 review found regressions; inspect
+   >   `git show $commit_sha` plus `trace.md` for the revert evidence.
+   >   [only when reverted_count > 0]
 
 #### No-commit branch (`commit_sha == null`)
 

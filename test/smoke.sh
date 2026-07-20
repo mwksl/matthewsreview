@@ -4985,6 +4985,65 @@ else
     fail "AD-6: missing-CLI path mismatch" "code=$code err=$ad_err"
 fi
 
+# DP-1: artifact-render.py --format dispositions emits one row per finding
+# plus a totals line; suggested actions follow the disposition mapping.
+dp_out=$("$TOOLS/artifact-render.py" --input "$FIX/artifact-seed.json" --format dispositions)
+dp_rows=$(printf '%s\n' "$dp_out" | grep -c '^| F0')
+dp_findings=$(jq '.findings | length' "$FIX/artifact-seed.json")
+if [[ "$dp_rows" == "$dp_findings" ]] \
+   && printf '%s\n' "$dp_out" | grep -qE '\*\*[0-9]+ engage / [0-9]+ skip\*\*'; then
+    pass "DP-1: dispositions export row count == findings count + totals line present"
+else
+    fail "DP-1: dispositions export mismatch" "rows=$dp_rows findings=$dp_findings"
+fi
+
+# CAL-1: calibration-report.py aggregates a synthetic history — demote
+# median, waste basis (disproven+uncertain)/total, band matrix row.
+CAL_HOME="$WORK/cal"
+mkdir -p "$CAL_HOME/slug-a/branch-x/rev_001" "$CAL_HOME/slug-b/nested/branch-y/rev_002"
+cp "$FIX/artifact-seed.json" "$CAL_HOME/slug-a/branch-x/rev_001/artifact.json"
+cp "$FIX/artifact-seed.json" "$CAL_HOME/slug-b/nested/branch-y/rev_002/artifact.json"
+printf '%s\n' '{"name":"scoring-gate","demote_rate":0.5}' > "$CAL_HOME/slug-a/branch-x/rev_001/phases.jsonl"
+printf '%s\n' '{"phase":"phase_1","tokens":1000}' > "$CAL_HOME/slug-a/branch-x/rev_001/tokens.jsonl"
+cal_out=$("$TOOLS/calibration-report.py" "$CAL_HOME")
+cal_findings=$(jq '[.findings[] | select(.disposition=="disproven" or .disposition=="uncertain")] | length' "$FIX/artifact-seed.json")
+cal_total=$(jq '.findings | length' "$FIX/artifact-seed.json")
+if printf '%s' "$cal_out" | grep -q 'Runs analyzed: \*\*2\*\*' \
+   && printf '%s' "$cal_out" | grep -q 'median \*\*0.500\*\*' \
+   && printf '%s' "$cal_out" | grep -qF "$(python3 -c "print(f'{$cal_findings/$cal_total:.1%}')")" \
+   && printf '%s' "$cal_out" | grep -q 'Score-band → disposition matrix'; then
+    pass "CAL-1: calibration report aggregates 2 runs (demote median, waste basis, band matrix)"
+else
+    fail "CAL-1: calibration aggregation mismatch" "$(printf '%s' "$cal_out" | head -12)"
+fi
+
+# SS-1: --set-scores batch — one call writes N scores, appends score_history
+SS_DIR="$WORK/ss"
+mkdir -p "$SS_DIR"
+cp "$FIX/artifact-seed.json" "$SS_DIR/art.json"
+"$TOOLS/artifact-patch.py" --path "$SS_DIR/art.json" \
+    --set-scores '[{"id":"F001","score_phase3":72,"reason":"r1"},{"id":"F002","score_phase3":null}]' >/dev/null
+ss_s1=$(jq -r '.findings[] | select(.id=="F001") | .score_phase3' "$SS_DIR/art.json")
+ss_h1=$(jq '[.findings[] | select(.id=="F001") | .score_history[] | select(.phase=="phase_3")] | length' "$SS_DIR/art.json")
+ss_s2=$(jq -r '.findings[] | select(.id=="F002") | .score_phase3' "$SS_DIR/art.json")
+if [[ "$ss_s1" == "72" && "$ss_h1" -ge 2 && "$ss_s2" == "null" ]] \
+   && "$TOOLS/artifact-validate.sh" --path "$SS_DIR/art.json" >/dev/null 2>&1; then
+    pass "SS-1: --set-scores batch writes scores + appends history + schema-valid"
+else
+    fail "SS-1: batch score write mismatch" "s1=$ss_s1 h1=$ss_h1 s2=$ss_s2"
+fi
+
+# SS-2: --set-scores duplicate id rejected before any write
+cp "$FIX/artifact-seed.json" "$SS_DIR/art2.json"
+ss_err=$("$TOOLS/artifact-patch.py" --path "$SS_DIR/art2.json" \
+    --set-scores '[{"id":"F001","score_phase3":1},{"id":"F001","score_phase3":2}]' 2>&1); code=$?
+ss_unchanged=$(jq -r '.findings[] | select(.id=="F001") | .score_phase3' "$SS_DIR/art2.json")
+if [[ $code -ne 0 && "$ss_err" == *"duplicate id 'F001'"* && "$ss_unchanged" == "85" ]]; then
+    pass "SS-2: --set-scores duplicate id rejected first-fail-halt (artifact untouched)"
+else
+    fail "SS-2: duplicate rejection mismatch" "code=$code unchanged=$ss_unchanged err=$ss_err"
+fi
+
 # ------------------------------------------------------------------ Project F: LLM output normalization
 #
 # Three helpers attack three distinct LLM-output-shape problems:

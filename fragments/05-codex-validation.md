@@ -180,8 +180,24 @@ case "$effort" in
     medium) ceiling=480 ;;    # 8 min
     high)   ceiling=900 ;;    # 15 min
     xhigh)  ceiling=1500 ;;   # 25 min
+    max)    ceiling=2100 ;;   # 35 min
+    ultra)  ceiling=2700 ;;   # 45 min
     *)      ceiling=900 ;;
 esac
+# Size scaling (observed: a 10.7k-line PR needed manual deadline
+# extension): base + 60s per 1,000 changed lines, capped at 2x base.
+size_bonus=$(( 60 * lines_changed / 1000 ))
+ceiling=$(( ceiling + size_bonus ))
+case "$effort" in
+    low)   max_ceiling=600 ;;
+    medium) max_ceiling=960 ;;
+    high)  max_ceiling=1800 ;;
+    xhigh) max_ceiling=3000 ;;
+    max)   max_ceiling=4200 ;;
+    ultra) max_ceiling=5400 ;;
+    *)     max_ceiling=1800 ;;
+esac
+[[ "$ceiling" -gt "$max_ceiling" ]] && ceiling=$max_ceiling
 
 poll=$(codex-poll.sh \
         --job "$job_id" \

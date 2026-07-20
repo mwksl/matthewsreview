@@ -131,6 +131,8 @@ case "$effort" in
     medium) ceiling=300 ;;    # 5 min
     high)   ceiling=480 ;;    # 8 min
     xhigh)  ceiling=720 ;;    # 12 min
+    max)    ceiling=960 ;;    # 16 min
+    ultra)  ceiling=1200 ;;   # 20 min
     *)      ceiling=480 ;;
 esac
 
