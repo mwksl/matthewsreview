@@ -110,7 +110,9 @@ cfg_get() { # file expr  — empty string when file missing or key absent
 
 # ---------------------------------------------------------------- merge
 # assoc-free (bash 3.2): tiers/roles kept as newline "key|value|source" lists.
+# shellcheck disable=SC2034  # used via eval indirection in set_kv/get_kv
 TIER_LIST=""   # deep|claude:opus|default
+# shellcheck disable=SC2034  # used via eval indirection in set_kv/get_kv
 ROLE_LIST=""   # deep_validate|claude:sonnet|repo-config (empty = inherit tier)
 GATES_JSON="$GATES_DEFAULT"
 
