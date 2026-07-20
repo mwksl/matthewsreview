@@ -213,6 +213,21 @@ apply_profile() { # file source — returns 10 when profile absent
     return 0
 }
 
+# Per-orchestrator tier defaults (user config only — machine-specific model
+# availability belongs to the user, not the repo). Applied between built-in
+# defaults and user tiers, so explicit tiers/roles still win:
+#   {"orchestrator_defaults": {"omp": {"tiers": {"deep": "omp:moonshot/kimi-k3"}}}}
+od_tiers=""
+if [[ -n "$USER_CFG" ]]; then
+    od_tiers=$(jq -c --arg o "$ORCHESTRATOR" '.orchestrator_defaults[$o].tiers // empty' "$USER_CFG" 2>/dev/null)
+fi
+if [[ -n "$od_tiers" && "$od_tiers" != "null" ]]; then
+    for k in deep light utility; do
+        v=$(jq -r --arg k "$k" '.[$k] // empty' <<<"$od_tiers")
+        [[ -n "$v" ]] && set_kv TIER_LIST "$k" "$v" "orchestrator-default($ORCHESTRATOR)"
+    done
+fi
+
 apply_file "$USER_CFG" "user-config"
 apply_file "$REPO_CFG" "repo-config"
 
@@ -319,6 +334,17 @@ for role in ensemble_detect codex_detect codex_validate codex_crosscut; do emit_
 WARNINGS="[]"
 if [[ -n "${LEGACY_WARN:-}" ]]; then
     WARNINGS=$(jq -c --arg w "$LEGACY_WARN" '. + [$w]' <<<"$WARNINGS")
+fi
+
+# Availability hint: claude:* roles under the omp orchestrator dispatch via
+# the eval bridge, which requires Anthropic auth in omp. Without it the
+# dispatch 404s ("claude models not served"). Warn at resolution so the
+# preflight Model plan table surfaces it before any token spend.
+if [[ "$ORCHESTRATOR" == "omp" ]]; then
+    claude_roles=$(jq -r '[to_entries[] | select(.value.engine == "claude") | .key] | join(", ")' <<<"$ROLES_JSON")
+    if [[ -n "$claude_roles" ]]; then
+        WARNINGS=$(jq -c --arg w "roles using claude: ($claude_roles) require Anthropic auth in omp — if dispatch 404s, set orchestrator_defaults.omp.tiers in ~/.matthews-reviews/config.json (e.g. \"deep\": \"omp:moonshot/kimi-k3\")" '. + [$w]' <<<"$WARNINGS")
+    fi
 fi
 
 jq -n \

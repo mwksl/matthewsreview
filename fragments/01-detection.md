@@ -542,6 +542,15 @@ along with `phase_1_start_epoch`) and are committed at the join step
 
 For each sub-agent result, in the order it returns:
 
+0. **Dispatch failure handling.** If a lens's DISPATCH itself fails
+   (tool error, non-zero exit, engine 404/429, no result at all —
+   distinct from a returned-but-unparseable result), append
+   `lens_dropped_dispatch_failed: lens=<lens-tag> error=<one-line>` to
+   `$trace_log_path` and move on to the next lens. The lens contributes
+   zero candidates this run. Step 1.6 counts the tag into
+   `lens_dispatch_failures` (structured `phases.jsonl` field — Phase
+   6.4b reads it to mark the run degraded).
+
 1. **Log tokens first** (§24.4 — "cost accounted even for failed agents").
    Parse the sub-agent's `<usage>total_tokens: N</usage>` block. If the
    Agent tool result exposes a structured `usage` field directly, prefer
@@ -975,17 +984,20 @@ add_findings_rejected=$(grep -c '^add-findings-rejected:' "$trace_log_path" 2>/d
 jq_builder_count_drops=$(grep -c '^phase_1_jq_builder_count_drop:' "$trace_log_path" 2>/dev/null || true)
 add_findings_total_failures=$(grep -c '^phase_1_add_findings_total_failure:' "$trace_log_path" 2>/dev/null || true)
 
+lens_dispatch_failures=$(grep -c '^lens_dropped_dispatch_failed:' "$trace_log_path" 2>/dev/null || true)
+
 log-phase.sh \
   --review-dir "$review_dir" --phase 1 --name detection \
   --elapsed "$phase_1_elapsed" \
-  --summary "total=$total_candidates; counts_by_family=$counts_by_family; skipped_lenses=<list-if-any>; lens_drops=$lens_drops; origin_crosscheck_skipped=$oc_skipped; add_findings_rejected=$add_findings_rejected; jq_builder_count_drops=$jq_builder_count_drops; add_findings_total_failures=$add_findings_total_failures"
+  --summary "total=$total_candidates; counts_by_family=$counts_by_family; skipped_lenses=<list-if-any>; lens_drops=$lens_drops; lens_dispatch_failures=$lens_dispatch_failures; origin_crosscheck_skipped=$oc_skipped; add_findings_rejected=$add_findings_rejected; jq_builder_count_drops=$jq_builder_count_drops; add_findings_total_failures=$add_findings_total_failures"
 
 log-phase.sh \
   --review-dir "$review_dir" --phase 1 --record "$(jq -nc \
     --arg name detection \
     --argjson elapsed "$phase_1_elapsed" \
     --argjson total "$total_candidates" \
-    '{name:$name, elapsed_sec:$elapsed, counts_by_state:{open:$total}, counts_by_disposition:{pending_validation:$total}, delta:"+\($total) open"}')"
+    --argjson lens_dispatch_failures "$lens_dispatch_failures" \
+    '{name:$name, elapsed_sec:$elapsed, counts_by_state:{open:$total}, counts_by_disposition:{pending_validation:$total}, delta:"+\($total) open", lens_dispatch_failures:$lens_dispatch_failures}')"
 ```
 
 Under `--ensemble`, `phase_1_elapsed` and Phase 1.5's elapsed will overlap — both phases share a dispatch-turn start boundary; the overlap is the intended observability signal.

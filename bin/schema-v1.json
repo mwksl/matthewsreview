@@ -93,7 +93,8 @@
     "metrics": { "$ref": "#/$defs/metrics" },
     "base_context": { "$ref": "#/$defs/base_context" },
     "model_plan": { "$ref": "#/$defs/model_plan" },
-    "gates": { "$ref": "#/$defs/gates" }
+    "gates": { "$ref": "#/$defs/gates" },
+    "degraded": { "$ref": "#/$defs/degraded" }
   },
 
   "$defs": {
@@ -101,6 +102,11 @@
       "description": "Resolved per-role model plan for the current lifecycle command, written by review-config.sh at Phase 0 (review) / load time (fix, add, walkthrough, promote). Optional — pre-v1.0 artifacts omit it. Each command re-resolves fresh; the field reflects the most recent invocation.",
       "type": "object",
       "required": ["orchestrator", "roles"],
+      "additionalProperties": true
+    },
+    "degraded": {
+      "description": "Set by Phase 6.4b when any lens dispatch failed during the run. Presence with a non-zero count means the finding list has partial coverage — the renderer emits a REVIEW DEGRADED banner. Optional — absent means all detection lanes completed.",
+      "type": "object",
       "additionalProperties": true
     },
     "gates": {

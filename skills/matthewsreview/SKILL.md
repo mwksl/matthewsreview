@@ -48,6 +48,8 @@ The preflight output prints the resolved **Model plan** table (role / engine / m
 
 Role strings are `engine:model[:effort]`; the effort segment is codex-only (`low|medium|high|xhigh|max|ultra`).
 
+**Running on omp models.** `omp:` engine roles dispatch to any model your omp serves (`omp models`). Per-run: `--models "deep=omp:moonshot/kimi-k3,light=omp:moonshot/kimi-k3,utility=omp:moonshot/kimi-k3"`. Permanent: `orchestrator_defaults.omp.tiers` in `~/.matthews-reviews/config.json` — omp sessions use those, Claude Code keeps `claude:*`. `claude:*` roles under omp need Anthropic auth in omp; unservable roles warn in the preflight Model plan and 404 at dispatch (run marked REVIEW DEGRADED).
+
 ## After the review: the artifact as a work queue
 
 - **Dispositions table** — `bin/artifact-render.py --format dispositions --artifact <path>/artifact.json > DISPOSITIONS.md` emits the full findings table with suggested actions (fix / walkthrough / issue / judge / skip) and engage/skip totals. This replaces hand-built ENGAGE/SKIP passes.

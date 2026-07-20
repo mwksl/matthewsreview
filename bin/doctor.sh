@@ -70,6 +70,22 @@ if [[ "$found_harness" == "0" ]]; then
     fix "install Claude Code, Codex CLI, or Oh My Pi"
 fi
 
+# --- model availability (per harness) --------------------------------------
+# A role whose model the active harness can't serve fails at dispatch time,
+# deep into a run. Probe resolvability upfront for the default tier models.
+if command -v omp >/dev/null 2>&1 && command -v review-config.sh >/dev/null 2>&1; then
+    plan_json=$(review-config.sh --repo-root "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" --orchestrator omp 2>/dev/null || true)
+    if [[ -n "$plan_json" ]]; then
+        plan_warn=$(printf '%s' "$plan_json" | jq -r '.warnings[0] // empty')
+        if [[ -n "$plan_warn" ]]; then
+            say WARN "models: $plan_warn"
+            fix "set orchestrator_defaults.omp.tiers in ~/.matthews-reviews/config.json"
+        else
+            say PASS "models: default roles resolve for omp orchestrator"
+        fi
+    fi
+fi
+
 # --- config ---------------------------------------------------------------
 for cfg in "$HOME/.matthews-reviews/config.json" ".matthewsreview.json"; do
     if [[ -f "$cfg" ]]; then

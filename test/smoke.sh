@@ -5044,6 +5044,86 @@ else
     fail "SS-2: duplicate rejection mismatch" "code=$code unchanged=$ss_unchanged err=$ss_err"
 fi
 
+# RC-11: orchestrator_defaults.omp.tiers apply between defaults and user
+# tiers (omp harness gets omp-native models without per-run flags)
+cat > "$RC_HOME/.matthews-reviews/config.json" <<'EOF'
+{"orchestrator_defaults":{"omp":{"tiers":{"deep":"omp:moonshot/kimi-k3","light":"omp:moonshot/kimi-k3"}}}}
+EOF
+rc_out=$(rc_run --orchestrator omp)
+rc_deep=$(printf '%s' "$rc_out" | jq -r '.roles.deep_validate | "\(.engine):\(.model)|\(.source)"')
+rc_util=$(printf '%s' "$rc_out" | jq -r '.roles.dedup | "\(.engine):\(.model)|\(.source)"')
+if [[ "$rc_deep" == "omp:moonshot/kimi-k3|orchestrator-default(omp) (tier:deep)" \
+   && "$rc_util" == "claude:sonnet|default (tier:utility)" ]]; then
+    pass "RC-11: orchestrator_defaults.omp.tiers override defaults only (utility untouched)"
+else
+    fail "RC-11: orchestrator_defaults mismatch" "deep=$rc_deep util=$rc_util"
+fi
+
+# RC-12: omp orchestrator + claude:* roles → availability warning names the
+# roles + the orchestrator_defaults fix; claude-code orchestrator warns never
+cat > "$RC_HOME/.matthews-reviews/config.json" <<'EOF'
+{}
+EOF
+rc_out=$(rc_run --orchestrator omp)
+rc_warn=$(printf '%s' "$rc_out" | jq -r '.warnings[0]')
+rc_out2=$(rc_run --orchestrator claude-code)
+rc_warn2=$(printf '%s' "$rc_out2" | jq -r '.warnings | length')
+if [[ "$rc_warn" == *"require Anthropic auth in omp"* && "$rc_warn" == *"orchestrator_defaults.omp.tiers"* && "$rc_warn2" == "0" ]]; then
+    pass "RC-12: omp+claude roles produce availability warning; claude-code clean"
+else
+    fail "RC-12: availability warning mismatch" "warn=$rc_warn warn2=$rc_warn2"
+fi
+rm -f "$RC_HOME/.matthews-reviews/config.json"
+
+# DG-1: degraded field → renderer emits the REVIEW DEGRADED banner at the
+# top of artifact.md (the published-comment loud-failure surface)
+DG_DIR="$WORK/dg"
+mkdir -p "$DG_DIR"
+cp "$FIX/artifact-seed.json" "$DG_DIR/art.json"
+"$TOOLS/artifact-patch.py" --path "$DG_DIR/art.json" \
+    --set-json 'degraded={"lens_dispatch_failures":6}' >/dev/null
+dg_md=$("$TOOLS/artifact-render.py" --input "$DG_DIR/art.json")
+if printf '%s' "$dg_md" | head -5 | grep -q 'REVIEW DEGRADED — 6 lens dispatch' \
+   && "$TOOLS/artifact-validate.sh" --path "$DG_DIR/art.json" >/dev/null 2>&1; then
+    pass "DG-1: degraded field renders top-of-report banner + schema-valid"
+else
+    fail "DG-1: degraded banner mismatch" "$(printf '%s' "$dg_md" | head -5)"
+fi
+
+# DG-2: no banner without the field
+dg_md2=$("$TOOLS/artifact-render.py" --input "$FIX/artifact-seed.json")
+if ! printf '%s' "$dg_md2" | grep -q 'REVIEW DEGRADED'; then
+    pass "DG-2: no banner when degraded field absent"
+else
+    fail "DG-2: unexpected banner on clean artifact"
+fi
+
+# DG-3: Phase 6.4b's jq computes the count from phases.jsonl's
+# lens_dispatch_failures record field (the wired Phase-1 record shape)
+printf '%s\n' \
+  '{"name":"detection","elapsed_sec":10,"lens_dispatch_failures":6}' \
+  '{"name":"dedup","elapsed_sec":2}' > "$DG_DIR/phases.jsonl"
+dg_count=$(jq -s '[.[] | select(.lens_dispatch_failures != null) | .lens_dispatch_failures] | add // 0' "$DG_DIR/phases.jsonl")
+if [[ "$dg_count" == "6" ]]; then
+    pass "DG-3: 6.4b jq aggregation reads lens_dispatch_failures from phases.jsonl"
+else
+    fail "DG-3: jq aggregation mismatch" "count=$dg_count"
+fi
+
+# DG-4: the fragment wires the failure path end-to-end (tag write site,
+# 1.6 counter, summary field, record field, 6.4b patch call)
+dg_frag="$REPO/fragments/01-detection.md"
+dg_fin="$REPO/fragments/07-finalize.md"
+if grep -q 'lens_dropped_dispatch_failed: lens=<lens-tag>' "$dg_frag" \
+   && grep -q "grep -c '\^lens_dropped_dispatch_failed:'" "$dg_frag" \
+   && grep -q 'lens_dispatch_failures=$lens_dispatch_failures' "$dg_frag" \
+   && grep -q 'lens_dispatch_failures:$lens_dispatch_failures' "$dg_frag" \
+   && grep -q 'lens_dispatch_failures:$n' "$dg_fin"; then
+    pass "DG-4: fragments wire dispatch-failure path (tag, counter, summary, record, 6.4b)"
+else
+    fail "DG-4: fragment wiring incomplete"
+fi
+
 # ------------------------------------------------------------------ Project F: LLM output normalization
 #
 # Three helpers attack three distinct LLM-output-shape problems:

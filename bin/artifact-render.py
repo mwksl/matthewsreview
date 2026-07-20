@@ -891,12 +891,29 @@ def render_dispositions(artifact):
 
 # ----- Assembly ---------------------------------------------------------
 
+def render_degraded_banner(artifact):
+    """Prominent top-of-report warning when Phase 6.4b marked the run
+    degraded — without it a partial-coverage artifact reads as clean."""
+    degraded = artifact.get("degraded") or {}
+    n = degraded.get("lens_dispatch_failures") or 0
+    if not n:
+        return ""
+    return (
+        f"> ⚠ **REVIEW DEGRADED — {n} lens dispatch(es) failed** (see `trace.md`). "
+        "Findings below reflect partial coverage, NOT a clean review. "
+        "Re-run after resolving the dispatch failures (model/auth availability "
+        "is the usual cause — check the Model plan against what your harness "
+        "can serve).\n"
+    )
+
+
 def render(artifact):
     buckets = findings_by_disposition(artifact)
     cross_cutting = artifact.get("cross_cutting_groups") or []
 
     sections = [
         MARKER,
+        render_degraded_banner(artifact),
         render_header(artifact),
         render_summary(buckets),
         "---",

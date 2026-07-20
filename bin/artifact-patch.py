@@ -362,6 +362,7 @@ JSON_SETTABLE_ARTIFACT_FIELDS = frozenset({
     "reviewer_sources",
     "model_plan",
     "gates",
+    "degraded",
 })
 
 

@@ -152,6 +152,28 @@ log-phase.sh \
     '{name:"finalize", elapsed_sec:0, counts_by_state:$by_state, counts_by_disposition:$by_disp}')"
 ```
 
+### 6.4b. Mark degraded runs (BEFORE render)
+
+A zero-finding report is indistinguishable from a clean review unless
+failures are surfaced — detection failures live in
+`phases.jsonl`/`trace.md`, not in the finding list, and the published
+`artifact.md`/PR comment persists long after any chat-only warning
+scrolls away. Compute and store:
+
+```bash
+degraded_count=$(jq -s '[.[] | select(.lens_dispatch_failures != null)
+  | .lens_dispatch_failures] | add // 0' "$phases_log_path")
+if [[ "$degraded_count" -gt 0 ]]; then
+    artifact-patch.py --path "$artifact_path" \
+      --set-json "degraded=$(jq -nc --argjson n "$degraded_count" \
+        '{lens_dispatch_failures:$n}')"
+fi
+```
+
+The renderer emits a prominent `⚠ REVIEW DEGRADED` block at the top of
+`artifact.md` whenever the field is present and non-zero — covering
+the chat mirror, the published PR comment, and any later re-render.
+
 ### 6.5. Render `artifact.md`
 
 ```bash
