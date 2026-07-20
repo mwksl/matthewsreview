@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --quiet --script
 # /// script
 # requires-python = ">=3.10"
 # ///
@@ -21,10 +21,12 @@ Per run directory (<root>/<slug>/<branch>/<rev_*>/):
 Exit codes: 0 OK, 1 no runs found / bad root, 64 usage.
 """
 import json
+import os
 import re
 import statistics
 import sys
 from pathlib import Path
+import _common as c
 
 BANDS = [(0, 45, "0-44"), (45, 60, "45-59"), (60, 75, "60-74"), (75, 101, "75+")]
 DISPOSITIONS = [
@@ -82,23 +84,35 @@ def load_runs(root: Path):
 
 def main(argv):
     if len(argv) > 2:
-        print("usage: calibration-report.py [reviews-root]", file=sys.stderr)
-        return 64
+        c.err_prompt(
+            "expected at most one reviews-root argument",
+            action="run calibration-report.py [reviews-root].",
+        )
+        return c.EXIT_USAGE
     if len(argv) == 2:
         root = Path(argv[1]).expanduser()
     else:
-        root = Path.home() / ".matthews-reviews"
-        if not root.is_dir():
-            root = Path.home() / ".adams-reviews"
+        configured_root = os.environ.get("MATTHEWS_REVIEW_REVIEWS_ROOT")
+        if configured_root:
+            root = Path(configured_root).expanduser()
+        else:
+            root = Path.home() / ".matthews-reviews"
+            if not root.is_dir():
+                root = Path.home() / ".adams-reviews"
     if not root.is_dir():
-        print(f"ERROR: reviews root not found: {root}", file=sys.stderr)
-        print("Action: pass the root explicitly: calibration-report.py <root>", file=sys.stderr)
-        return 1
+        c.err_prompt(
+            f"reviews root not found: {root}",
+            action="set MATTHEWS_REVIEW_REVIEWS_ROOT or pass the root explicitly: calibration-report.py <root>.",
+        )
+        return c.EXIT_VALIDATION
 
     runs = list(load_runs(root))
     if not runs:
-        print(f"ERROR: no runs found under {root}", file=sys.stderr)
-        return 1
+        c.err_prompt(
+            f"no runs found under {root}",
+            action="point calibration-report.py at a reviews root containing rev_*/artifact.json files.",
+        )
+        return c.EXIT_VALIDATION
 
     out = [f"# Calibration report — {root}", "",
            f"Runs analyzed: **{len(runs)}**", ""]
@@ -173,7 +187,7 @@ def main(argv):
     out.append("")
 
     sys.stdout.write("\n".join(out))
-    return 0
+    return c.EXIT_OK
 
 
 if __name__ == "__main__":

@@ -40,14 +40,16 @@ Otherwise, capture the list as `xc_input_json` and proceed.
 ### 5.2. Dispatch the cross-cutting sub-agent
 
 Launch one sub-agent with role `cross_cutting` (default claude:opus).
-No tool access needed;
-input is the serialized findings in the prompt.
+It needs read-only repository access; it must not edit the working tree.
 
 Prompt essence:
 
 > You are reviewing a set of confirmed, actionable deep-lane findings
 > to identify cross-cutting concerns — findings whose fixes must happen
 > together because they share code, invariants, or root cause.
+>
+> **Run identity:** `reviewed_sha: $reviewed_sha` (substitute the
+> Phase-0 value before dispatch).
 >
 > **Source of truth:** read reviewed code via `git show
 > $reviewed_sha:<path>` (substituted below) — the working tree may

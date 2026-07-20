@@ -2,14 +2,17 @@
 
 ### 7.1. Resolve argument flags
 
-Parse `$ARGUMENTS` (whitespace-split):
-- First token that parses as a non-negative integer → `threshold`.
+Parse `$ARGUMENTS` left-to-right, respecting quoted values:
+- One non-negative integer positional token → `threshold`; a second
+  positional token is a usage error.
 - `--granular-commits` → `granular_commits=true` (else `false`).
-- Any other token → stop and ask the user to clarify.
+- `--profile <name>` → `profile`; `--models "<csv>"` → `models_csv`.
+  Each value-taking flag requires the next non-empty token.
+- Any unknown option or unconsumed token → stop with a usage error.
 
 If no integer was provided, `threshold` is set by step 7.2b from the
-resolved `gates.fix_threshold` (default 60). Record both in your
-working context.
+resolved `gates.fix_threshold` (default 60). Capture `profile`,
+`models_csv`, `threshold`, and `granular_commits` in working context.
 
 ### 7.2. Locate the artifact via `latest.txt`
 
@@ -51,7 +54,7 @@ table so the user sees which models the fix agents will run:
 plan_args=(--repo-root "$repo_root" --orchestrator "$harness_id")
 [[ -n "${profile:-}" ]] && plan_args+=(--profile "$profile")
 [[ -n "${models_csv:-}" ]] && plan_args+=(--models "$models_csv")
-model_plan_json=$(review-config.sh "${plan_args[@]}")
+model_plan_json=$(review-config.sh "${plan_args[@]}") || exit $?
 plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX)
 printf '%s' "$model_plan_json" > "$plan_tmp"
 artifact-patch.py --path "$artifact_path" \
@@ -160,10 +163,10 @@ collide with in-flight edits.
 Derive `latest_known_sha`:
 
 ```bash
-latest_known_sha=$(jq -r '
-    ( [.findings[].fix_attempts[]?.output_sha | select(. != null)] | last )
-    // .reviewed_sha
-' "$artifact_path")
+latest_known_sha=$(artifact-read.sh \
+    --path "$artifact_path" \
+    --filter '([.findings[].fix_attempts[]?.output_sha | select(. != null)] | last) // .reviewed_sha' \
+    | jq -r '.')
 ```
 
 The fallback chain: most recent non-null `fix_attempts[-1].output_sha`
@@ -242,7 +245,8 @@ operator still needs a trail showing the count came from a possibly
 stale local ref.
 
 ```bash
-base_branch=$(jq -r '.base_branch' "$artifact_path")
+base_branch=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.base_branch' | jq -r '.')
 fetch_ok=true
 if command -v timeout >/dev/null 2>&1; then
     GIT_TERMINAL_PROMPT=0 timeout 30 git fetch origin \
@@ -365,9 +369,12 @@ If `$behind > 0`, ASK once:
 Load `mode` and `pr_number` from the artifact:
 
 ```bash
-mode=$(jq -r '.mode' "$artifact_path")
-pr_number=$(jq -r '.pr_number // empty' "$artifact_path")
-comment_id=$(jq -r '.comment_id // empty' "$artifact_path")
+mode=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.mode' | jq -r '.')
+pr_number=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.pr_number // empty' | jq -r '.')
+comment_id=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.comment_id // empty' | jq -r '.')
 ```
 
 If `mode == "pr"` AND `pr_number` is non-empty:
@@ -875,6 +882,9 @@ Skip when no promotions or edits landed (i.e. both `promoted_ids` and
 populated are degenerate and shouldn't post a no-op comment).
 
 ```bash
+autorec_artifact_snapshot=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.')
+
 if [[ "$mode" == "pr" && -n "$pr_number" ]] && \
    (( ${#promoted_ids[@]} > 0 || ${#edited_ids[@]} > 0 )); then
     decisions_body=$(mktemp -t matthews-fix-autorec-body.XXXXXX)
@@ -890,12 +900,12 @@ if [[ "$mode" == "pr" && -n "$pr_number" ]] && \
         if (( ${#promoted_ids[@]} > 0 )); then
             printf '#### Promoted (batch)\n\n'
             for fid in "${promoted_ids[@]}"; do
-                claim_first=$(jq -r --arg id "$fid" \
-                    '.findings[] | select(.id == $id) | .claim | split("\n") | .[0]' \
-                    "$artifact_path")
-                hint=$(jq -r --arg id "$fid" \
-                    '.findings[] | select(.id == $id) | .auto_fix_hint.hint' \
-                    "$artifact_path")
+                claim_first=$(printf '%s' "$autorec_artifact_snapshot" \
+                    | jq -r --arg id "$fid" \
+                        '.findings[] | select(.id == $id) | .claim | split("\n") | .[0]')
+                hint=$(printf '%s' "$autorec_artifact_snapshot" \
+                    | jq -r --arg id "$fid" \
+                        '.findings[] | select(.id == $id) | .auto_fix_hint.hint')
                 printf -- '- **%s** — %s\n  - **Hint:** `%s`\n' "$fid" "$claim_first" "$hint"
             done
             printf '\n'
@@ -903,12 +913,12 @@ if [[ "$mode" == "pr" && -n "$pr_number" ]] && \
         if (( ${#edited_ids[@]} > 0 )); then
             printf '#### Promoted (alternative or edited hint)\n\n'
             for fid in "${edited_ids[@]}"; do
-                claim_first=$(jq -r --arg id "$fid" \
-                    '.findings[] | select(.id == $id) | .claim | split("\n") | .[0]' \
-                    "$artifact_path")
-                hint=$(jq -r --arg id "$fid" \
-                    '.findings[] | select(.id == $id) | .human_confirmation.fix_hint // "—"' \
-                    "$artifact_path")
+                claim_first=$(printf '%s' "$autorec_artifact_snapshot" \
+                    | jq -r --arg id "$fid" \
+                        '.findings[] | select(.id == $id) | .claim | split("\n") | .[0]')
+                hint=$(printf '%s' "$autorec_artifact_snapshot" \
+                    | jq -r --arg id "$fid" \
+                        '.findings[] | select(.id == $id) | .human_confirmation.fix_hint // "—"')
                 printf -- '- **%s** — %s\n  - **Hint:** `%s`\n' "$fid" "$claim_first" "$hint"
             done
             printf '\n'
@@ -916,9 +926,9 @@ if [[ "$mode" == "pr" && -n "$pr_number" ]] && \
         if (( ${#skipped_ids[@]} > 0 )); then
             printf '#### Skipped during per-finding review\n\n'
             for fid in "${skipped_ids[@]}"; do
-                claim_first=$(jq -r --arg id "$fid" \
-                    '.findings[] | select(.id == $id) | .claim | split("\n") | .[0]' \
-                    "$artifact_path")
+                claim_first=$(printf '%s' "$autorec_artifact_snapshot" \
+                    | jq -r --arg id "$fid" \
+                        '.findings[] | select(.id == $id) | .claim | split("\n") | .[0]')
                 printf -- '- **%s** — %s\n' "$fid" "$claim_first"
             done
             printf '\n'

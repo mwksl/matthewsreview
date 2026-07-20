@@ -11,13 +11,14 @@ variables Phase 1's summary will reference:
 - `candidate_count=0` — total candidates the normalizer emitted, set
   after §1.5.2's batched `--add-findings` returns.
 
-This fragment is the codex-review counterpart to `fragments/01-detection.md`.
-Where the canonical fragment dispatches 6–7 Claude `Agent` blocks (one per
-lens), this fragment dispatches 7 parallel **Codex jobs** via the
-`codex-companion.mjs` plugin's `task --background` primitive — captures
-each `jobId`, polls to terminal, fetches the freeform output, and feeds
-all 7 outputs into one **Sonnet normalizer** that emits the standard
-candidate JSON shape.
+This fragment is the codex-review counterpart to
+`fragments/01-detection.md`. Where the canonical fragment dispatches
+6–7 Claude `Agent` blocks, this fragment dispatches 7 parallel Codex
+jobs through the transport selected by `codex_launch_mode`: companion
+jobs when available, otherwise standalone `codex exec` children via
+`agent-dispatch.sh`. Both transports normalize to job ids, watchdog
+verdicts, raw output, and token counts before one normalizer emits the
+standard candidate JSON shape.
 
 Phases 0, 2, 3, and 6 are unchanged — codex-review reuses
 `fragments/00-preflight.md`, `fragments/03-dedup.md`,
@@ -65,12 +66,11 @@ Compute the diff scope once against `$comparison_ref` (per Phase 0 step
 git diff "$comparison_ref..HEAD"
 ```
 
-Codex jobs have filesystem access via codex-companion's `task` mode
-and run `git diff` themselves — the prompt body in
-`fragments/lens-prompts/L<N>.md` instructs them to read the diff
-between `$comparison_ref` and HEAD. The orchestrator does NOT pre-compute
-the diff and embed it; Codex's working directory is the repo root and
-the diff range is in the prompt's shared invariants (§1.2.1 below).
+Codex jobs have read-only filesystem access in both transports. The
+prompt body in `fragments/lens-prompts/L<N>.md` instructs each job to
+read the diff between `$comparison_ref` and HEAD. The orchestrator does
+not pre-compute and embed the full diff; the working directory is the
+repo root and the diff range is in the shared invariants (§1.2.1).
 
 `$claude_md_paths` (the list captured in Phase 0 step 0.7) is required
 for L3, L4, L5 prompts. The orchestrator substitutes the value into
@@ -193,164 +193,148 @@ Per lens that runs, the orchestrator does:
 
 ### 1.3. Dispatch the Codex jobs (one orchestrator turn)
 
-> **One turn for all lens launches — not one turn per lens.** Issue every
-> running lens's `node "$CODEX_COMPANION" task --background` Bash block in
-> a single orchestrator turn. Phase 1 wall-clock latency is
-> `max(codex_durations)`, not `sum(codex_durations)`. Serializing turns
-> up to ~7× the runtime budget.
+> **One turn for all lens launches — not one turn per lens.** Issue
+> every running lens's mode-aware launch block in one orchestrator turn.
+> Phase 1 wall-clock latency is `max(codex_durations)`, not
+> `sum(codex_durations)`.
 
-Launch each running lens's Codex job in a SINGLE orchestrator turn so
-they run concurrently. Each launch is a Bash tool-use:
+First materialize the resolved Codex role and scratch location:
 
 ```bash
-node "$CODEX_COMPANION" task --background --effort "$effort" \
-    --prompt-file "/tmp/matthews-review-codex-${review_id}-L${N}.md" \
-    --json
-```
-
-The companion returns a JSON launch payload on stdout. Extract the id
-with `jq -r '.jobId'` and capture into a working-context map keyed by
-lens slot:
-
-```bash
-codex_job_id=$(node "$CODEX_COMPANION" task --background --effort "$effort" \
-    --prompt-file "/tmp/matthews-review-codex-${review_id}-L${N}.md" \
-    --json | jq -r '.jobId')
-```
-
-Working-context map shape:
-
-```
-codex_job_ids = {
-  "L1": "<jobId>",
-  "L2": "<jobId>",
-  ...
+[[ "$role_codex_detect" == codex:* ]] || {
+    echo "ERROR: codex_detect must resolve to a codex: role for codex-review." >&2
+    echo "Action: set codex_detect=codex:<model>:<effort> or use the default." >&2
+    exit 1
 }
+codex_detect_spec="${role_codex_detect#codex:}"
+if [[ "$codex_detect_spec" == *:* ]]; then
+    codex_detect_model="${codex_detect_spec%%:*}"
+    codex_detect_effort="${codex_detect_spec#*:}"
+else
+    codex_detect_model="$codex_detect_spec"
+    codex_detect_effort=""
+fi
+[[ -n "$codex_detect_effort" ]] || codex_detect_effort="${effort:-high}"
+codex_dispatch_scratch="${scratch_dir:-/tmp/matthews-review-codex-$review_id/jobs}"
+mkdir -p "$codex_dispatch_scratch"
+[[ -z "${codex_readiness_note:-}" ]] || \
+    printf 'Phase 1 readiness: %s\n' "$codex_readiness_note" >> "$trace_log_path"
 ```
 
-Skipped lenses are absent from the map. Lenses that fail the launch
-itself (codex-companion exit != 0, or `.jobId` empty) are logged to
-`trace.md` with tag `phase_1_codex_launch_failed:L<N>` and dropped
-from the map; they proceed to the §1.4 retry-or-escalate path with a
-synthetic "launch failed" status.
+For each running lens, launch with the selected transport. Issue all
+of these blocks in one turn:
 
-**Tracking**: every lens that successfully receives a `jobId` joins
-the `codex_job_ids` map; this is the working-context source of truth
-for what's in flight. The §1.6 summary's `lenses_run` and
-`lenses_dropped` lists are filled in across §1.4 as jobs resolve.
+```bash
+prompt_file="/tmp/matthews-review-codex-${review_id}-L${N}.md"
+set +e
+if [[ "$codex_launch_mode" == "companion" ]]; then
+    launch_json=$(node "$CODEX_COMPANION" task --background \
+        --effort "$codex_detect_effort" --prompt-file "$prompt_file" --json)
+    launch_rc=$?
+    codex_job_id=$(printf '%s' "$launch_json" | jq -r '.jobId // empty')
+else
+    dispatch_args=("${MRB}agent-dispatch.sh" start --engine codex \
+        --prompt-file "$prompt_file" --scratch-dir "$codex_dispatch_scratch")
+    [[ -n "$codex_detect_model" ]] && dispatch_args+=(--model "$codex_detect_model")
+    [[ -n "$codex_detect_effort" ]] && dispatch_args+=(--effort "$codex_detect_effort")
+    launch_json=$("${dispatch_args[@]}")
+    launch_rc=$?
+    codex_job_id=$(printf '%s' "$launch_json" | jq -r '.job_id // empty')
+fi
+set -e
+```
+
+A non-zero `launch_rc` or empty `codex_job_id` is a synthetic launch
+failure: log `phase_1_codex_launch_failed:L<N> mode=<mode>` and route
+that lens through §1.4's retry policy. Successful ids join the
+working-context `codex_job_ids` map keyed by lens slot. Skipped lenses
+are absent. Preserve the mode alongside each id if different transports
+could be selected during recovery; normally the whole run uses one
+`codex_launch_mode`.
 
 ### 1.4. Poll the Codex jobs (subsequent orchestrator turns)
 
-> **One turn for all in-flight polls — not one turn per job.** Issue every
-> still-alive job's `codex-poll.sh` Bash block in the same orchestrator
-> turn (and re-poll the still-alive ones together on the next turn).
-> Polling one job per turn turns the 90s stall-detection cadence into
-> N×90s and silently lengthens the phase by an order of magnitude on
-> wide fan-outs.
+> **One turn for all in-flight polls — not one turn per job.** Issue
+> every still-alive job's mode-aware poll block in the same
+> orchestrator turn, then re-poll surviving jobs together.
 
-For each `jobId` in the map, poll via the watchdog helper:
+Compute the ceiling from the resolved role effort:
 
 ```bash
-case "$effort" in
-    low)    ceiling=300 ;;    # 5 min
-    medium) ceiling=480 ;;    # 8 min
-    high)   ceiling=900 ;;    # 15 min
-    xhigh)  ceiling=1500 ;;   # 25 min
-    max)    ceiling=2100 ;;   # 35 min
-    ultra)  ceiling=2700 ;;   # 45 min
+case "$codex_detect_effort" in
+    low)    ceiling=300 ;;
+    medium) ceiling=480 ;;
+    high)   ceiling=900 ;;
+    xhigh)  ceiling=1500 ;;
+    max)    ceiling=2100 ;;
+    ultra)  ceiling=2700 ;;
     *)      ceiling=900 ;;
 esac
-# Size scaling (observed: a 10.7k-line PR needed manual deadline
-# extension): base + 60s per 1,000 changed lines, capped at 2x base.
+base_ceiling=$ceiling
 size_bonus=$(( 60 * lines_changed / 1000 ))
 ceiling=$(( ceiling + size_bonus ))
-case "$effort" in
-    low)   max_ceiling=600 ;;
-    medium) max_ceiling=960 ;;
-    high)  max_ceiling=1800 ;;
-    xhigh) max_ceiling=3000 ;;
-    max)   max_ceiling=4200 ;;
-    ultra) max_ceiling=5400 ;;
-    *)     max_ceiling=1800 ;;
-esac
+max_ceiling=$(( base_ceiling * 2 ))
 [[ "$ceiling" -gt "$max_ceiling" ]] && ceiling=$max_ceiling
 
-poll=$(codex-poll.sh \
+if [[ "$codex_launch_mode" == "companion" ]]; then
+    poll=$(codex-poll.sh \
         --job "$job_id" \
         --companion "$CODEX_COMPANION" \
         --stall-threshold-sec 90 \
         --wall-clock-ceiling-sec "$ceiling")
+else
+    poll=$("${MRB}agent-dispatch.sh" poll \
+        --job "$job_id" \
+        --scratch-dir "$codex_dispatch_scratch" \
+        --stall-threshold-sec 90 \
+        --wall-clock-ceiling-sec "$ceiling")
+fi
 verdict=$(printf '%s' "$poll" | jq -r '.verdict')
 ```
 
-`codex-poll.sh` wraps `node "$CODEX_COMPANION" status --json` with a
-two-signal liveness check (logFile mtime + `result --json` desync
-probe) plus a wall-clock ceiling. See `bin/codex-poll.sh` and
-`plans/codex-watchdog.md` for the bug class — direct calls to
-`node "$CODEX_COMPANION" status` are forbidden in this fragment
-(smoke `CR-13c` enforces).
-
-Each call emits one verdict per `jobId`:
-
-| verdict | meaning | next action |
-|---|---|---|
-| `alive` | broker says running; logFile fresh | keep polling next turn |
-| `stalled_suspect` | logFile stale > 90s but broker still coherent | keep polling next turn |
-| `broker_desynced` | broker says running, disk store says "No job found" — confirmed dead | cancel + §3.7 retry |
-| `wall_clock_exceeded` | elapsed > effort-derived ceiling | cancel + §3.7 retry |
-| `completed` | terminal; `raw_output` is in the verdict | consume `raw_output`, exit poll loop |
-| `failed_terminal` | terminal `failed` / `cancelled` | §3.7 retry |
-
-Poll all jobs in one orchestrator turn (multiple Bash blocks, each
-polling a different job) until all are terminal. Claude Code's
-between-turn cadence provides natural pacing — no explicit sleep
-between turns.
-
-When verdict is `broker_desynced` or `wall_clock_exceeded`, cancel
-the job before routing into §3.7's retry path. Cancel is
-fire-and-forget — its outcome doesn't gate the next step, and the
-wall-clock-ceiling logic in `codex-poll.sh` re-fires regardless on
-the next poll. Background + `disown` is Bash 3.2-portable; `timeout`
-is GNU coreutils and isn't on stock macOS:
+Both helpers emit `alive`, `stalled_suspect`, `completed`,
+`failed_terminal`, and `wall_clock_exceeded`. `broker_desynced` is
+companion-only. Keep polling the two live verdicts; route terminal
+failures through the retry policy. On `broker_desynced` or
+`wall_clock_exceeded`, stop with the matching transport before retry:
 
 ```bash
-( node "$CODEX_COMPANION" cancel "$job_id" >/dev/null 2>&1 ) & disown
+if [[ "$codex_launch_mode" == "companion" ]]; then
+    ( node "$CODEX_COMPANION" cancel "$job_id" >/dev/null 2>&1 ) & disown
+else
+    "${MRB}agent-dispatch.sh" stop \
+        --job "$job_id" --scratch-dir "$codex_dispatch_scratch" \
+        >/dev/null 2>&1 || true
+fi
 elapsed_for_log=$(printf '%s' "$poll" | jq -r '.elapsed_sec // "null"')
-printf 'phase_1_codex_watchdog: lens=L<N> verdict=%s job=%s elapsed=%s\n' \
-    "$verdict" "$job_id" "$elapsed_for_log" >> "$trace_log_path"
-# fall through to §3.7 retry-with-orchestrator-judgment
+printf 'phase_1_codex_watchdog: lens=L<N> mode=%s verdict=%s job=%s elapsed=%s\n' \
+    "$codex_launch_mode" "$verdict" "$job_id" "$elapsed_for_log" \
+    >> "$trace_log_path"
 ```
 
-When verdict is `completed`, the `raw_output` field IS the freeform
-Codex stdout — the helper has already plucked
-`.storedJob.result.rawOutput` (with the documented
-`// .storedJob.payload.rawOutput // .storedJob.rawOutput // ""`
-fallback chain) so this fragment doesn't repeat the result fetch:
+On `completed`, both helpers place the freeform response in
+`raw_output`; standalone mode also reports parsed Codex usage:
 
 ```bash
-codex_output_L<N>=$(printf '%s' "$poll" | jq -r '.raw_output')
+codex_output_L<N>=$(printf '%s' "$poll" | jq -r '.raw_output // ""')
+codex_tokens_L<N>=$(printf '%s' "$poll" | jq -r '.tokens // "null"')
 ```
 
-Capture as `codex_output_L<N>`. An empty `raw_output` on a `completed`
-verdict still routes to the §3.7 retry path (the existing "completed
-but malformed" branch).
+Capture the output and token count in working context. Empty output
+still routes through the retry path.
+
 
 #### Retry-with-orchestrator-judgment (per plan §3.7)
 
-For each job, when the terminal state is `failed` / `cancelled`, OR
-when `state == completed` but the output looks malformed (empty,
-clearly truncated, doesn't resemble candidate-list output even loosely),
-the orchestrator inspects the failure context and decides:
+For each job, when launch fails, a terminal verdict fails, or a
+completed response is empty/malformed, inspect the failure context:
 
-1. **Likely transient** (rate limit, transient API error, single-output
-   JSON glitch, sentinel mismatch): retry up to **3 times** with the
-   same prompt file. Re-launch via `task --background --effort
-   "$effort" --prompt-file "$prompt_file"`, capture the new jobId, poll
-   again.
-2. **Persistent or fundamental** (3 retries with the same failure mode,
-   or a clear structural error like "prompt file unreadable"): treat as
-   unrecoverable. Log to `trace.md` with tag `phase_1_codex_dropped:L<N>
-   reason=<short cause>`.
+1. **Likely transient**: retry up to **3 times** with the same prompt
+   file by re-running §1.3's mode-aware launch branch. Replace the
+   map's job id with the new `.jobId` (companion) or `.job_id`
+   (agent-dispatch), then resume the matching poll branch.
+2. **Persistent or fundamental**: after 3 retries with the same failure
+   mode, log `phase_1_codex_dropped:L<N> reason=<short cause>`.
 
 When any lens is dropped, ASK ONCE for the whole
 phase (don't ask per-lens — that's ~7 prompts):

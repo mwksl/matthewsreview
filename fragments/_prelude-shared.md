@@ -126,9 +126,12 @@ One sub-agent run with the model the plan resolved for `role`.
   companion path (Phase 1.5) or `agent-dispatch.sh start --engine codex`
   elsewhere.
 - **omp**: one eval cell — `agent(prompt, { model: "<model segment>",
-  label: "<role>" })`. A `codex:*` role: `agent-dispatch.sh start
-  --engine codex` + the shared poll loop. Token accounting: if the
-  result exposes no usage, log `--tokens null`.
+  label: "<role>" })`. When `.effort` is present for an `omp:` role it
+  is the omp thinking level; append it to the selector
+  (`<model segment>:<effort>`, e.g. `openai-codex/gpt-5.6-sol:max`).
+  A `codex:*` role uses `agent-dispatch.sh start --engine codex` + the
+  shared poll loop. Token accounting: if the result exposes no usage,
+  log `--tokens null`.
 - **codex**: write the prompt to `$scratch/<role>-<id>.md`, then
   `"${MRB}agent-dispatch.sh" start --engine <engine> --model <model>
   [--effort <effort>] --prompt-file … --scratch-dir …`, then the shared

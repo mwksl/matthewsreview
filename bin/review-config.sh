@@ -8,10 +8,11 @@
 #   profiles.<name> (repo config first, then user config)   [--profile]
 #   --models "<k=v,k=v>"                 (CLI; keys = tier name or role name)
 #
-# Role strings: engine:model[:effort]
+# Role strings: engine:model[:effort-or-thinking]
 #   engines: claude | codex | omp
-#   effort:  low|medium|high|xhigh|max|ultra — CODEX ONLY. Present on
-#            claude:/omp: values → exit 1.
+#   codex effort: low|medium|high|xhigh|max|ultra
+#   omp thinking: off|minimal|low|medium|high|xhigh|max
+#   claude roles reject the third segment.
 #   codex: may carry an empty model ("codex::high") = CLI default model.
 #
 # Engine support matrix (per --orchestrator):
@@ -71,19 +72,30 @@ case "$ORCHESTRATOR" in
 esac
 
 # ---------------------------------------------------------------- defaults
-# Canonical role set. Tiers: deep / light / utility. Explicit (tier-less)
-# roles are the codex-engine lanes.
+# Canonical tier, role, and gate definitions. Validation, error messages,
+# merge loops, and emission all derive from these objects.
 TIERS_DEFAULT='{"deep":"claude:opus","light":"claude:sonnet","utility":"claude:sonnet"}'
-ROLE_TIER_MAP='{
-  "deep_lens":"deep","deep_validate":"deep","cross_cutting":"deep",
-  "fix":"deep","post_fix_review":"deep","reconcile":"deep",
-  "light_lens":"light","light_validate":"light",
-  "classifier":"utility","normalizer":"utility","dedup":"utility",
-  "scoring":"utility","fix_hint":"utility","briefer":"utility","drafter":"utility"
+ROLE_DEFS='{
+  "deep_lens":{"tier":"deep"},"deep_validate":{"tier":"deep"},"cross_cutting":{"tier":"deep"},
+  "fix":{"tier":"deep"},"post_fix_review":{"tier":"deep"},"reconcile":{"tier":"deep"},
+  "light_lens":{"tier":"light"},"light_validate":{"tier":"light"},
+  "classifier":{"tier":"utility"},"normalizer":{"tier":"utility"},"dedup":{"tier":"utility"},
+  "scoring":{"tier":"utility"},"fix_hint":{"tier":"utility"},"briefer":{"tier":"utility"},"drafter":{"tier":"utility"},
+  "ensemble_detect":{"default":"codex::high"},"codex_detect":{"default":"codex::high"},
+  "codex_validate":{"default":"codex::high"},"codex_crosscut":{"default":"codex::high"}
 }'
-ROLES_EXPLICIT='{"ensemble_detect":"codex::high","codex_detect":"codex::high","codex_validate":"codex::high","codex_crosscut":"codex::high"}'
-GATES_DEFAULT='{"phase3_gate":45,"phase4_bands":[45,60,75],"fix_threshold":60,"walkthrough_threshold":60}'
-EFFORT_SET=' low medium high xhigh max ultra '
+GATE_DEFS='{
+  "phase3_gate":{"default":45,"kind":"score"},
+  "phase4_bands":{"default":[45,60,75],"kind":"bands3"},
+  "fix_threshold":{"default":60,"kind":"score"},
+  "walkthrough_threshold":{"default":60,"kind":"score"}
+}'
+GATES_DEFAULT=$(jq -c 'with_entries(.value = .value.default)' <<<"$GATE_DEFS")
+CODEX_EFFORT_SET=' low medium high xhigh max ultra '
+OMP_THINKING_SET=' off minimal low medium high xhigh max '
+VALID_TIER_KEYS=$(jq -r 'keys | join(" | ")' <<<"$TIERS_DEFAULT")
+VALID_ROLE_KEYS=$(jq -r 'keys | join(" | ")' <<<"$ROLE_DEFS")
+VALID_GATE_KEYS=$(jq -r 'keys | join(" | ")' <<<"$GATE_DEFS")
 
 # ---------------------------------------------------------------- load files
 USER_CFG=""
@@ -109,17 +121,15 @@ cfg_get() { # file expr  — empty string when file missing or key absent
 }
 
 # ---------------------------------------------------------------- merge
-# assoc-free (bash 3.2): tiers/roles kept as newline "key|value|source" lists.
-# shellcheck disable=SC2034  # used via eval indirection in set_kv/get_kv
+# Assoc-free (bash 3.2): tiers/roles stay newline "key|value|source" lists.
 TIER_LIST=""   # deep|claude:opus|default
-# shellcheck disable=SC2034  # used via eval indirection in set_kv/get_kv
 ROLE_LIST=""   # deep_validate|claude:sonnet|repo-config (empty = inherit tier)
 GATES_JSON="$GATES_DEFAULT"
 
 set_kv() { # listname key value source
     local listname="$1" key="$2" value="$3" source="$4"
     local cur="" line updated=0 out=""
-    cur=$(eval "printf '%s' \"\$$listname\"")
+    cur="${!listname}"
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         if [[ "${line%%|*}" == "$key" ]]; then
@@ -129,16 +139,105 @@ set_kv() { # listname key value source
         fi
     done <<< "$cur"
     if [[ "$updated" == "0" ]]; then out="$out$key|$value|$source"$'\n'; fi
-    eval "$listname=\"\$out\""
+    printf -v "$listname" '%s' "$out"
 }
 
 get_kv() { # listname key -> "value|source" or empty
     local listname="$1" key="$2" cur line
-    cur=$(eval "printf '%s' \"\$$listname\"")
+    cur="${!listname}"
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         if [[ "${line%%|*}" == "$key" ]]; then printf '%s' "${line#*|}"; return; fi
     done <<< "$cur"
+}
+
+json_object_has() { # json key
+    jq -e --arg k "$2" 'has($k)' <<<"$1" >/dev/null
+}
+
+json_object_keys() { # json
+    jq -r 'keys[]' <<<"$1"
+}
+
+is_valid_tier_key() {
+    json_object_has "$TIERS_DEFAULT" "$1"
+}
+
+is_valid_role_key() {
+    json_object_has "$ROLE_DEFS" "$1"
+}
+
+is_valid_gate_key() {
+    json_object_has "$GATE_DEFS" "$1"
+}
+
+require_tier_key() { # key source-context
+    local key="$1" context="$2"
+    is_valid_tier_key "$key" \
+        || die_validation "unknown tier '$key' $context" "Valid tiers: $VALID_TIER_KEYS"
+}
+
+require_role_key() { # key source-context
+    local key="$1" context="$2"
+    is_valid_role_key "$key" \
+        || die_validation "unknown role '$key' $context" "Valid roles: $VALID_ROLE_KEYS"
+}
+
+require_gate_key() { # key source-context
+    local key="$1" context="$2"
+    is_valid_gate_key "$key" \
+        || die_validation "unknown gate '$key' $context" "Valid gates: $VALID_GATE_KEYS"
+}
+
+validate_tier_object() { # json source-context
+    local tiers="$1" context="$2" key
+    jq -e 'type == "object"' <<<"$tiers" >/dev/null \
+        || die_validation "tiers $context must be a JSON object" "Valid tiers: $VALID_TIER_KEYS"
+    while IFS= read -r key; do
+        [[ -z "$key" ]] && continue
+        require_tier_key "$key" "$context"
+    done < <(json_object_keys "$tiers")
+}
+
+validate_role_object() { # json source-context
+    local roles="$1" context="$2" key
+    jq -e 'type == "object"' <<<"$roles" >/dev/null \
+        || die_validation "roles $context must be a JSON object" "Valid roles: $VALID_ROLE_KEYS"
+    while IFS= read -r key; do
+        [[ -z "$key" ]] && continue
+        require_role_key "$key" "$context"
+    done < <(json_object_keys "$roles")
+}
+
+validate_gates_object() { # json source-context
+    local gates="$1" context="$2" key value kind
+    jq -e 'type == "object"' <<<"$gates" >/dev/null \
+        || die_validation "gates $context must be a JSON object" "Valid gates: $VALID_GATE_KEYS"
+    while IFS= read -r key; do
+        [[ -z "$key" ]] && continue
+        require_gate_key "$key" "$context"
+        value=$(jq -c --arg k "$key" '.[$k]' <<<"$gates")
+        kind=$(jq -r --arg k "$key" '.[$k].kind' <<<"$GATE_DEFS")
+        case "$kind" in
+            score)
+                jq -e 'type == "number" and . >= 0 and . <= 100' <<<"$value" >/dev/null \
+                    || die_validation "gate '$key' $context must be a number from 0 to 100" "replace it with a numeric score threshold"
+                ;;
+            bands3)
+                jq -e 'type == "array"' <<<"$value" >/dev/null \
+                    || die_validation "gate '$key' $context must be an array of exactly 3 numbers" "use three ascending score boundaries, e.g. [45,60,75]"
+                jq -e 'length == 3' <<<"$value" >/dev/null \
+                    || die_validation "gate '$key' $context must contain exactly 3 numbers" "use three ascending score boundaries, e.g. [45,60,75]"
+                jq -e 'all(.[]; type == "number" and . >= 0 and . <= 100)' <<<"$value" >/dev/null \
+                    || die_validation "gate '$key' $context must contain only numbers from 0 to 100" "use three ascending score boundaries, e.g. [45,60,75]"
+                jq -e '.[0] < .[1] and .[1] < .[2]' <<<"$value" >/dev/null \
+                    || die_validation "gate '$key' $context must be strictly ascending" "use three ascending score boundaries, e.g. [45,60,75]"
+                ;;
+            *)
+                die_validation "gate '$key' $context has unknown validator '$kind'" "fix GATE_DEFS in review-config.sh"
+                ;;
+        esac
+    done < <(json_object_keys "$gates")
 }
 
 # seed defaults. On the codex orchestrator the built-in tiers switch to
@@ -147,45 +246,38 @@ get_kv() { # listname key -> "value|source" or empty
 # stalling on cross-engine consent prompts. Config/CLI still overrides.
 TIERS_SEED="$TIERS_DEFAULT"
 if [[ "$ORCHESTRATOR" == "codex" ]]; then
-    TIERS_SEED='{"deep":"codex::high","light":"codex::high","utility":"codex::high"}'
+    TIERS_SEED=$(jq -c 'with_entries(.value = "codex::high")' <<<"$TIERS_DEFAULT")
 fi
-for t in deep light utility; do
+while IFS= read -r t; do
     set_kv TIER_LIST "$t" "$(jq -r --arg k "$t" '.[$k]' <<<"$TIERS_SEED")" "default"
-done
+done < <(json_object_keys "$TIERS_DEFAULT")
 
 apply_file() { # file source
     local f="$1" source="$2"
     [[ -n "$f" ]] || return 0
-    local tiers roles
+    local tiers roles gates k v rkeys rk
     tiers=$(jq -c '.tiers // empty' "$f")
     if [[ -n "$tiers" ]]; then
-        local k
-        for k in deep light utility; do
-            local v
+        validate_tier_object "$tiers" "in $f"
+        while IFS= read -r k; do
+            [[ -z "$k" ]] && continue
             v=$(jq -r --arg k "$k" '.[$k] // empty' <<<"$tiers")
             [[ -n "$v" ]] && set_kv TIER_LIST "$k" "$v" "$source"
-        done
-        # unknown tier keys → hard error
-        local bad
-        bad=$(jq -r 'keys[] | select(. != "deep" and . != "light" and . != "utility")' <<<"$tiers" | head -1)
-        [[ -n "$bad" ]] && die_validation "unknown tier '$bad' in $f" "Valid values: deep | light | utility"
+        done < <(json_object_keys "$TIERS_DEFAULT")
     fi
     roles=$(jq -c '.roles // empty' "$f")
     if [[ -n "$roles" ]]; then
-        local rkeys
+        validate_role_object "$roles" "in $f"
         rkeys=$(jq -r 'keys[]' <<<"$roles")
         while IFS= read -r rk; do
             [[ -z "$rk" ]] && continue
-            if ! jq -e --arg k "$rk" 'has($k)' <<<"$ROLE_TIER_MAP" >/dev/null \
-               && ! jq -e --arg k "$rk" 'has($k)' <<<"$ROLES_EXPLICIT" >/dev/null; then
-                die_validation "unknown role '$rk' in $f" "Valid roles: $(jq -r 'keys[]' <<<"$ROLE_TIER_MAP" | tr '\n' ' ')$(jq -r 'keys[]' <<<"$ROLES_EXPLICIT" | tr '\n' ' ')"
-            fi
+            require_role_key "$rk" "in $f"
             set_kv ROLE_LIST "$rk" "$(jq -r --arg k "$rk" '.[$k]' <<<"$roles")" "$source"
         done <<< "$rkeys"
     fi
-    local gates
     gates=$(jq -c '.gates // empty' "$f")
     if [[ -n "$gates" ]]; then
+        validate_gates_object "$gates" "in $f"
         GATES_JSON=$(jq -c -n --argjson base "$GATES_JSON" --argjson over "$gates" '$base * $over')
     fi
 }
@@ -193,29 +285,27 @@ apply_file() { # file source
 apply_profile() { # file source — returns 10 when profile absent
     local f="$1" source="$2"
     [[ -n "$f" ]] || return 10
-    local prof
+    local prof tiers roles k v rkeys rk
     prof=$(jq -c --arg p "$PROFILE" '.profiles[$p] // empty' "$f")
     [[ -n "$prof" ]] || return 10
-    local tiers roles
+    jq -e 'type == "object"' <<<"$prof" >/dev/null \
+        || die_validation "profile '$PROFILE' in $f must be a JSON object" "define tiers and/or roles under profiles.$PROFILE"
     tiers=$(jq -c '.tiers // empty' <<<"$prof")
     if [[ -n "$tiers" ]]; then
-        local k
-        for k in deep light utility; do
-            local v
+        validate_tier_object "$tiers" "in profile '$PROFILE'"
+        while IFS= read -r k; do
+            [[ -z "$k" ]] && continue
             v=$(jq -r --arg k "$k" '.[$k] // empty' <<<"$tiers")
             [[ -n "$v" ]] && set_kv TIER_LIST "$k" "$v" "profile($PROFILE)"
-        done
+        done < <(json_object_keys "$TIERS_DEFAULT")
     fi
     roles=$(jq -c '.roles // empty' <<<"$prof")
     if [[ -n "$roles" ]]; then
-        local rkeys
+        validate_role_object "$roles" "in profile '$PROFILE'"
         rkeys=$(jq -r 'keys[]' <<<"$roles")
         while IFS= read -r rk; do
             [[ -z "$rk" ]] && continue
-            if ! jq -e --arg k "$rk" 'has($k)' <<<"$ROLE_TIER_MAP" >/dev/null \
-               && ! jq -e --arg k "$rk" 'has($k)' <<<"$ROLES_EXPLICIT" >/dev/null; then
-                die_validation "unknown role '$rk' in profile '$PROFILE'" "Valid roles: $(jq -r 'keys[]' <<<"$ROLE_TIER_MAP" | tr '\n' ' ')$(jq -r 'keys[]' <<<"$ROLES_EXPLICIT" | tr '\n' ' ')"
-            fi
+            require_role_key "$rk" "in profile '$PROFILE'"
             set_kv ROLE_LIST "$rk" "$(jq -r --arg k "$rk" '.[$k]' <<<"$roles")" "profile($PROFILE)"
         done <<< "$rkeys"
     fi
@@ -231,10 +321,12 @@ if [[ -n "$USER_CFG" ]]; then
     od_tiers=$(jq -c --arg o "$ORCHESTRATOR" '.orchestrator_defaults[$o].tiers // empty' "$USER_CFG" 2>/dev/null)
 fi
 if [[ -n "$od_tiers" && "$od_tiers" != "null" ]]; then
-    for k in deep light utility; do
+    validate_tier_object "$od_tiers" "in orchestrator_defaults.$ORCHESTRATOR.tiers"
+    while IFS= read -r k; do
+        [[ -z "$k" ]] && continue
         v=$(jq -r --arg k "$k" '.[$k] // empty' <<<"$od_tiers")
         [[ -n "$v" ]] && set_kv TIER_LIST "$k" "$v" "orchestrator-default($ORCHESTRATOR)"
-    done
+    done < <(json_object_keys "$TIERS_DEFAULT")
 fi
 
 apply_file "$USER_CFG" "user-config"
@@ -261,17 +353,13 @@ if [[ -n "$MODELS_CSV" ]]; then
         if [[ "$key" == "$val" || -z "$val" ]]; then
             die_validation "--models entry '$pair' is not key=value" "Valid input: --models \"deep=claude:opus,light=codex::medium\""
         fi
-        case "$key" in
-            deep|light|utility) set_kv TIER_LIST "$key" "$val" "cli" ;;
-            *)
-                if jq -e --arg k "$key" 'has($k)' <<<"$ROLE_TIER_MAP" >/dev/null \
-                   || jq -e --arg k "$key" 'has($k)' <<<"$ROLES_EXPLICIT" >/dev/null; then
-                    set_kv ROLE_LIST "$key" "$val" "cli"
-                else
-                    die_validation "unknown --models key '$key'" "Valid keys: deep | light | utility | $(jq -r 'keys[]' <<<"$ROLE_TIER_MAP" | tr '\n' ' ')$(jq -r 'keys[]' <<<"$ROLES_EXPLICIT" | tr '\n' ' ')"
-                fi
-                ;;
-        esac
+        if is_valid_tier_key "$key"; then
+            set_kv TIER_LIST "$key" "$val" "cli"
+        elif is_valid_role_key "$key"; then
+            set_kv ROLE_LIST "$key" "$val" "cli"
+        else
+            die_validation "unknown --models key '$key'" "Valid keys: $VALID_TIER_KEYS | $VALID_ROLE_KEYS"
+        fi
         IFS=','
     done
     IFS="$OLDIFS"
@@ -283,7 +371,7 @@ validate_role_string() { # role value
     local engine rest model effort
     engine="${value%%:*}"; rest="${value#*:}"
     if [[ "$rest" == "$value" || -z "$engine" ]]; then
-        die_validation "role '$role' value '$value' is not engine:model[:effort]" "Valid engines: claude | codex | omp"
+        die_validation "role '$role' value '$value' is not engine:model[:effort-or-thinking]" "Valid engines: claude | codex | omp"
     fi
     case "$engine" in
         claude|codex|omp) ;;
@@ -294,11 +382,22 @@ validate_role_string() { # role value
     else
         model="$rest"; effort=""
     fi
-    if [[ -n "$effort" && "$engine" != "codex" ]]; then
-        die_validation "role '$role': effort is only valid for codex: engines (got '$value')" "drop the :$effort segment"
-    fi
-    if [[ -n "$effort" && "${EFFORT_SET#* $effort }" == "$EFFORT_SET" ]]; then
-        die_validation "role '$role': unknown effort '$effort'" "Valid efforts: low | medium | high | xhigh | max | ultra"
+    if [[ -n "$effort" ]]; then
+        case "$engine" in
+            claude)
+                die_validation "role '$role': effort is only valid for codex: engines or omp: model thinking (got '$value')" "drop the :$effort segment"
+                ;;
+            codex)
+                if [[ "${CODEX_EFFORT_SET#* $effort }" == "$CODEX_EFFORT_SET" ]]; then
+                    die_validation "role '$role': unknown codex effort '$effort'" "Valid efforts: low | medium | high | xhigh | max | ultra"
+                fi
+                ;;
+            omp)
+                if [[ "${OMP_THINKING_SET#* $effort }" == "$OMP_THINKING_SET" ]]; then
+                    die_validation "role '$role': unknown omp thinking level '$effort'" "Valid levels: off | minimal | low | medium | high | xhigh | max"
+                fi
+                ;;
+        esac
     fi
     if [[ -z "$model" && "$engine" != "codex" ]]; then
         die_validation "role '$role': empty model only allowed for codex: (got '$value')" "specify a model, e.g. $engine:opus"
@@ -321,7 +420,7 @@ emit_role() { # role tier|EXPLICIT
     if [[ -n "$rv" ]]; then
         value="${rv%%|*}"; source="${rv#*|}"
     elif [[ "$tier" == "EXPLICIT" ]]; then
-        value=$(jq -r --arg k "$role" '.[$k]' <<<"$ROLES_EXPLICIT"); source="default"
+        value=$(jq -r --arg k "$role" '.[$k].default' <<<"$ROLE_DEFS"); source="default"
     else
         rv=$(get_kv TIER_LIST "$tier")
         value="${rv%%|*}"; source="${rv#*|} (tier:$tier)"
@@ -335,10 +434,10 @@ emit_role() { # role tier|EXPLICIT
         '.[$r] = {engine:$e, model:$m, effort:(if $f=="" then null else $f end), source:$s}' <<<"$ROLES_JSON")
 }
 
-for role in deep_lens deep_validate cross_cutting fix post_fix_review reconcile; do emit_role "$role" deep; done
-for role in light_lens light_validate; do emit_role "$role" light; done
-for role in classifier normalizer dedup scoring fix_hint briefer drafter; do emit_role "$role" utility; done
-for role in ensemble_detect codex_detect codex_validate codex_crosscut; do emit_role "$role" EXPLICIT; done
+while IFS='|' read -r role tier; do
+    [[ -z "$role" ]] && continue
+    emit_role "$role" "$tier"
+done <<< "$(jq -r 'to_entries[] | "\(.key)|\(.value.tier // "EXPLICIT")"' <<<"$ROLE_DEFS")"
 
 WARNINGS="[]"
 if [[ -n "${LEGACY_WARN:-}" ]]; then

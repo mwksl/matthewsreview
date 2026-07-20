@@ -529,7 +529,8 @@ downstream or the reviewer agent's interpretation.
 # Per-finding context (id, file, line_range, claim, validation_result.*).
 # printf '%s', not echo — see operational rule 12.
 attempted_ids_json=$(printf '%s' "$fix_groups_with_actual" | jq -c '[.[].finding_ids[]] | unique')
-jq --argjson ids "$attempted_ids_json" --argjson groups "$fix_groups_with_actual" '
+artifact-read.sh --path "$artifact_path" --filter '.' \
+  | jq --argjson ids "$attempted_ids_json" --argjson groups "$fix_groups_with_actual" '
     [ .findings[] | select(.id | IN($ids[])) | . as $f | {
         id, file, line_range, claim,
         evidence:               .validation_result.evidence,
@@ -537,7 +538,7 @@ jq --argjson ids "$attempted_ids_json" --argjson groups "$fix_groups_with_actual
         fix_proposal:           .validation_result.fix_proposal,
         verification_context:   .validation_result.verification_context,
         fix_group_id:           ($groups[] | select(.finding_ids | index($f.id)) | .id)
-    } ]' "$artifact_path" > /tmp/9a-findings-$run_id.json
+    } ]' > /tmp/9a-findings-$run_id.json
 
 # Per-group results (Phase 8 self-report)
 printf '%s' "$fix_groups_with_actual" | jq '[.[] | {
@@ -958,7 +959,8 @@ abort the block. `commit_sha` from 9c distinguishes the two branches.
      --artifact   "$artifact_path" \
      2>>"$trace_log_path" || printf 'tally_failed\n' >> "$trace_log_path"
 
-   review_started_at=$(jq -r '.review_started_at // empty' "$artifact_path")
+   review_started_at=$(artifact-read.sh \
+     --path "$artifact_path" --filter '.review_started_at // empty' | jq -r '.')
 
    orchestrator-tokens.sh \
      --artifact "$artifact_path" \

@@ -78,16 +78,19 @@ headings.
 
 ### 1. Parse arguments
 
-Parse `$ARGUMENTS` (whitespace-split):
+Parse `$ARGUMENTS` left-to-right, respecting quoted values:
 
-- First token that parses as a non-negative integer → `threshold`.
-- Any other token → stop and ask the user to clarify.
+- `--profile <name>` → `profile`; `--models "<csv>"` → `models_csv`.
+  Each flag consumes the next non-empty token; a missing value is a
+  usage error.
+- One non-negative integer positional token → `threshold`. A second
+  positional token is a usage error.
+- Any unknown `--...` option or other token → stop with a usage error
+  naming the valid invocation.
 
 If no integer was provided, step 2b sets `threshold` from the resolved
-`gates.walkthrough_threshold` (default 60) (matches the
-`/matthewsreview:fix` default and the Phase 4 moderate-confirmation
-breakpoint, so the walkthrough shows what a reviewer at standard
-confidence would want to see). Record in your working context.
+`gates.walkthrough_threshold` (default 60). Capture `profile`,
+`models_csv`, and `threshold` in working context.
 
 ### 2. Locate the artifact
 
@@ -123,7 +126,7 @@ briefer and issue-drafter dispatch by role):
 plan_args=(--repo-root "$repo_root" --orchestrator "$harness_id")
 [[ -n "${profile:-}" ]] && plan_args+=(--profile "$profile")
 [[ -n "${models_csv:-}" ]] && plan_args+=(--models "$models_csv")
-model_plan_json=$(review-config.sh "${plan_args[@]}")
+model_plan_json=$(review-config.sh "${plan_args[@]}") || exit $?
 plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX)
 printf '%s' "$model_plan_json" > "$plan_tmp"
 artifact-patch.py --path "$artifact_path" \

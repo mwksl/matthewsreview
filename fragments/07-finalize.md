@@ -29,7 +29,8 @@ comment reflects cumulative sub-agent spend.
 ### 6.2b. Tally `orchestrator_tokens` from the session transcript(s)
 
 ```bash
-review_started_at=$(jq -r '.review_started_at // empty' "$artifact_path")
+review_started_at=$(artifact-read.sh \
+  --path "$artifact_path" --filter '.review_started_at // empty' | jq -r '.')
 
 orchestrator-tokens.sh \
   --artifact "$artifact_path" \
@@ -69,12 +70,15 @@ The L-tag mapping picks `internal` vs `internal-codex` based on the
 seeded value (so codex-review's marker survives the recompute):
 
 ```bash
-internal_label=$(jq -r '
+finalize_artifact_snapshot=$(artifact-read.sh \
+  --path "$artifact_path" --filter '.')
+
+internal_label=$(printf '%s' "$finalize_artifact_snapshot" | jq -r '
   if (.reviewer_sources // []) | any(. == "internal-codex") then "internal-codex"
   else "internal" end
-' "$artifact_path")
+')
 
-reviewer_sources=$(jq -c --arg internal "$internal_label" '
+reviewer_sources=$(printf '%s' "$finalize_artifact_snapshot" | jq -c --arg internal "$internal_label" '
   [.findings[] | .sources[]]
   | map(
       # Internal lens tags: L1..L7 today (L7 is the ensemble-gated
@@ -89,7 +93,7 @@ reviewer_sources=$(jq -c --arg internal "$internal_label" '
       else empty end
     )
   | unique
-' "$artifact_path")
+')
 
 printf '%s\n' "$reviewer_sources" > "/tmp/matthews-review-rs-$review_id.json"
 artifact-patch.py \
@@ -143,7 +147,7 @@ by_state=$(artifact-read.sh \
 log-phase.sh \
   --review-dir "$review_dir" --phase 6 --name finalize \
   --elapsed 0 \
-  --summary "rendering + publishing; total findings=$(jq '.findings | length' $artifact_path)"
+  --summary "rendering + publishing; total findings=$(artifact-read.sh --path "$artifact_path" --filter '.findings | length' | jq -r '.')"
 
 log-phase.sh \
   --review-dir "$review_dir" --phase 6 --record "$(jq -nc \
@@ -295,7 +299,8 @@ artifact:
   light-lane `confirmed_*`
 - `preexisting_count` — open findings with `disposition ==
   "pre_existing_report"`
-- `internal_only` — `reviewer_sources == ["internal"]`
+- `internal_only` — `reviewer_sources` is non-empty and every member is
+  either `"internal"` or `"internal-codex"`
 
 Then emit ONLY the rows whose counts are non-zero (plus the always
 row), in this order:

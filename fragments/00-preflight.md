@@ -425,7 +425,7 @@ stored `model_plan` is what fragments read roles from.
 plan_args=(--repo-root "$repo_root" --orchestrator "$harness_id")
 [[ -n "${profile:-}" ]] && plan_args+=(--profile "$profile")
 [[ -n "${models_csv:-}" ]] && plan_args+=(--models "$models_csv")
-model_plan_json=$(review-config.sh "${plan_args[@]}")
+model_plan_json=$(review-config.sh "${plan_args[@]}") || exit $?
 ```
 
 `$harness_id` is the Dispatch Protocol identity from

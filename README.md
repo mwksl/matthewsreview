@@ -40,7 +40,7 @@ Each command is independent; steps 2–4 can land days or weeks after step 1 —
 
 ## Model selection
 
-Every sub-agent dispatches through a named **role**; you choose the model per role. Role strings are `engine:model[:effort]`:
+Every sub-agent dispatches through a named **role**; you choose the model per role. Role strings are `engine:model[:effort-or-thinking]`:
 
 - **Engines**: `claude` (native in Claude Code/omp sessions), `codex` (CLI subprocess, billed by Codex), `omp` (any omp provider model, native in omp only).
 - **Tiers** hold the defaults: `deep=claude:opus` (deep lenses, deep validation, cross-cutting, fix agents, post-fix review), `light=claude:sonnet` (light lenses/validation), `utility=claude:sonnet` (classifier, normalizer, dedup, scoring, fix-hint, briefer, drafter). Codex lanes (`ensemble_detect`, `codex_detect/validate/crosscut`) default `codex::high`.
@@ -70,14 +70,14 @@ Where config lives (later wins): built-in defaults → `~/.matthews-reviews/conf
 
 **Running from Codex.** On the Codex orchestrator the built-in tiers default to the codex engine (`codex::high` for every role) — a codex-driven run is self-contained and never stalls on cross-engine consent prompts. Mix engines per role via `--models` (e.g. `deep_validate=claude:opus` shells out to `claude -p` when the Claude CLI is installed and authed).
 
-**Running on omp models.** Role strings with the `omp:` engine dispatch through omp's eval bridge to any model your omp installation serves (`omp models` lists the registry). Example per-run: `--models "deep=omp:moonshot/kimi-k3,light=omp:moonshot/kimi-k3,utility=omp:moonshot/kimi-k3"`. To make it permanent, set `orchestrator_defaults.omp.tiers` (above) — Claude Code sessions are unaffected. Without it, `claude:*` roles under omp require Anthropic auth in omp; if a role's model isn't servable, the preflight Model plan prints a warning and lens dispatches 404 (the run is then marked **REVIEW DEGRADED** in the report). `bin/doctor.sh` probes this upfront.
+**Running on omp models.** Role strings with the `omp:` engine dispatch through omp's eval bridge to any model your omp installation serves (`omp models` lists the registry). Append an omp thinking level when the model supports one, e.g. `omp:openai-codex/gpt-5.6-sol:max`. Example per-run: `--models "deep=omp:openai-codex/gpt-5.6-sol:max,light=omp:openai-codex/gpt-5.6-sol:max,utility=omp:openai-codex/gpt-5.6-sol:max"`. To make it permanent, set `orchestrator_defaults.omp.tiers` (above) — Claude Code sessions are unaffected. Without it, `claude:*` roles under omp require Anthropic auth in omp; if a role's model isn't servable, the preflight Model plan prints a warning and lens dispatches 404 (the run is then marked **REVIEW DEGRADED** in the report). `bin/doctor.sh` probes this upfront.
 
 ```bash
 /matthewsreview:review --full --models "utility=claude:haiku"
 /matthewsreview:review --profile cheap
 ```
 
-The preflight prints the resolved **Model plan** table (role / engine / model / effort / source) before any sub-agent launches; the plan is stored in the artifact (`model_plan`) and each dispatch's role string lands in `tokens.jsonl`. The effort segment is codex-only (`low|medium|high|xhigh|max|ultra`).
+The preflight prints the resolved **Model plan** table (role / engine / model / effort-or-thinking / source) before any sub-agent launches; the plan is stored in the artifact (`model_plan`) and each dispatch's role string lands in `tokens.jsonl`. Codex effort supports `low|medium|high|xhigh|max|ultra`; omp thinking supports `off|minimal|low|medium|high|xhigh|max`.
 
 ### Gate thresholds
 

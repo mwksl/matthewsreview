@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(doctor.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(claude-md-paths.sh:*), Bash(staleness.sh:*), Bash(prior-fix-diff.sh:*), Bash(line-range-check.sh:*), Bash(assign-finding-ids.sh:*), Bash(origin-crosscheck.sh:*), Bash(parse-with-repair.py:*), Bash(parse-validator-result.py:*), Bash(source-family-map.py:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(freshness-gate.sh:*), Bash(trivial-check.sh:*), Bash(artifact-seed.sh:*), Bash(codex-poll.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(mktemp:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(node:*), Bash(find:*), AskUserQuestion, Agent, Read, BashOutput, KillShell
+allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(doctor.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(claude-md-paths.sh:*), Bash(staleness.sh:*), Bash(prior-fix-diff.sh:*), Bash(line-range-check.sh:*), Bash(assign-finding-ids.sh:*), Bash(origin-crosscheck.sh:*), Bash(parse-with-repair.py:*), Bash(parse-validator-result.py:*), Bash(source-family-map.py:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(freshness-gate.sh:*), Bash(trivial-check.sh:*), Bash(artifact-seed.sh:*), Bash(codex-poll.sh:*), Bash(agent-dispatch.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(mktemp:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(node:*), Bash(find:*), AskUserQuestion, Agent, Read, BashOutput, KillShell
 argument-hint: "[--effort <low|medium|high|xhigh|max|ultra>] [--full] [--profile <name>] [--models \"<csv>\"]"
 description: Codex-driven deep code review producing the same artifact.json shape as :review (drop-in for /matthewsreview:fix, :add, :walkthrough, :promote).
 disable-model-invocation: false
@@ -25,8 +25,10 @@ helper-script error-as-prompt).**
 
 This command orchestrates the same phases as `/matthewsreview:review`
 (Phases 0–6 plus Phase 5.5 auto-fix-hint generation), swapping the
-Claude sub-agent dispatches for **Codex jobs** (via the
-`codex-companion.mjs` plugin's `task --background` primitive) at:
+Claude sub-agent dispatches for **Codex jobs**. It prefers the
+`codex-companion.mjs` background primitive and falls back to the
+standalone Codex CLI through `agent-dispatch.sh` when the companion is
+unavailable.
 
 - **Phase 1 detection** — 7 parallel Codex lenses (L1–L7) instead of
   Claude `Agent` blocks.
@@ -70,41 +72,27 @@ applies in each Codex-using fragment.
 
 ## Sub-agent dispatch pattern
 
-Two dispatch primitives in this command:
+Two dispatch transports in this command:
 
-**Codex jobs** (the heavy reviewer/validator work):
+**Companion mode** (`codex_launch_mode=companion`) launches through
+`codex-companion.mjs` and polls through `codex-poll.sh`. The watchdog
+remains the single source of truth for companion-job liveness: it wraps
+`status --json`, applies the two-signal stall check, enforces the
+effort-derived ceiling, and returns normalized `raw_output`.
 
-```
-node "$CODEX_COMPANION" task --background --effort "$effort" \
-    --prompt-file "/tmp/matthews-review-codex-<review_id>-<slot>.md"
-```
+**Standalone mode** (`codex_launch_mode=agent-dispatch`) launches
+`agent-dispatch.sh start --engine codex`, polls with
+`agent-dispatch.sh poll`, and cancels with `agent-dispatch.sh stop`.
+Its verdict vocabulary matches `codex-poll.sh`, so the same retry and
+drop policy applies. The model and effort come from the resolved
+`codex_detect`, `codex_validate`, or `codex_crosscut` role.
 
-The companion returns the launch payload on stdout (extract the id
-with `jq -r '.jobId'`). Launch ALL jobs in a phase within a SINGLE
-orchestrator turn so they run concurrently; polling happens on
-subsequent turns.
-
-**Polling and result fetch go through `codex-poll.sh` exclusively.**
-The helper is the single source of truth for codex-job liveness — it
-wraps `status --json`, runs the two-signal stall check (logFile mtime
-+ `result --json` desync probe), enforces the per-effort wall-clock
-ceiling, and on `completed` plucks the freeform output via the
-documented `.storedJob.result.rawOutput` chain (with the
-`// .storedJob.payload.rawOutput // .storedJob.rawOutput // ""`
-fallback for older companion shapes and partial-failure records).
-**Do NOT call `node "$CODEX_COMPANION" status` or `result` directly
-anywhere** in this command's prose, fragment substitutions, or
-follow-up turn instructions — direct calls bypass the watchdog and
-reintroduce the indefinite-`running` failure mode (real failure
-2026-05-03; see `plans/codex-watchdog.md`). Phase fragments §1.4 /
-§4.2.3 / §4.3.2 / §5.2.2 specify the exact `codex-poll.sh` invocation
-shape per phase. Smoke `CR-13c` and `CR-13f` enforce this — fragment
-*and* command files are scanned for raw `node "$CODEX_COMPANION"
-status` recipes.
-
-`CODEX_COMPANION` is discovered the same way as in
-`fragments/01-detection.md` step 1.2a — see that block for the
-readiness probe.
+Launch ALL jobs in a phase within one orchestrator turn so they run
+concurrently; poll all in-flight jobs together on subsequent turns.
+Each Codex fragment contains the exact mode-aware launch/poll/stop
+branch. Never call raw companion `status` or `result` commands:
+companion mode must go through `codex-poll.sh`, and standalone mode
+must go through `agent-dispatch.sh poll`.
 
 **Claude sub-agents** (Sonnet shape-fixers, normalizer, dedup, scoring):
 
@@ -148,63 +136,54 @@ Set the following working-context values BEFORE executing Phase 0:
 
 ## Codex readiness gate
 
-Before Phase 0, probe codex-companion availability. This mirrors
-`fragments/01-detection.md` step 1.2a's Codex probe but is **fatal**
-in codex-review (vs. the soft `proceed-without` option in `:review
---ensemble`) — except for the documented shared-mode cold-start
-broker-ENOENT shape detailed below, which is bypassed in both gates:
+Before Phase 0, choose the Codex transport. Codex remains mandatory,
+but the Claude Code companion plugin is not: a working standalone
+`codex` CLI plus `agent-dispatch.sh` is a complete fallback.
 
 ```bash
 CODEX_COMPANION="$(find ~/.claude/plugins -type f -name codex-companion.mjs -path '*codex*' 2>/dev/null | head -1)"
-if [[ -z "$CODEX_COMPANION" ]]; then
-    echo "ERROR: codex-companion script not found." >&2
-    echo "Action: install the openai-codex plugin and run /codex:setup." >&2
-    exit 1
+codex_launch_mode=""
+codex_readiness_note=""
+
+if [[ -n "$CODEX_COMPANION" ]]; then
+    codex_setup_json=$(node "$CODEX_COMPANION" setup --json 2>&1)
+    codex_ready=$(jq -r '.ready // false' <<<"$codex_setup_json" 2>/dev/null)
+    if [[ "$codex_ready" == "true" ]]; then
+        codex_launch_mode="companion"
+    else
+        # Shared-mode cold start: the broker socket appears only after the
+        # first task. Preserve the existing safe bypass.
+        cx_mode=$(jq -r '.sessionRuntime.mode // ""' <<<"$codex_setup_json" 2>/dev/null)
+        cx_cli=$(jq -r '.codex.available // false' <<<"$codex_setup_json" 2>/dev/null)
+        cx_auth_detail=$(jq -r '.auth.detail // ""' <<<"$codex_setup_json" 2>/dev/null)
+        if [[ "$cx_mode" == "shared" && "$cx_cli" == "true" \
+              && "$cx_auth_detail" == *"ENOENT"*"broker.sock"* ]]; then
+            codex_launch_mode="companion"
+            codex_readiness_note="shared-mode cold-start broker ENOENT bypassed"
+        fi
+    fi
 fi
 
-codex_setup_json=$(node "$CODEX_COMPANION" setup --json 2>&1)
-codex_ready=$(jq -r '.ready // false' <<<"$codex_setup_json" 2>/dev/null)
-if [[ "$codex_ready" != "true" ]]; then
-    # Cold-start false-negative bypass (shared session mode) — see
-    # `fragments/01-detection.md` step 1.2a for the full shape
-    # rationale and edge-case discussion. Summary: in
-    # sessionRuntime.mode == "shared", a fresh probe sees ENOENT on
-    # /tmp/cxc-*/broker.sock because the broker only materializes once
-    # a task is running. `.codex.available` (CLI binary present) is
-    # true in that case; the first lens dispatch warms the broker.
-    # `.auth.available` is intentionally NOT checked — it's hardcoded
-    # true in the companion's auth-status builder. A stale saved
-    # broker-session file from a logged-out user also matches this
-    # shape; the first lens dispatch surfaces the auth failure with
-    # an actionable error. Any other not-ready shape stays fatal.
-    cx_mode=$(jq -r '.sessionRuntime.mode // ""' <<<"$codex_setup_json" 2>/dev/null)
-    cx_cli=$(jq -r '.codex.available // false' <<<"$codex_setup_json" 2>/dev/null)
-    cx_auth_detail=$(jq -r '.auth.detail // ""' <<<"$codex_setup_json" 2>/dev/null)
-    if ! [[ "$cx_mode" == "shared" && "$cx_cli" == "true" \
-            && "$cx_auth_detail" == *"ENOENT"*"broker.sock"* ]]; then
-        echo "ERROR: codex-companion setup --json reports not-ready." >&2
-        echo "Action: run /codex:setup to diagnose." >&2
-        printf '%s\n' "$codex_setup_json" >&2
-        exit 1
-    fi
-    # Cold-start bypass — proceed silently; first lens warms the broker.
-    # NOTE: silent on purpose. fragments/01-detection.md step 1.2a logs the
-    # equivalent bypass decision to $review_dir/trace.md, but this gate
-    # runs BEFORE Phase 0 so $review_dir doesn't exist yet — there's no
-    # file to append to. Don't "fix" this asymmetry by adding a write
-    # here; it will fail. If a bypass-decision audit trail is needed for
-    # codex-review, defer the trace-line emission to a Phase 0.15 step
-    # that re-checks the gate outcome after Phase 0 creates $review_dir.
+if [[ -z "$codex_launch_mode" ]] \
+   && command -v codex >/dev/null 2>&1 \
+   && { [[ -n "${MRB:-}" && -x "${MRB}agent-dispatch.sh" ]] \
+        || command -v agent-dispatch.sh >/dev/null 2>&1; }; then
+    codex_launch_mode="agent-dispatch"
+    codex_readiness_note="companion unavailable or not ready; using standalone Codex CLI"
+fi
+
+if [[ -z "$codex_launch_mode" ]]; then
+    echo "ERROR: no usable Codex transport." >&2
+    echo "Action: run /codex:setup, or install/authenticate the codex CLI." >&2
+    [[ -n "${codex_setup_json:-}" ]] && printf '%s\n' "$codex_setup_json" >&2
+    exit 1
 fi
 ```
 
-Capture `CODEX_COMPANION` in working context. Codex is the engine —
-no fallback to Claude lenses. Failing here (any not-ready shape
-outside the documented cold-start broker-ENOENT bypass) exits
-cleanly so the user can fix setup before any token spend; the
-bypass itself proceeds silently and the first lens dispatch warms
-the broker (or surfaces a real auth failure if the saved session
-is stale).
+Capture `CODEX_COMPANION`, `codex_launch_mode`, and
+`codex_readiness_note` in working context. Phase 1 writes the note to
+`trace.md` after Phase 0 has created the review directory. There is no
+fallback to Claude lenses: only the transport changes.
 
 ---
 
@@ -267,10 +246,9 @@ the instructions inside.
 - No review of closed/merged PRs — bail at Phase 0 step 0.4 with a
   user-visible message.
 - No fallback to Claude lenses if Codex is unavailable — codex-review
-  is Codex-only by design. The readiness gate above exits cleanly with
-  a setup hint for any not-ready shape outside the documented
-  shared-mode cold-start broker-ENOENT bypass (which surfaces at first
-  lens dispatch instead).
+  is Codex-only by design. The readiness gate accepts either the
+  companion plugin or the authenticated standalone Codex CLI and exits
+  before token spend only when neither transport is usable.
 - No Phase 1.5 external-source pooling (PR-comment scrape, secondary
   Codex CLI). Run `/matthewsreview:review --ensemble` if you want that on
   top of internal Claude lenses.

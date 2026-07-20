@@ -39,7 +39,7 @@ Full normative spec — disposition table, gate-rule code blocks, invariants, Ph
 test/smoke.sh   # expects: smoke: PASS (N assertions)
 ```
 
-New helpers add 2–3 assertions in the OC-* / FR-* / RH-* / FX-* / MP-* / WT-* naming style.
+New helpers add 2–3 assertions in the `OC-*` / `FR-*` / `RH-*` / `FX-*` / `MP-*` / `WT-*` naming style.
 
 ## Operational rules
 

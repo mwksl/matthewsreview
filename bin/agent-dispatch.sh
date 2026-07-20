@@ -8,13 +8,14 @@
 #   claude  → claude -p --model <m> --output-format json (prompt on stdin)
 #   codex   → codex exec - --model <m> -c model_reasoning_effort=<e>
 #             --sandbox read-only|workspace-write --json -o <last-msg>
-#   omp     → omp -p --model <m> "<prompt>" (positional)
+#   omp     → omp -p --model <m>[:<thinking>] "<prompt>" (positional)
 #
 # Job layout: <scratch-dir>/<job_id>/{pid,engine,model,effort,started_epoch,
 # out,err,last_message,exit_code,prompt.md}
 #
 # Subcommands:
 #   start --engine <claude|codex|omp> --model <m> [--effort <e>]
+#         (`<e>` = codex effort or omp thinking level)
 #         --prompt-file <abs> --scratch-dir <abs> [--write]
 #     → stdout {"job_id","pid","out_file"}
 #   poll --job <id> --scratch-dir <abs>
@@ -41,7 +42,7 @@ PROG=agent-dispatch.sh
 
 usage() { cat >&2 <<USAGE
 Usage:
-  $PROG start --engine <claude|codex|omp> --model <m> [--effort <e>] --prompt-file <abs> --scratch-dir <abs> [--write]
+  $PROG start --engine <claude|codex|omp> --model <m> [--effort <codex-effort|omp-thinking>] --prompt-file <abs> --scratch-dir <abs> [--write]
   $PROG poll  --job <id> --scratch-dir <abs> [--stall-threshold-sec N] [--wall-clock-ceiling-sec N]
   $PROG stop  --job <id> --scratch-dir <abs>
 USAGE
@@ -103,7 +104,11 @@ case "$SUB" in
 # ---------------------------------------------------------------- start
 start)
     [[ -n "$ENGINE" && -n "$PROMPT_FILE" && -n "$SCRATCH" ]] || usage
-    [[ -f "$PROMPT_FILE" ]] || { err "prompt file not found: $PROMPT_FILE"; exit 1; }
+    if [[ ! -f "$PROMPT_FILE" ]]; then
+        err "prompt file not found: $PROMPT_FILE"
+        echo "Action: verify --prompt-file points to a readable prompt created before dispatch." >&2
+        exit 1
+    fi
     require_engine
 
     job_id="ad_$(date +%Y%m%dT%H%M%SZ)_$$_$RANDOM"
@@ -132,7 +137,11 @@ start)
         omp)
             prompt_text=$(cat "$dir/prompt.md")
             args=(omp -p)
-            [[ -n "$MODEL" ]] && args+=(--model "$MODEL")
+            if [[ -n "$MODEL" ]]; then
+                omp_model="$MODEL"
+                [[ -n "$EFFORT" ]] && omp_model="$omp_model:$EFFORT"
+                args+=(--model "$omp_model")
+            fi
             ( "${args[@]}" "$prompt_text" > "$dir/out" 2> "$dir/err"; echo $? > "$dir/exit_code" ) >/dev/null 2>&1 &
             ;;
     esac
@@ -147,7 +156,11 @@ start)
 poll)
     [[ -n "$JOB" && -n "$SCRATCH" ]] || usage
     dir=$(job_dir)
-    [[ -d "$dir" ]] || { err "no job dir $dir"; exit 1; }
+    if [[ ! -d "$dir" ]]; then
+        err "no job dir $dir"
+        echo "Action: verify the job was started with this --scratch-dir and use its returned job_id." >&2
+        exit 1
+    fi
     ENGINE=$(cat "$dir/engine" 2>/dev/null || echo "")
     pid=$(cat "$dir/pid" 2>/dev/null || echo "")
 
@@ -234,7 +247,11 @@ poll)
 stop)
     [[ -n "$JOB" && -n "$SCRATCH" ]] || usage
     dir=$(job_dir)
-    [[ -d "$dir" ]] || { err "no job dir $dir"; exit 1; }
+    if [[ ! -d "$dir" ]]; then
+        err "no job dir $dir"
+        echo "Action: verify the job was started with this --scratch-dir and use its returned job_id." >&2
+        exit 1
+    fi
     pid=$(cat "$dir/pid" 2>/dev/null || echo "")
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
         kill "$pid" 2>/dev/null || true

@@ -18,6 +18,7 @@ If --output is omitted, Markdown goes to stdout.
 """
 
 import argparse
+import html
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -867,6 +868,7 @@ def render_dispositions(artifact):
         claim = (f.get("claim") or "").replace("|", "\\|").replace("\n", " ")
         if len(claim) > 100:
             claim = claim[:97] + "..."
+        claim = html.escape(claim, quote=False)
         score = _effective_score(f)
         lines.append(
             "| {id} | {file} | {claim} | {disp} | {score} | {state} | {action} |".format(

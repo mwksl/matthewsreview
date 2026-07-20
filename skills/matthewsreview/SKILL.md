@@ -46,9 +46,9 @@ Two useful starting profiles:
 
 The preflight output prints the resolved **Model plan** table (role / engine / model / source) before any sub-agent launches — check it, not your memory of the config.
 
-Role strings are `engine:model[:effort]`; the effort segment is codex-only (`low|medium|high|xhigh|max|ultra`).
+Role strings are `engine:model[:effort-or-thinking]`. Codex effort supports `low|medium|high|xhigh|max|ultra`; omp thinking supports `off|minimal|low|medium|high|xhigh|max`.
 
-**Running on omp models.** `omp:` engine roles dispatch to any model your omp serves (`omp models`). Per-run: `--models "deep=omp:moonshot/kimi-k3,light=omp:moonshot/kimi-k3,utility=omp:moonshot/kimi-k3"`. Permanent: `orchestrator_defaults.omp.tiers` in `~/.matthews-reviews/config.json` — omp sessions use those, Claude Code keeps `claude:*`. `claude:*` roles under omp need Anthropic auth in omp; unservable roles warn in the preflight Model plan and 404 at dispatch (run marked REVIEW DEGRADED).
+**Running on omp models.** `omp:` engine roles dispatch to any model your omp serves (`omp models`). Append a supported thinking level for per-role control, e.g. `omp:openai-codex/gpt-5.6-sol:max`. Per-run: `--models "deep=omp:openai-codex/gpt-5.6-sol:max,light=omp:openai-codex/gpt-5.6-sol:max,utility=omp:openai-codex/gpt-5.6-sol:max"`. Permanent: `orchestrator_defaults.omp.tiers` in `~/.matthews-reviews/config.json` — omp sessions use those, Claude Code keeps `claude:*`. `claude:*` roles under omp need Anthropic auth in omp; unservable roles warn in the preflight Model plan and 404 at dispatch (run marked REVIEW DEGRADED).
 
 ## After the review: the artifact as a work queue
 

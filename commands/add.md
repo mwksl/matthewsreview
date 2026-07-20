@@ -1,6 +1,6 @@
 ---
 allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(doctor.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(assign-finding-ids.sh:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(git:*), Bash(jq:*), Bash(date:*), Bash(timeout:*), Bash(sleep:*), Bash(kill:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(cat:*), Bash(printf:*), Bash(tr:*), Bash(awk:*), Bash(grep:*), Bash(mktemp:*), Read, Agent, AskUserQuestion
-argument-hint: "[<paste...>] [--file path --line N --claim \"...\"] [--impact <type>] [--no-dedup]"
+argument-hint: "[<paste...>] [--file path --line N --claim \"...\"] [--impact <type>] [--no-dedup] [--profile <name>] [--models \"<csv>\"]"
 description: Inject externally-sourced findings (cloud /ultrareview, manual finds, etc.) into the most recent /matthewsreview:review artifact for this branch. Validates via Phase 4, re-renders, re-publishes.
 disable-model-invocation: false
 ---
@@ -53,11 +53,13 @@ working context.
 
 Parse `$ARGUMENTS`:
 
-- Walk tokens left-to-right looking for the optional flags
-  (`--file <path>`, `--line <N>`, `--claim "..."`, `--impact <type>`,
-  `--no-dedup`). Strip surrounding quotes from `--claim`'s value.
-- All non-flag tokens (and tokens not consumed as flag values) join
-  with single spaces into `paste_body` (may be empty).
+- Walk tokens left-to-right looking for optional flags. `--file`,
+  `--line`, `--claim`, `--impact`, `--profile`, and `--models` each
+  consume the next token as their value (respect quoted values);
+  `--no-dedup` consumes no value. A missing value is a usage error.
+- All non-flag tokens (and only tokens not consumed as flag values)
+  join with single spaces into `paste_body` (may be empty). Any unknown
+  `--...` option is a usage error, not paste text.
 
 Capture:
 
@@ -66,6 +68,8 @@ Capture:
 - `cli_impact_set` (`true` if the user explicitly passed `--impact`,
   `false` otherwise — needed by step 4b to decide whether to overlay
   the impact onto normalizer output).
+- `profile`, `models_csv` (each may be empty; values from `--profile`
+  and `--models` respectively).
 - `no_dedup` (`true` / `false`, default `false`).
 - `paste_body` (string; may be empty).
 
@@ -121,7 +125,7 @@ paste normalizer, dedup, and Phase-4 validators all dispatch by role):
 plan_args=(--repo-root "$repo_root" --orchestrator "$harness_id")
 [[ -n "${profile:-}" ]] && plan_args+=(--profile "$profile")
 [[ -n "${models_csv:-}" ]] && plan_args+=(--models "$models_csv")
-model_plan_json=$(review-config.sh "${plan_args[@]}")
+model_plan_json=$(review-config.sh "${plan_args[@]}") || exit $?
 plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX)
 printf '%s' "$model_plan_json" > "$plan_tmp"
 artifact-patch.py --path "$artifact_path" \
@@ -227,7 +231,8 @@ operator still needs a trail showing the count came from a possibly
 stale local ref.
 
 ```bash
-base_branch=$(jq -r '.base_branch' "$artifact_path")
+base_branch=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.base_branch' | jq -r '.')
 fetch_ok=true
 if command -v timeout >/dev/null 2>&1; then
     GIT_TERMINAL_PROMPT=0 timeout 30 git fetch origin \
@@ -522,7 +527,8 @@ derivation below matches Phase 1's builder: under `trivial_mode`,
 every candidate lands in the light lane regardless of `impact_type`.
 
 ```bash
-trivial_mode=$(jq -r '.trivial_mode' "$artifact_path")
+trivial_mode=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.trivial_mode' | jq -r '.')
 ```
 
 Build full schema-valid finding objects (mirrors the Wave 2 builder in
@@ -627,7 +633,8 @@ see the same governance context the original Phase 4 saw.
 #### 7.2 Partition new candidates into lanes
 
 ```bash
-trivial_mode=$(jq -r '.trivial_mode' "$artifact_path")
+trivial_mode=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.trivial_mode' | jq -r '.')
 
 deep_ids=$(artifact-read.sh \
     --path "$artifact_path" \
@@ -941,7 +948,8 @@ tally-subagent-tokens.sh \
     --artifact   "$artifact_path" \
     2>>"$trace_log_path" || printf 'add_tally_failed\n' >> "$trace_log_path"
 
-review_started_at=$(jq -r '.review_started_at // empty' "$artifact_path")
+review_started_at=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.review_started_at // empty' | jq -r '.')
 
 orchestrator-tokens.sh \
     --artifact "$artifact_path" \
@@ -964,9 +972,12 @@ stand; the user can manually re-render).
 Read mode + comment_id from the artifact:
 
 ```bash
-mode=$(jq -r '.mode' "$artifact_path")
-pr_number=$(jq -r '.pr_number // empty' "$artifact_path")
-comment_id=$(jq -r '.comment_id // empty' "$artifact_path")
+mode=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.mode' | jq -r '.')
+pr_number=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.pr_number // empty' | jq -r '.')
+comment_id=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.comment_id // empty' | jq -r '.')
 ```
 
 If `mode == "pr"` AND `pr_number` is non-empty:
@@ -1044,25 +1055,27 @@ artifact-read.sh \
             | join(\"\n\")"
 ```
 
-Read the cumulative spend numbers from the artifact (populated by §8's
-re-tally). Direct `jq -r` call so stdout is the chat line itself, not
-a JSON-quoted string (`artifact-read.sh --filter` doesn't enable raw
-mode). Omit each line entirely if its source field is absent — matches
+Read the cumulative spend numbers through `artifact-read.sh`, then use
+`jq -r` only to decode the helper's JSON output into chat text. Omit
+each line entirely if its source field is absent — matches
 `artifact-render.py`'s renderer guard so the chat never shows `null
 tokens across null invocations`:
 
 ```bash
-subagent_token_line=$(jq -r '
+artifact_snapshot=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.')
+
+subagent_token_line=$(printf '%s' "$artifact_snapshot" | jq -r '
     if (.subagent_tokens.total // null) != null and (.subagent_tokens.invocations // null) != null
     then "Cumulative sub-agent spend: \(.subagent_tokens.total) tokens across \(.subagent_tokens.invocations) invocations."
     else empty end
-' "$artifact_path")
+')
 
-orchestrator_token_line=$(jq -r '
+orchestrator_token_line=$(printf '%s' "$artifact_snapshot" | jq -r '
     if (.orchestrator_tokens.turn_count // null) != null
     then "Cumulative orchestrator spend: \(.orchestrator_tokens.total_output) output / \(.orchestrator_tokens.total_input) input across \(.orchestrator_tokens.turn_count) turns."
     else empty end
-' "$artifact_path")
+')
 ```
 
 If publish failed in step 9, append:

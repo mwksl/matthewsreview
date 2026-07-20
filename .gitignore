@@ -7,3 +7,6 @@ __pycache__/
 
 # build-codex-skills.sh output (machine-specific absolute paths baked in)
 dist/
+
+# Local editor state
+.nova/

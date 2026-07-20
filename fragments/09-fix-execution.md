@@ -11,7 +11,10 @@ the human has overridden the validator's conservative defaults.
 The `/matthewsreview:walkthrough` scope filter is the inverse of this selector; keep the two in sync (see `commands/walkthrough.md` §3).
 
 ```bash
-eligible_finding_ids=$(jq -r --argjson thr "$threshold" '
+fix_artifact_snapshot=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.')
+
+eligible_finding_ids=$(printf '%s' "$fix_artifact_snapshot" | jq -r --argjson thr "$threshold" '
     [.findings[]
      | select(.current_state == "open")
      | select(.disposition == "confirmed_mechanical" or .disposition == "partial" or .disposition == "regression")
@@ -24,14 +27,14 @@ eligible_finding_ids=$(jq -r --argjson thr "$threshold" '
        )
      | .id
     ] | join(",")
-' "$artifact_path")
+')
 ```
 
 Capture `eligible_finding_ids` (CSV string; empty when no finding
 qualifies). Also capture counts for trace:
 
 ```bash
-eligible_count=$(jq -r --argjson thr "$threshold" '
+eligible_count=$(printf '%s' "$fix_artifact_snapshot" | jq -r --argjson thr "$threshold" '
     [.findings[]
      | select(.current_state == "open")
      | select(.disposition == "confirmed_mechanical" or .disposition == "partial" or .disposition == "regression")
@@ -43,7 +46,7 @@ eligible_count=$(jq -r --argjson thr "$threshold" '
          )
        )
     ] | length
-' "$artifact_path")
+')
 ```
 
 Append a trace record:

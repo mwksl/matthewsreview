@@ -57,17 +57,19 @@ headings.
 
 ### 1. Parse arguments
 
-Parse `$ARGUMENTS` (whitespace-split, respecting `"..."` quoted values
-for `--reason` and `--fix-hint`):
+Parse `$ARGUMENTS` left-to-right, respecting `"..."` quoted values:
 
-- First token matching `^F[0-9]+$` → `finding_id`.
+- First token matching `^F[0-9]+$` → `finding_id`; a second positional
+  finding id is a usage error.
 - `--reason "..."` → `reason` (strip surrounding quotes).
 - `--fix-hint "..."` → `fix_hint` (strip surrounding quotes). Default:
   empty string (treated as "absent" throughout — the jq at step 5
   omits the key entirely when empty).
+- `--profile <name>` → `profile`; `--models "<csv>"` → `models_csv`.
+  Each flag requires a following non-empty value.
 - `--force` → `force=true` (else `false`).
 - `--defer-publish` → `defer_publish=true` (else `false`).
-- Any other token → stop and ask the user to clarify.
+- Any unknown option or unconsumed token → stop with a usage error.
 
 If no `finding_id` was provided, error-as-prompt:
 
@@ -122,7 +124,7 @@ Resolve fresh for this invocation and store it — keep the artifact's
 plan_args=(--repo-root "$repo_root" --orchestrator "$harness_id")
 [[ -n "${profile:-}" ]] && plan_args+=(--profile "$profile")
 [[ -n "${models_csv:-}" ]] && plan_args+=(--models "$models_csv")
-model_plan_json=$(review-config.sh "${plan_args[@]}")
+model_plan_json=$(review-config.sh "${plan_args[@]}") || exit $?
 plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX)
 printf '%s' "$model_plan_json" > "$plan_tmp"
 artifact-patch.py --path "$artifact_path" \

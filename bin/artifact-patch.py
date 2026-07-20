@@ -1121,6 +1121,9 @@ def cmd_apply_decisions(args):
 
     counts = {"confirmed_mechanical": 0, "confirmed_manual": 0, "confirmed_report": 0,
               "uncertain": 0, "disproven": 0}
+    initial_artifact = _load_or_fail(args.path)
+    bands = _phase4_bands(initial_artifact)
+
 
     for idx, tup in enumerate(decisions):
         if not isinstance(tup, dict):
@@ -1147,10 +1150,7 @@ def cmd_apply_decisions(args):
             )
             return c.EXIT_VALIDATION
 
-        # Bands come from the artifact's gates field (resolved by
-        # review-config.sh at Phase 0 / load time). Read once from the
-        # pre-loop artifact; gates don't change mid-batch.
-        derived = _derive_phase4_disposition(tup, idx, _phase4_bands(_load_or_fail(args.path)))
+        derived = _derive_phase4_disposition(tup, idx, bands)
 
         # Load fresh per-tuple so preceding tuples' writes are visible on the
         # next iteration's base state. Matches the "per-tuple atomic writes"

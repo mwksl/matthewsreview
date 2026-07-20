@@ -859,6 +859,25 @@ else
     fail "W: apply-decisions state mismatch" "code=$code F101=($F101_DISP,$F101_IA,$F101_CS,$F101_VR) F102=($F102_DISP,$F102_VR) F103=($F103_DISP,$F103_VR,$F103_REASON) out=$out"
 fi
 
+# W2. Legacy artifacts may have no persisted disposition. A Phase-4 decision
+# supplies the derived disposition and actionability in one atomic pair set;
+# coupling must validate the proposed pair, not the missing stored value.
+jq '(.findings[] | select(.id == "F101")) |=
+      (del(.disposition) | .is_actionable = false | .score_phase4 = null)' \
+  "$APPLY_DIR/art.json" > "$APPLY_DIR/legacy-no-disposition.json"
+legacy_batch=$(jq -n --argjson vr "$VR_JSON" \
+  '[{id:"F101",score_phase4:80,decision:"confirmed",actionability:"auto_fixable",validation_result:$vr}]')
+legacy_out=$("$TOOLS/artifact-patch.py" \
+  --apply-decisions "$legacy_batch" \
+  --path "$APPLY_DIR/legacy-no-disposition.json" 2>&1); legacy_code=$?
+legacy_state=$(jq -r '.findings[] | select(.id=="F101") | "\(.disposition)|\(.is_actionable)"' \
+  "$APPLY_DIR/legacy-no-disposition.json" 2>/dev/null || true)
+if [[ $legacy_code -eq 0 && "$legacy_state" == "confirmed_mechanical|true" ]]; then
+    pass "W2: --apply-decisions validates derived coupling for legacy disposition-null findings"
+else
+    fail "W2: legacy disposition-null decision rejected" "code=$legacy_code state=$legacy_state out=$legacy_out"
+fi
+
 # Y. Light-lane uncertain findings render in both summary and table (Stage 2.5.D).
 # Regression guard for a real data-loss bug: artifact-render.py's light-lane
 # iteration tuples omitted "uncertain" — C13 on ray-finance had 3 light-lane
@@ -3922,7 +3941,8 @@ fi
 # trivial-mode artifact would be stored as validation_lane=deep for
 # correctness/security while the rest of the artifact is all-light,
 # and artifact-render.py's lane-section filter would misplace them.
-if grep -qF 'trivial_mode=$(jq -r ' "$ADD_MD" \
+if grep -qF 'trivial_mode=$(artifact-read.sh' "$ADD_MD" \
+    && grep -qF -- "--path \"\$artifact_path\" --filter '.trivial_mode'" "$ADD_MD" \
     && grep -qF -e '--argjson trivial "$trivial_mode"' "$ADD_MD" \
     && grep -qF 'if $trivial then "light"' "$ADD_MD"; then
     pass "RA-11: step 6 validation_lane honors trivial_mode (Phase 1 parity)"
@@ -4891,7 +4911,7 @@ echo '{"type":"turn.completed","usage":{"input_tokens":700,"cached_input_tokens"
 EOF
 cat > "$AD_HOME/bin/omp" <<'EOF'
 #!/usr/bin/env bash
-echo "omp done"
+printf 'omp done args=%s\n' "$*"
 EOF
 cat > "$AD_HOME/bin/claude-fail" <<'EOF'
 #!/usr/bin/env bash
@@ -4926,16 +4946,17 @@ else
     fail "AD-2: codex dispatch mismatch" "$ad_out"
 fi
 
-# AD-3: omp engine completes, tokens null (no usage surface)
-ad_j=$(ad_path "$AD" start --engine omp --model "anthropic/claude-sonnet-4-5" --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+# AD-3: omp engine appends the configured thinking level to the model
+# selector and completes with tokens null (no usage surface)
+ad_j=$(ad_path "$AD" start --engine omp --model "openai-codex/gpt-5.6-sol" --effort max --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
 sleep 1
 ad_out=$(ad_path "$AD" poll --job "$ad_j" --scratch-dir "$AD_HOME/scratch")
 if [[ $(printf '%s' "$ad_out" | jq -r '.verdict') == "completed" ]] \
    && [[ $(printf '%s' "$ad_out" | jq -r '.tokens') == "null" ]] \
-   && [[ $(printf '%s' "$ad_out" | jq -r '.raw_output') == "omp done" ]]; then
-    pass "AD-3: omp engine start/poll → completed, tokens=null"
+   && [[ $(printf '%s' "$ad_out" | jq -r '.raw_output') == *"--model openai-codex/gpt-5.6-sol:max"* ]]; then
+    pass "AD-3: omp engine passes model thinking suffix (:max), tokens=null"
 else
-    fail "AD-3: omp dispatch mismatch" "$ad_out"
+    fail "AD-3: omp dispatch/thinking mismatch" "$ad_out"
 fi
 
 # AD-4: failed engine → failed_terminal with exit code + error tail
@@ -4986,6 +5007,19 @@ else
     fail "AD-6: missing-CLI path mismatch" "code=$code err=$ad_err"
 fi
 
+# AD-7: malformed prompt/job paths keep the shared error-as-prompt recovery
+# contract instead of emitting a bare terminal error.
+ad_prompt_err=$(ad_path "$AD" start --engine claude --model opus --prompt-file "$AD_HOME/missing.md" --scratch-dir "$AD_HOME/scratch" 2>&1); ad_prompt_code=$?
+ad_poll_err=$(ad_path "$AD" poll --job missing-job --scratch-dir "$AD_HOME/scratch" 2>&1); ad_poll_code=$?
+ad_stop_err=$(ad_path "$AD" stop --job missing-job --scratch-dir "$AD_HOME/scratch" 2>&1); ad_stop_code=$?
+if [[ $ad_prompt_code -eq 1 && "$ad_prompt_err" == *"Action:"* \
+   && $ad_poll_code -eq 1 && "$ad_poll_err" == *"Action:"* \
+   && $ad_stop_code -eq 1 && "$ad_stop_err" == *"Action:"* ]]; then
+    pass "AD-7: missing prompt/job paths include recovery actions"
+else
+    fail "AD-7: structured path errors missing" "prompt=$ad_prompt_err poll=$ad_poll_err stop=$ad_stop_err"
+fi
+
 # DP-1: artifact-render.py --format dispositions emits one row per finding
 # plus a totals line; suggested actions follow the disposition mapping.
 dp_out=$("$TOOLS/artifact-render.py" --input "$FIX/artifact-seed.json" --format dispositions)
@@ -4996,6 +5030,18 @@ if [[ "$dp_rows" == "$dp_findings" ]] \
     pass "DP-1: dispositions export row count == findings count + totals line present"
 else
     fail "DP-1: dispositions export mismatch" "rows=$dp_rows findings=$dp_findings"
+fi
+
+# DP-2: claim text is inert Markdown table content. Truncation remains based
+# on the plain claim, then HTML-significant characters are escaped.
+DP_ART="$WORK/dp-art.json"
+jq '(.findings[] | select(.id == "F001") | .claim) = "<details>|unsafe"' \
+    "$FIX/artifact-seed.json" > "$DP_ART"
+dp_escaped=$("$TOOLS/artifact-render.py" --input "$DP_ART" --format dispositions)
+if [[ "$dp_escaped" == *"&lt;details&gt;\\|unsafe"* && "$dp_escaped" != *"<details>"* ]]; then
+    pass "DP-2: dispositions escape HTML-significant claim text"
+else
+    fail "DP-2: dispositions claim escaping mismatch" "$dp_escaped"
 fi
 
 # CAL-1: calibration-report.py aggregates a synthetic history — demote
@@ -5016,6 +5062,24 @@ if printf '%s' "$cal_out" | grep -q 'Runs analyzed: \*\*2\*\*' \
     pass "CAL-1: calibration report aggregates 2 runs (demote median, waste basis, band matrix)"
 else
     fail "CAL-1: calibration aggregation mismatch" "$(printf '%s' "$cal_out" | head -12)"
+fi
+
+# CAL-2: no-argument calibration honors the explicit review-root override.
+cal_env_out=$(MATTHEWS_REVIEW_REVIEWS_ROOT="$CAL_HOME" "$TOOLS/calibration-report.py")
+if printf '%s' "$cal_env_out" | grep -q 'Runs analyzed: \*\*2\*\*'; then
+    pass "CAL-2: calibration honors MATTHEWS_REVIEW_REVIEWS_ROOT"
+else
+    fail "CAL-2: configured review root ignored" "$cal_env_out"
+fi
+
+# CAL-3: usage and invalid-root failures follow the shared exit/error contract.
+cal_usage_err=$("$TOOLS/calibration-report.py" one two 2>&1); cal_usage_code=$?
+cal_root_err=$(MATTHEWS_REVIEW_REVIEWS_ROOT="$WORK/cal-missing" "$TOOLS/calibration-report.py" 2>&1); cal_root_code=$?
+if [[ $cal_usage_code -eq 64 && "$cal_usage_err" == *"Action:"* \
+   && $cal_root_code -eq 1 && "$cal_root_err" == *"Action:"* ]]; then
+    pass "CAL-3: calibration usage/root errors are structured with shared exits"
+else
+    fail "CAL-3: calibration error contract mismatch" "usage=$cal_usage_code:$cal_usage_err root=$cal_root_code:$cal_root_err"
 fi
 
 # SS-1: --set-scores batch — one call writes N scores, appends score_history
@@ -5137,6 +5201,85 @@ if [[ "$rc_deep" == "codex:high|default (tier:deep)" && "$rc_util" == "codex" &&
     pass "RC-13: codex orchestrator defaults to codex engine; CLI override wins"
 else
     fail "RC-13: codex default tiers mismatch" "deep=$rc_deep util=$rc_util deep2=$rc_deep2"
+fi
+
+# RC-14: omp roles accept an omp-native thinking suffix so per-stage model
+# selection can request models such as GPT-5.6-Sol Max.
+rc_out=$(env -u MATTHEWS_REVIEW_REVIEWS_ROOT HOME="$RC_EMPTY" "$TOOLS/review-config.sh" --repo-root "$RC_REPO" --orchestrator omp --models "deep=omp:openai-codex/gpt-5.6-sol:max" 2>&1); code=$?
+if [[ $code -eq 0 ]] \
+   && [[ $(printf '%s' "$rc_out" | jq -r '.roles.deep_validate | "\(.engine):\(.model):\(.effort)"') == "omp:openai-codex/gpt-5.6-sol:max" ]]; then
+    pass "RC-14: omp role accepts model thinking suffix (:max)"
+else
+    fail "RC-14: omp thinking suffix rejected or misparsed" "code=$code out=$rc_out"
+fi
+
+# RC-15: profiles reject misspelled tier names instead of silently ignoring
+# the requested model override.
+cat > "$RC_HOME/.matthews-reviews/config.json" <<'EOF'
+{"profiles":{"broken":{"tiers":{"deap":"claude:opus"}}}}
+EOF
+rc_err=$(rc_run --orchestrator claude-code --profile broken 2>&1); code=$?
+if [[ $code -eq 1 && "$rc_err" == *"unknown tier 'deap'"* && "$rc_err" == *"profile 'broken'"* ]]; then
+    pass "RC-15: unknown profile tier rejected"
+else
+    fail "RC-15: unknown profile tier accepted or misreported" "code=$code err=$rc_err"
+fi
+
+# RC-16: resolver-side gate validation is loud; artifact-patch retains its
+# legacy malformed-artifact fallback (GB-2 above).
+cat > "$RC_HOME/.matthews-reviews/config.json" <<'EOF'
+{"gates":{"phase4_bands":[70,50,90]}}
+EOF
+rc_gate_order=$(rc_run --orchestrator claude-code 2>&1); rc_gate_order_code=$?
+cat > "$RC_HOME/.matthews-reviews/config.json" <<'EOF'
+{"gates":{"phase4_bands":[45,60]}}
+EOF
+rc_gate_len=$(rc_run --orchestrator claude-code 2>&1); rc_gate_len_code=$?
+cat > "$RC_HOME/.matthews-reviews/config.json" <<'EOF'
+{"gates":{"phase3_gate":"45"}}
+EOF
+rc_gate_type=$(rc_run --orchestrator claude-code 2>&1); rc_gate_type_code=$?
+cat > "$RC_HOME/.matthews-reviews/config.json" <<'EOF'
+{"gates":{"phase3_gait":45}}
+EOF
+rc_gate_key=$(rc_run --orchestrator claude-code 2>&1); rc_gate_key_code=$?
+rm -f "$RC_HOME/.matthews-reviews/config.json"
+if [[ $rc_gate_order_code -eq 1 && "$rc_gate_order" == *"strictly ascending"* \
+   && $rc_gate_len_code -eq 1 && "$rc_gate_len" == *"exactly 3"* \
+   && $rc_gate_type_code -eq 1 && "$rc_gate_type" == *"number"* \
+   && $rc_gate_key_code -eq 1 && "$rc_gate_key" == *"unknown gate"* ]]; then
+    pass "RC-16: malformed gate keys/types/bands rejected at config resolution"
+else
+    fail "RC-16: malformed gates accepted or misreported" "order=$rc_gate_order_code:$rc_gate_order len=$rc_gate_len_code:$rc_gate_len type=$rc_gate_type_code:$rc_gate_type key=$rc_gate_key_code:$rc_gate_key"
+fi
+
+# RC-17: every canonical role key is accepted through the same config path;
+# an unknown key still fails loudly. This catches role-set drift between
+# validation and emission.
+rc_role_keys='[
+  "deep_lens","deep_validate","cross_cutting","fix","post_fix_review","reconcile",
+  "light_lens","light_validate",
+  "classifier","normalizer","dedup","scoring","fix_hint","briefer","drafter",
+  "ensemble_detect","codex_detect","codex_validate","codex_crosscut"
+]'
+jq -n --argjson keys "$rc_role_keys" \
+  '{roles: ($keys | map({key:., value:"claude:sonnet"}) | from_entries)}' \
+  > "$RC_HOME/.matthews-reviews/config.json"
+rc_roles_out=$(rc_run --orchestrator claude-code 2>&1); rc_roles_code=$?
+rc_roles_count=$(printf '%s' "$rc_roles_out" | jq '.roles | length' 2>/dev/null || echo 0)
+rc_roles_overridden=$(printf '%s' "$rc_roles_out" \
+  | jq '[.roles[] | select(.engine == "claude" and .model == "sonnet")] | length' \
+    2>/dev/null || echo 0)
+cat > "$RC_HOME/.matthews-reviews/config.json" <<'EOF'
+{"roles":{"future_typo":"claude:sonnet"}}
+EOF
+rc_unknown_role=$(rc_run --orchestrator claude-code 2>&1); rc_unknown_role_code=$?
+rm -f "$RC_HOME/.matthews-reviews/config.json"
+if [[ $rc_roles_code -eq 0 && "$rc_roles_count" == "19" && "$rc_roles_overridden" == "19" \
+   && $rc_unknown_role_code -eq 1 && "$rc_unknown_role" == *"unknown role 'future_typo'"* ]]; then
+    pass "RC-17: canonical role set validates and emits through one path"
+else
+    fail "RC-17: role-set validation/emission drift" "valid=$rc_roles_code count=$rc_roles_count overridden=$rc_roles_overridden unknown=$rc_unknown_role_code:$rc_unknown_role"
 fi
 
 # ------------------------------------------------------------------ Project F: LLM output normalization
@@ -6338,17 +6481,19 @@ else
     fail "CR-2: codex-review.md missing reviewer_sources_label working-context assignment"
 fi
 
-# CR-3: codex-review.md has the codex-companion readiness gate before
-# Phase 0 — fail-fast behavior when the companion script is missing or
-# `setup --json` reports a not-ready shape outside the documented
-# cold-start bypass (shared-mode + cli=true + ENOENT+broker.sock). Plan §2
-# (no fallback to Claude lenses) hinges on this gate firing.
-if grep -qF 'codex-companion script not found' "$CR_CMD" \
-    && grep -qF 'setup --json reports not-ready' "$CR_CMD" \
-    && grep -qF '/codex:setup' "$CR_CMD"; then
-    pass "CR-3: codex-review.md readiness gate fails-fast on missing/not-ready companion with /codex:setup hint"
+# CR-3: codex-review.md resolves a usable Codex transport before Phase 0.
+# Companion readiness and the narrow shared-mode cold-start bypass remain;
+# an authenticated standalone CLI selects agent-dispatch, and only the
+# absence of both transports fails with actionable setup guidance.
+if grep -qF 'node "$CODEX_COMPANION" setup --json' "$CR_CMD" \
+    && grep -qF '"$cx_mode" == "shared"' "$CR_CMD" \
+    && grep -qF 'command -v codex' "$CR_CMD" \
+    && grep -qF 'codex_launch_mode="agent-dispatch"' "$CR_CMD" \
+    && grep -qF 'ERROR: no usable Codex transport.' "$CR_CMD" \
+    && grep -qF '/codex:setup, or install/authenticate the codex CLI' "$CR_CMD"; then
+    pass "CR-3: codex-review.md selects companion or standalone Codex fallback and fails only when neither is usable"
 else
-    fail "CR-3: codex-review.md readiness gate missing or incomplete"
+    fail "CR-3: codex-review.md transport readiness gate missing or incomplete"
 fi
 
 # CR-4: each new Codex fragment exists, is non-trivial, and references
@@ -6437,36 +6582,32 @@ case "$PV" in
         ;;
 esac
 
-# CR-9: every Codex result-pluck site leads with .storedJob.result.rawOutput.
-# codex-companion stores task output at .storedJob.result.rawOutput
-# (lib/job-control.mjs sets `result: execution.payload`); the original
-# implementation plucked from .storedJob.payload.rawOutput, so every
-# Codex job extracted empty string and hit the §3.7 retry fallback.
-# Two checks:
-#   a. no line in the 4 Codex docs begins (after whitespace) with
-#      `.storedJob.payload.rawOutput //` — the original bug pattern.
-#   b. every Codex doc references `.storedJob.result.rawOutput` —
-#      catches accidental removal of the canonical key.
-CR_PLUCK_DOCS=(
-    "commands/codex-review.md"
+# CR-9: codex-poll.sh owns the companion-specific storedJob pluck; all
+# execution fragments consume its normalized raw_output field. Keeping the
+# storage path in one helper prevents drift and lets agent-dispatch expose
+# the same verdict shape.
+CR_PLUCK_FRAGMENTS=(
     "fragments/01-codex-detection.md"
     "fragments/05-codex-validation.md"
     "fragments/06-codex-cross-cutting.md"
 )
 cr9_violations=""
-for f in "${CR_PLUCK_DOCS[@]}"; do
+if ! grep -qF '.storedJob.result.rawOutput // .storedJob.payload.rawOutput // .storedJob.rawOutput // ""' "$REPO/bin/codex-poll.sh"; then
+    cr9_violations="$cr9_violations bin/codex-poll.sh(missing-canonical-chain)"
+fi
+for f in "${CR_PLUCK_FRAGMENTS[@]}"; do
     p="$REPO/$f"
-    if grep -nE '^[[:space:]]*\.storedJob\.payload\.rawOutput[[:space:]]*//' "$p" >/dev/null 2>&1; then
-        cr9_violations="$cr9_violations $f(leads-with-payload)"
+    if grep -qF '.storedJob.' "$p"; then
+        cr9_violations="$cr9_violations $f(direct-storage-pluck)"
     fi
-    if ! grep -qF '.storedJob.result.rawOutput' "$p"; then
-        cr9_violations="$cr9_violations $f(missing-result-key)"
+    if ! grep -qF ".raw_output // \"\"" "$p"; then
+        cr9_violations="$cr9_violations $f(missing-normalized-output)"
     fi
 done
 if [[ -z "$cr9_violations" ]]; then
-    pass "CR-9: every Codex pluck-site leads with .storedJob.result.rawOutput (regression guard for path-mismatch bug)"
+    pass "CR-9: codex-poll owns storedJob pluck; fragments consume transport-neutral raw_output"
 else
-    fail "CR-9: Codex rawOutput pluck contract violated:$cr9_violations"
+    fail "CR-9: Codex rawOutput normalization contract violated:$cr9_violations"
 fi
 
 # CR-10: Phase 4 codex-validation type-guards $raw_repaired to an object
@@ -6866,6 +7007,35 @@ else
     fail "CR-13f: commands/codex-review.md teaches raw status/result-poll recipe (bypasses watchdog):$cr13f_violations"
 fi
 
+# CR-13g — codex-review's standalone CLI fallback is end-to-end, not
+# readiness-only. Both command entry points must grant agent-dispatch, and
+# every codex-review execution fragment must branch launch/poll/stop on
+# codex_launch_mode while retaining the companion path.
+cr13g_problems=""
+for f in commands/review.md commands/codex-review.md; do
+    grep -qF 'Bash(agent-dispatch.sh:*)' "$REPO/$f" \
+        || cr13g_problems="$cr13g_problems $f(no-agent-dispatch-grant)"
+done
+for f in fragments/01-codex-detection.md fragments/05-codex-validation.md fragments/06-codex-cross-cutting.md; do
+    p="$REPO/$f"
+    grep -qF 'codex_launch_mode' "$p" \
+        || cr13g_problems="$cr13g_problems $f(no-mode-branch)"
+    grep -qF 'agent-dispatch.sh" start --engine codex' "$p" \
+        || cr13g_problems="$cr13g_problems $f(no-fallback-start)"
+    grep -qF 'agent-dispatch.sh" poll' "$p" \
+        || cr13g_problems="$cr13g_problems $f(no-fallback-poll)"
+    grep -qF 'agent-dispatch.sh" stop' "$p" \
+        || cr13g_problems="$cr13g_problems $f(no-fallback-stop)"
+    grep -qF 'node "$CODEX_COMPANION" task --background' "$p" \
+        || cr13g_problems="$cr13g_problems $f(no-companion-start)"
+done
+if grep -qF 'codex_launch_mode="agent-dispatch"' "$REPO/commands/codex-review.md" \
+   && [[ -z "$cr13g_problems" ]]; then
+    pass "CR-13g: codex CLI fallback branches readiness, launch, poll, stop, output collection, and permissions end-to-end"
+else
+    fail "CR-13g: codex CLI fallback wiring incomplete:$cr13g_problems"
+fi
+
 # CR-14 — fragments/00-preflight.md gates the --effort skip on working-context
 # `effort` being set. Without the gate, `/matthewsreview:review --effort high`
 # silently consumes the flag (no upstream parser owns it on :review) instead
@@ -6909,19 +7079,17 @@ else
     fail "CR-16b: commands/codex-review.md readiness-gate bypass predicate has drifted from fragment shape (missing mode/cli/ENOENT signature, or re-introduced cx_auth)"
 fi
 
-# CR-16c — commands/codex-review.md must retain its fatal `exit 1` on
-# the non-bypass not-ready path. Regression guard against accidentally
-# defaulting the readiness gate to bypass when the cold-start
-# signature doesn't match (which would swallow real auth/CLI failures
-# silently). Uses an awk range bounded by the closing `fi` of the
-# bypass `if !` block so future growth of the block can't silently
-# push the `exit 1` outside a fixed-line window.
+# CR-16c — a not-ready companion may fall through to standalone Codex,
+# but the final no-transport branch must remain fatal. This prevents the
+# cold-start bypass from silently swallowing real auth/CLI failures when
+# neither transport is usable.
 CR16C_COMMAND="$REPO/commands/codex-review.md"
-if awk '/if ! \[\[ "\$cx_mode" == "shared"/,/^[[:space:]]*fi[[:space:]]*$/' "$CR16C_COMMAND" \
-     | grep -qE '^[[:space:]]*exit 1[[:space:]]*$'; then
-    pass "CR-16c: commands/codex-review.md retains fatal exit 1 on non-bypass not-ready (cold-start bypass cannot accidentally swallow real failures)"
+cr16c_block=$(awk '/^if \[\[ -z "\$codex_launch_mode" \]\]; then$/,/^[[:space:]]*fi[[:space:]]*$/' "$CR16C_COMMAND")
+if printf '%s\n' "$cr16c_block" | grep -qF 'ERROR: no usable Codex transport.' \
+   && printf '%s\n' "$cr16c_block" | grep -qE '^[[:space:]]*exit 1[[:space:]]*$'; then
+    pass "CR-16c: codex-review.md retains fatal exit when companion and standalone Codex are both unavailable"
 else
-    fail "CR-16c: commands/codex-review.md readiness gate missing fatal exit 1 in non-bypass branch — cold-start bypass may be swallowing real not-ready failures"
+    fail "CR-16c: codex-review.md final no-transport branch is not fatal"
 fi
 
 echo

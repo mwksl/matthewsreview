@@ -187,7 +187,7 @@ fetch_pr_commits() {
     fi
 
     local api_err
-    api_err="$(mktemp)"
+    api_err=$(mktemp)
     if ! PR_COMMITS_JSON=$(gh api --paginate "repos/$owner_repo/pulls/$PR_NUM/commits" 2>"$api_err"); then
         PR_COMMITS_FETCHED="failed"
         local excerpt

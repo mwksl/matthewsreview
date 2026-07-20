@@ -109,8 +109,7 @@ caller) and the finding's `validation_result`:
 - `$fix_hint` is empty AND `finding.validation_result` is `null` (no
   validator fix_proposal exists — common for light-lane findings and
   for deep-lane findings Phase 4 marked `uncertain`/`disproven`) →
-  ASK once whose option set depends on the
-  claim text.
+  dispatch one ASK whose option set depends on the claim text.
 
 **Heuristic for the option set.** Lowercase the `claim` and scan for
 any of these substrings: `docstring`, `doc comment`, `jsdoc`, `tsdoc`,
@@ -129,7 +128,7 @@ If none match, skip the canned options and offer only:
 - "Skip — no steering hint"
 
 For "Other" and "Provide a hint (free-form)", dispatch a follow-up
-the ASK primitive asking for the free-form hint string. For the two
+ASK asking for the free-form hint string. For the two
 canned options, use the option text verbatim as `fix_hint`. For
 "Skip", leave `fix_hint` empty. Capture the final `fix_hint` string
 (may be empty — empty means "no hint").

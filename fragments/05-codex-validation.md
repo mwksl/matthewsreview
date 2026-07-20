@@ -20,7 +20,27 @@ dispatch shape:
   policy.
 
 Capture `phase_4_start_epoch=$(date +%s)` as the first action of this
-phase — step 4.7 logs the elapsed time.
+phase, then materialize the resolved Codex validation role once:
+
+```bash
+[[ "$role_codex_validate" == codex:* ]] || {
+    echo "ERROR: codex_validate must resolve to codex:<model>:<effort>." >&2
+    exit 1
+}
+codex_validate_spec="${role_codex_validate#codex:}"
+if [[ "$codex_validate_spec" == *:* ]]; then
+    codex_validate_model="${codex_validate_spec%%:*}"
+    codex_validate_effort="${codex_validate_spec#*:}"
+else
+    codex_validate_model="$codex_validate_spec"
+    codex_validate_effort=""
+fi
+[[ -n "$codex_validate_effort" ]] || codex_validate_effort="${effort:-high}"
+codex_dispatch_scratch="${scratch_dir:-/tmp/matthews-review-codex-$review_id/jobs}"
+mkdir -p "$codex_dispatch_scratch"
+```
+
+Step 4.7 logs the elapsed time.
 
 ### 4.1. Partition candidates into lanes
 
@@ -148,96 +168,99 @@ PROMPT
 #### 4.2.2. Launch Codex jobs (one orchestrator turn)
 
 > **One turn for all per-finding launches — not one turn per finding.**
-> Issue every deep-lane finding's `node "$CODEX_COMPANION" task --background`
-> Bash block in a single orchestrator turn. Phase 4a wall-clock latency is
+> Issue every deep-lane finding's mode-aware launch block in a single
+> orchestrator turn. Phase 4a wall-clock latency is
 > `max(codex_durations)`, not `sum(codex_durations)`.
 
-For each deep-lane finding, fire one Bash tool-use:
+For each deep-lane finding:
 
 ```bash
-node "$CODEX_COMPANION" task --background --effort "$effort" \
-    --prompt-file "/tmp/matthews-review-codex-${review_id}-V-${finding_id}.md" \
-    --json
+prompt_file="/tmp/matthews-review-codex-${review_id}-V-${finding_id}.md"
+set +e
+if [[ "$codex_launch_mode" == "companion" ]]; then
+    launch_json=$(node "$CODEX_COMPANION" task --background \
+        --effort "$codex_validate_effort" \
+        --prompt-file "$prompt_file" --json)
+    launch_rc=$?
+    job_id=$(printf '%s' "$launch_json" | jq -r '.jobId // empty')
+else
+    dispatch_args=("${MRB}agent-dispatch.sh" start --engine codex \
+        --prompt-file "$prompt_file" --scratch-dir "$codex_dispatch_scratch")
+    [[ -n "$codex_validate_model" ]] && dispatch_args+=(--model "$codex_validate_model")
+    [[ -n "$codex_validate_effort" ]] && dispatch_args+=(--effort "$codex_validate_effort")
+    launch_json=$("${dispatch_args[@]}")
+    launch_rc=$?
+    job_id=$(printf '%s' "$launch_json" | jq -r '.job_id // empty')
+fi
+set -e
 ```
 
-Capture each launch payload's `.jobId` into a working-context map
-keyed by `finding_id`:
-
-```bash
-job_id=$(node "$CODEX_COMPANION" task --background --effort "$effort" \
-    --prompt-file "/tmp/matthews-review-codex-${review_id}-V-${finding_id}.md" \
-    --json | jq -r '.jobId')
-```
+Capture successful ids in a map keyed by `finding_id`. A non-zero
+`launch_rc` or empty id routes through the same retry-with-judgment
+policy as §1.4; persistent failure falls through to §4.2.4.
 
 #### 4.2.3. Poll, fetch, shape-fix per finding
 
-Poll each deep-lane Codex job via the watchdog helper (same shape
-as §1.4):
+Poll every in-flight deep job in one orchestrator turn:
 
 ```bash
-case "$effort" in
-    low)    ceiling=300 ;;    # 5 min
-    medium) ceiling=480 ;;    # 8 min
-    high)   ceiling=900 ;;    # 15 min
-    xhigh)  ceiling=1500 ;;   # 25 min
-    max)    ceiling=2100 ;;   # 35 min
-    ultra)  ceiling=2700 ;;   # 45 min
+case "$codex_validate_effort" in
+    low)    ceiling=300 ;;
+    medium) ceiling=480 ;;
+    high)   ceiling=900 ;;
+    xhigh)  ceiling=1500 ;;
+    max)    ceiling=2100 ;;
+    ultra)  ceiling=2700 ;;
     *)      ceiling=900 ;;
 esac
-# Size scaling (observed: a 10.7k-line PR needed manual deadline
-# extension): base + 60s per 1,000 changed lines, capped at 2x base.
+base_ceiling=$ceiling
 size_bonus=$(( 60 * lines_changed / 1000 ))
 ceiling=$(( ceiling + size_bonus ))
-case "$effort" in
-    low)   max_ceiling=600 ;;
-    medium) max_ceiling=960 ;;
-    high)  max_ceiling=1800 ;;
-    xhigh) max_ceiling=3000 ;;
-    max)   max_ceiling=4200 ;;
-    ultra) max_ceiling=5400 ;;
-    *)     max_ceiling=1800 ;;
-esac
+max_ceiling=$(( base_ceiling * 2 ))
 [[ "$ceiling" -gt "$max_ceiling" ]] && ceiling=$max_ceiling
 
-poll=$(codex-poll.sh \
+if [[ "$codex_launch_mode" == "companion" ]]; then
+    poll=$(codex-poll.sh \
         --job "$job_id" \
         --companion "$CODEX_COMPANION" \
         --stall-threshold-sec 90 \
         --wall-clock-ceiling-sec "$ceiling")
+else
+    poll=$("${MRB}agent-dispatch.sh" poll \
+        --job "$job_id" \
+        --scratch-dir "$codex_dispatch_scratch" \
+        --stall-threshold-sec 90 \
+        --wall-clock-ceiling-sec "$ceiling")
+fi
 verdict=$(printf '%s' "$poll" | jq -r '.verdict')
 ```
 
-Verdict-branching matches §1.4's table verbatim — see that section
-for the full list. The behaviors that matter here:
-
-- `alive` / `stalled_suspect` → keep polling next turn.
-- `completed` → `raw_output` is in the verdict; capture as
-  `codex_output` (the helper has already plucked the canonical
-  `.storedJob.result.rawOutput` chain — direct calls to
-  `node "$CODEX_COMPANION" status` are forbidden in this fragment,
-  smoke `CR-13c` enforces).
-- `broker_desynced` / `wall_clock_exceeded` / `failed_terminal` →
-  cancel (best-effort) and route the single finding into §4.2.4's
-  per-finding atomicity (sentinel tuple, `disposition: uncertain`).
+`alive` and `stalled_suspect` remain in the next poll turn.
+`completed` supplies normalized output and optional usage:
 
 ```bash
-( node "$CODEX_COMPANION" cancel "$job_id" >/dev/null 2>&1 ) & disown   # fire-and-forget; `timeout` is GNU coreutils, not on stock macOS
+codex_output=$(printf '%s' "$poll" | jq -r '.raw_output // ""')
+codex_tokens=$(printf '%s' "$poll" | jq -r '.tokens // "null"')
+```
+
+Empty completed output routes through retry-with-judgment.
+`broker_desynced` (companion only), `wall_clock_exceeded`, and
+`failed_terminal` stop best-effort with the selected transport and
+fall through to §4.2.4 after retries are exhausted:
+
+```bash
+if [[ "$codex_launch_mode" == "companion" ]]; then
+    ( node "$CODEX_COMPANION" cancel "$job_id" >/dev/null 2>&1 ) & disown
+else
+    "${MRB}agent-dispatch.sh" stop \
+        --job "$job_id" --scratch-dir "$codex_dispatch_scratch" \
+        >/dev/null 2>&1 || true
+fi
 elapsed_for_log=$(printf '%s' "$poll" | jq -r '.elapsed_sec // "null"')
-printf 'phase_4a_codex_watchdog: finding=%s verdict=%s job=%s elapsed=%s\n' \
-    "$finding_id" "$verdict" "$job_id" "$elapsed_for_log" >> "$trace_log_path"
-# fall through to §4.2.4 per-finding atomicity (sentinel uncertain)
+printf 'phase_4a_codex_watchdog: finding=%s mode=%s verdict=%s job=%s elapsed=%s\n' \
+    "$finding_id" "$codex_launch_mode" "$verdict" "$job_id" \
+    "$elapsed_for_log" >> "$trace_log_path"
 ```
-
-For the `completed` happy path:
-
-```bash
-codex_output=$(printf '%s' "$poll" | jq -r '.raw_output')
-```
-
-An empty `raw_output` on `completed` still routes to §4.2.4's
-sentinel-uncertain path — the §3.7 retry-with-judgment loop sits
-above this verdict-branch in the same orchestrator turn structure
-as §1.4.
 
 Then dispatch ONE Sonnet shape-fixer per finding. Each shape-fixer
 takes that freeform Codex output and returns a single canonical tuple.
@@ -342,10 +365,15 @@ Options:
 
 #### 4.2.5. Log tokens
 
-Log each Sonnet shape-fixer's tokens (Codex tokens are NOT logged —
-plan §3.8):
+Log the Codex job's normalized usage (`null` when the selected
+transport does not report it), then the Sonnet shape-fixer:
 
 ```bash
+log-tokens.sh \
+  --review-dir "$review_dir" --phase phase_4a \
+  --agent-role codex_validator --finding-id "$finding_id" \
+  --agent-id "$job_id" --model "$role_codex_validate" \
+  --tokens "$codex_tokens"
 log-tokens.sh \
   --review-dir "$review_dir" --phase phase_4a \
   --agent-role validator_shape_fixer --finding-id "$finding_id" \
@@ -356,14 +384,14 @@ log-tokens.sh \
 ### 4.3. Phase 4b — light lane (chunked-batch Codex per chunk)
 
 > **One turn for all chunk launches — not one turn per chunk.** Issue
-> every chunk's `node "$CODEX_COMPANION" task --background` Bash block
-> in a single orchestrator turn. Phase 4b wall-clock latency is
-> `max(chunk_durations)`, not `sum(chunk_durations)`.
+> every chunk's mode-aware launch block in a single orchestrator turn.
+> Phase 4b wall-clock latency is `max(chunk_durations)`, not
+> `sum(chunk_durations)`.
 
 Split light-lane candidates (and every candidate under `trivial_mode`)
 into chunks of **≤25 candidates per chunk**. For each chunk, build
-ONE Codex prompt file and launch ONE Codex job. Dispatch all chunk
-jobs in one orchestrator turn for concurrency.
+ONE prompt file and launch ONE Codex job. Dispatch all chunk jobs in
+one orchestrator turn for concurrency.
 
 #### 4.3.1. Build per-chunk prompt
 
@@ -434,65 +462,87 @@ Set `trivial_mode` and `claude_md_paths` substitutions before writing.
 
 #### 4.3.2. Launch + poll + shape-fix per chunk
 
-Launch each chunk's Codex job:
+Launch every chunk through the selected transport in one orchestrator
+turn:
 
 ```bash
-node "$CODEX_COMPANION" task --background --effort "$effort" \
-    --prompt-file "/tmp/matthews-review-codex-${review_id}-LB-chunk${chunk_n}.md" \
-    --json
+prompt_file="/tmp/matthews-review-codex-${review_id}-LB-chunk${chunk_n}.md"
+set +e
+if [[ "$codex_launch_mode" == "companion" ]]; then
+    launch_json=$(node "$CODEX_COMPANION" task --background \
+        --effort "$codex_validate_effort" \
+        --prompt-file "$prompt_file" --json)
+    launch_rc=$?
+    job_id=$(printf '%s' "$launch_json" | jq -r '.jobId // empty')
+else
+    dispatch_args=("${MRB}agent-dispatch.sh" start --engine codex \
+        --prompt-file "$prompt_file" --scratch-dir "$codex_dispatch_scratch")
+    [[ -n "$codex_validate_model" ]] && dispatch_args+=(--model "$codex_validate_model")
+    [[ -n "$codex_validate_effort" ]] && dispatch_args+=(--effort "$codex_validate_effort")
+    launch_json=$("${dispatch_args[@]}")
+    launch_rc=$?
+    job_id=$(printf '%s' "$launch_json" | jq -r '.job_id // empty')
+fi
+set -e
 ```
 
-Capture each launch payload's `.jobId` keyed by chunk number:
+Capture successful ids by chunk number. Launch failures enter the same
+retry-with-judgment path as deep validators, then §4.3.3 atomicity.
+
+Poll every in-flight chunk in one turn. Light-lane reasoning uses
+compressed ceilings:
 
 ```bash
-job_id=$(node "$CODEX_COMPANION" task --background --effort "$effort" \
-    --prompt-file "/tmp/matthews-review-codex-${review_id}-LB-chunk${chunk_n}.md" \
-    --json | jq -r '.jobId')
-```
-
-Poll each chunk via the watchdog helper. Light-lane reasoning is
-shorter than the deep lane — same per-effort table but compressed
-ceilings (10 min high / 18 min xhigh; chunked-batch over ≤25
-candidates is shallower than per-finding deep validation):
-
-```bash
-case "$effort" in
-    low)    ceiling=240 ;;    # 4 min
-    medium) ceiling=360 ;;    # 6 min
-    high)   ceiling=600 ;;    # 10 min
-    xhigh)  ceiling=1080 ;;   # 18 min
+case "$codex_validate_effort" in
+    low)    ceiling=240 ;;
+    medium) ceiling=360 ;;
+    high)   ceiling=600 ;;
+    xhigh)  ceiling=1080 ;;
+    max)    ceiling=1440 ;;
+    ultra)  ceiling=1800 ;;
     *)      ceiling=600 ;;
 esac
 
-poll=$(codex-poll.sh \
+if [[ "$codex_launch_mode" == "companion" ]]; then
+    poll=$(codex-poll.sh \
         --job "$job_id" \
         --companion "$CODEX_COMPANION" \
         --stall-threshold-sec 90 \
         --wall-clock-ceiling-sec "$ceiling")
+else
+    poll=$("${MRB}agent-dispatch.sh" poll \
+        --job "$job_id" \
+        --scratch-dir "$codex_dispatch_scratch" \
+        --stall-threshold-sec 90 \
+        --wall-clock-ceiling-sec "$ceiling")
+fi
 verdict=$(printf '%s' "$poll" | jq -r '.verdict')
 ```
 
-Verdict-branching matches §1.4's table. Direct calls to
-`node "$CODEX_COMPANION" status` are forbidden in this fragment
-(smoke `CR-13c` enforces). On `completed`, capture
-`codex_chunk_output_<N>` from the verdict's `raw_output` — the
-helper has already plucked
-`.storedJob.result.rawOutput // .storedJob.payload.rawOutput // .storedJob.rawOutput // ""`:
+On `completed`, capture normalized output and usage:
 
 ```bash
-codex_chunk_output_<N>=$(printf '%s' "$poll" | jq -r '.raw_output')
+codex_chunk_output=$(printf '%s' "$poll" | jq -r '.raw_output // ""')
+codex_chunk_tokens=$(printf '%s' "$poll" | jq -r '.tokens // "null"')
 ```
 
-On `broker_desynced` / `wall_clock_exceeded` / `failed_terminal`,
-cancel best-effort and route the chunk into §4.3.3's per-chunk
-atomicity (sentinel uncertain for every candidate id in the chunk):
+Empty output is a retryable failure. On `broker_desynced` (companion
+only), `wall_clock_exceeded`, or `failed_terminal`, stop via the
+selected transport, log the mode, and route the chunk into §4.3.3
+after retries are exhausted:
 
 ```bash
-( node "$CODEX_COMPANION" cancel "$job_id" >/dev/null 2>&1 ) & disown   # fire-and-forget; `timeout` is GNU coreutils, not on stock macOS
+if [[ "$codex_launch_mode" == "companion" ]]; then
+    ( node "$CODEX_COMPANION" cancel "$job_id" >/dev/null 2>&1 ) & disown
+else
+    "${MRB}agent-dispatch.sh" stop \
+        --job "$job_id" --scratch-dir "$codex_dispatch_scratch" \
+        >/dev/null 2>&1 || true
+fi
 elapsed_for_log=$(printf '%s' "$poll" | jq -r '.elapsed_sec // "null"')
-printf 'phase_4b_codex_watchdog: chunk=%s verdict=%s job=%s elapsed=%s\n' \
-    "$chunk_n" "$verdict" "$job_id" "$elapsed_for_log" >> "$trace_log_path"
-# fall through to §4.3.3 per-chunk atomicity
+printf 'phase_4b_codex_watchdog: chunk=%s mode=%s verdict=%s job=%s elapsed=%s\n' \
+    "$chunk_n" "$codex_launch_mode" "$verdict" "$job_id" \
+    "$elapsed_for_log" >> "$trace_log_path"
 ```
 
 Dispatch ONE Sonnet shape-fixer per chunk:
@@ -503,7 +553,7 @@ Dispatch ONE Sonnet shape-fixer per chunk:
 > **Codex output (freeform):**
 >
 > ```
-> $codex_chunk_output_<N>
+> $codex_chunk_output
 > ```
 >
 > **Candidate ids in this chunk:** `<comma-separated finding ids>`
@@ -547,7 +597,14 @@ the ASK primitive per the §4.2.4 pattern.
 
 #### 4.3.4. Log tokens
 
+Log one Codex usage record and one shape-fixer record per chunk:
+
 ```bash
+log-tokens.sh \
+  --review-dir "$review_dir" --phase phase_4b \
+  --agent-role codex_light_validator \
+  --agent-id "$job_id" --model "$role_codex_validate" \
+  --tokens "$codex_chunk_tokens"
 log-tokens.sh \
   --review-dir "$review_dir" --phase phase_4b \
   --agent-role validator_shape_fixer \
@@ -555,9 +612,7 @@ log-tokens.sh \
   --tokens <N or null>
 ```
 
-(Per-chunk shape-fixer log; no `--finding-id` because each chunk-fixer
-covers multiple findings — mirrors the existing Phase 4b chunk-agent
-pattern in `fragments/05-validation.md`.)
+The records are per chunk, so neither uses `--finding-id`.
 
 ### 4.4. Apply §13.1 Phase-4 decision table (batched)
 
