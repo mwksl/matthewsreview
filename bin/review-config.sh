@@ -141,9 +141,16 @@ get_kv() { # listname key -> "value|source" or empty
     done <<< "$cur"
 }
 
-# seed defaults
+# seed defaults. On the codex orchestrator the built-in tiers switch to
+# the codex engine (codex::high) — a codex-driven run should be
+# self-contained (matches :codex-review's all-codex shape) instead of
+# stalling on cross-engine consent prompts. Config/CLI still overrides.
+TIERS_SEED="$TIERS_DEFAULT"
+if [[ "$ORCHESTRATOR" == "codex" ]]; then
+    TIERS_SEED='{"deep":"codex::high","light":"codex::high","utility":"codex::high"}'
+fi
 for t in deep light utility; do
-    set_kv TIER_LIST "$t" "$(jq -r --arg k "$t" '.[$k]' <<<"$TIERS_DEFAULT")" "default"
+    set_kv TIER_LIST "$t" "$(jq -r --arg k "$t" '.[$k]' <<<"$TIERS_SEED")" "default"
 done
 
 apply_file() { # file source

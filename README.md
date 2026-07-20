@@ -68,6 +68,8 @@ Where config lives (later wins): built-in defaults → `~/.matthews-reviews/conf
 }
 ```
 
+**Running from Codex.** On the Codex orchestrator the built-in tiers default to the codex engine (`codex::high` for every role) — a codex-driven run is self-contained and never stalls on cross-engine consent prompts. Mix engines per role via `--models` (e.g. `deep_validate=claude:opus` shells out to `claude -p` when the Claude CLI is installed and authed).
+
 **Running on omp models.** Role strings with the `omp:` engine dispatch through omp's eval bridge to any model your omp installation serves (`omp models` lists the registry). Example per-run: `--models "deep=omp:moonshot/kimi-k3,light=omp:moonshot/kimi-k3,utility=omp:moonshot/kimi-k3"`. To make it permanent, set `orchestrator_defaults.omp.tiers` (above) — Claude Code sessions are unaffected. Without it, `claude:*` roles under omp require Anthropic auth in omp; if a role's model isn't servable, the preflight Model plan prints a warning and lens dispatches 404 (the run is then marked **REVIEW DEGRADED** in the report). `bin/doctor.sh` probes this upfront.
 
 ```bash

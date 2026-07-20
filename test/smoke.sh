@@ -5124,6 +5124,20 @@ else
     fail "DG-4: fragment wiring incomplete"
 fi
 
+# RC-13: codex orchestrator defaults tiers to the codex engine
+# (self-contained pipeline; cross-engine consent stall avoided), while
+# claude-code keeps claude:* and CLI overrides still win
+rc_out=$(env -u MATTHEWS_REVIEW_REVIEWS_ROOT HOME="$RC_EMPTY" "$TOOLS/review-config.sh" --repo-root "$RC_REPO" --orchestrator codex)
+rc_deep=$(printf '%s' "$rc_out" | jq -r '.roles.deep_validate | "\(.engine):\(.effort)|\(.source)"')
+rc_util=$(printf '%s' "$rc_out" | jq -r '.roles.dedup | "\(.engine)"')
+rc_out2=$(env -u MATTHEWS_REVIEW_REVIEWS_ROOT HOME="$RC_EMPTY" "$TOOLS/review-config.sh" --repo-root "$RC_REPO" --orchestrator codex --models "deep=claude:opus")
+rc_deep2=$(printf '%s' "$rc_out2" | jq -r '.roles.deep_validate | "\(.engine):\(.model)"')
+if [[ "$rc_deep" == "codex:high|default (tier:deep)" && "$rc_util" == "codex" && "$rc_deep2" == "claude:opus" ]]; then
+    pass "RC-13: codex orchestrator defaults to codex engine; CLI override wins"
+else
+    fail "RC-13: codex default tiers mismatch" "deep=$rc_deep util=$rc_util deep2=$rc_deep2"
+fi
+
 # ------------------------------------------------------------------ Project F: LLM output normalization
 #
 # Three helpers attack three distinct LLM-output-shape problems:

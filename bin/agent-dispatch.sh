@@ -201,7 +201,10 @@ poll)
             exit 0
         fi
         if [[ -f "$dir/out" ]]; then
-            mtime=$(stat -f %m "$dir/out" 2>/dev/null || stat -c %Y "$dir/out" 2>/dev/null || echo "$now")
+            # GNU-first order (codex-poll.sh:184 precedent): GNU -c errors on
+            # BSD and falls through to -f; BSD -f would "succeed" with
+            # filesystem-info garbage on GNU if tried first.
+            mtime=$(stat -c %Y "$dir/out" 2>/dev/null || stat -f %m "$dir/out" 2>/dev/null || echo "$now")
             age=$(( now - mtime ))
             if [[ "$age" -gt "$STALL" ]]; then
                 jq -n --argjson a "$age" '{verdict:"stalled_suspect", status:"running", out_mtime_age_sec:$a}'
