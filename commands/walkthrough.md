@@ -127,6 +127,10 @@ plan_args=(--repo-root "$repo_root" --orchestrator "$harness_id")
 [[ -n "${profile:-}" ]] && plan_args+=(--profile "$profile")
 [[ -n "${models_csv:-}" ]] && plan_args+=(--models "$models_csv")
 model_plan_json=$(review-config.sh "${plan_args[@]}") || exit $?
+if [[ -z "${threshold:-}" ]]; then
+    threshold=$(printf '%s' "$model_plan_json" | jq -er '.gates.walkthrough_threshold')
+fi
+fix_threshold=$(printf '%s' "$model_plan_json" | jq -er '.gates.fix_threshold')
 plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX)
 printf '%s' "$model_plan_json" > "$plan_tmp"
 artifact-patch.py --path "$artifact_path" \
@@ -170,9 +174,10 @@ paths from unnecessarily reading it.)
 ### 3. Compute walkthrough scope
 
 The walkthrough surfaces findings `/matthewsreview:fix` would SKIP at
-`$threshold`. Compute three parallel id sets so the preflight at step
-4 can offer a tiered choice (default Qualifying) and step 6.5 can
-handle `pre_existing_report` findings on a separate track.
+the independently resolved `$fix_threshold`. Compute three parallel id
+sets so the preflight at step 4 can offer a tiered choice (default
+Qualifying) and step 6.5 can handle `pre_existing_report` findings on a
+separate track.
 
 **`scope_full_ids`** — the inverse of the Phase 8 eligibility selector
 at `09-fix-execution.md` step 8.1 (minus terminal + already-promoted),
@@ -190,7 +195,7 @@ sync with `09-fix-execution.md`; the pre-existing exclusion and score
 floor are specific to the walkthrough.**
 
 ```bash
-scope_full_ids=$(jq -r --argjson thr "$threshold" '
+scope_full_ids=$(jq -r --argjson walk_thr "$threshold" --argjson fix_thr "$fix_threshold" '
     [.findings[]
      # Not terminal: skip resolved / disproven / pending_validation.
      | select(.current_state == "open")
@@ -211,7 +216,7 @@ scope_full_ids=$(jq -r --argjson thr "$threshold" '
            (.disposition == "confirmed_mechanical" or .disposition == "partial" or .disposition == "regression")
            and (
              (.impact_type == "correctness" or .impact_type == "security")
-             and (.score_phase4 != null and .score_phase4 >= $thr)
+            and (.score_phase4 != null and .score_phase4 >= $fix_thr)
            )
          ) | not
        )
@@ -219,7 +224,7 @@ scope_full_ids=$(jq -r --argjson thr "$threshold" '
      # session stays focused on high-signal items. COALESCE falls back
      # to phase3 for below_gate (no phase4), and to -1 if neither is set
      # (so null-scored findings are excluded at any threshold > 0).
-     | select((.score_phase4 // .score_phase3 // -1) >= $thr)
+     | select((.score_phase4 // .score_phase3 // -1) >= $walk_thr)
      | .id
     ] | join(",")
 ' "$artifact_path")
@@ -332,14 +337,14 @@ plus a fourth floor specific to this walkthrough:
   Failures get `disposition=below_gate` and no `score_phase4`.
 - **Phase 4 confirmation gate (45/60/75)** — maps `score_phase4` into
   `disproven` / `uncertain` / `confirmed_*`.
-- **Phase 8 fix gate (default 60)** — what `/matthewsreview:fix` touches:
-  confirmed_mechanical + deep lane + score ≥ threshold.
-- **Walkthrough score floor (`$threshold`, default 60)** — the
-  argument to this command. A display filter that drops findings below
-  the floor so the session focuses on high-signal items. Independent
-  of the fix gate: findings promoted here get picked up by
-  `/matthewsreview:fix` regardless of its threshold, via the
-  `human_confirmation` bypass.
+- **Phase 8 fix gate (`$fix_threshold`, default 60)** — what
+  `/matthewsreview:fix` touches: confirmed_mechanical + deep lane +
+  score ≥ this independently configured threshold.
+- **Walkthrough score floor (`$threshold`, default 60)** — the argument
+  to this command. A display filter that drops findings below the floor
+  so the session focuses on high-signal items. Independent of the fix
+  gate: findings promoted here get picked up by `/matthewsreview:fix`
+  regardless of its threshold, via the `human_confirmation` bypass.
 
 The walkthrough surfaces what Phase 8 would SKIP, minus anything below
 the floor. `below_gate` is a **disposition name**, not a threshold —

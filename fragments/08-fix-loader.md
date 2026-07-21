@@ -55,6 +55,9 @@ plan_args=(--repo-root "$repo_root" --orchestrator "$harness_id")
 [[ -n "${profile:-}" ]] && plan_args+=(--profile "$profile")
 [[ -n "${models_csv:-}" ]] && plan_args+=(--models "$models_csv")
 model_plan_json=$(review-config.sh "${plan_args[@]}") || exit $?
+if [[ -z "${threshold:-}" ]]; then
+    threshold=$(printf '%s' "$model_plan_json" | jq -er '.gates.fix_threshold')
+fi
 plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX)
 printf '%s' "$model_plan_json" > "$plan_tmp"
 artifact-patch.py --path "$artifact_path" \

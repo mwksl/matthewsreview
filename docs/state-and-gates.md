@@ -5,6 +5,20 @@ AGENTS.md keeps a TL;DR; this file is the reference. `bin/schema-v1.json` is
 the on-disk source of truth for artifact shape — this doc is the
 human-readable companion.
 
+## Artifact-level execution metadata
+
+Three optional top-level objects record the resolved execution contract. Their
+absence is valid for artifacts created before v1.0:
+
+- `model_plan` — the current lifecycle command's resolved `orchestrator`,
+  complete role map (`engine`, `model`, nullable `effort`, `source`), resolved
+  `gates`, and preflight `warnings`. Every lifecycle command resolves this
+  afresh, so the field reflects the most recent invocation.
+- `gates` — `phase3_gate`, the three strictly ascending `phase4_bands`,
+  `fix_threshold`, and `walkthrough_threshold`.
+- `degraded` — present only when review coverage is incomplete; currently
+  `{ "lens_dispatch_failures": N }` with `N >= 1`.
+
 ## Finding state model
 
 Three states, one disposition enum. States transition; dispositions classify.
@@ -23,13 +37,13 @@ Any other transition is rejected. Leftover `attempted` on a fresh `:fix` → **h
 
 | disposition | Meaning | `current_state` | `is_actionable` | Set by |
 |---|---|---|---|---|
-| `below_gate` | `score_phase3 < 45` and single source family | `open` | `false` | Phase 3 |
+| `below_gate` | `score_phase3 < gates.phase3_gate` and single source family | `open` | `false` | Phase 3 |
 | `pending_validation` | Gate-in parking; awaiting Phase 4 | `open` | `false` | Phase 3 |
-| `disproven` | `score_phase4 < 45` | `open` | `false` | Phase 4 |
-| `uncertain` | `score_phase4 45–59` | `open` | `false` | Phase 4 |
-| `confirmed_mechanical` | `score_phase4 ≥ 60`, `actionability == auto_fixable` | `open` | `true` | Phase 4 |
-| `confirmed_manual` | `score_phase4 ≥ 60`, `actionability == manual` | `open` | `false` | Phase 4 |
-| `confirmed_report` | `score_phase4 ≥ 60`, `actionability == report_only` | `open` | `false` | Phase 4 |
+| `disproven` | `score_phase4 < B1` | `open` | `false` | Phase 4 |
+| `uncertain` | `B1 ≤ score_phase4 < B2` | `open` | `false` | Phase 4 |
+| `confirmed_mechanical` | `score_phase4 ≥ B2`, `actionability == auto_fixable` | `open` | `true` | Phase 4 |
+| `confirmed_manual` | `score_phase4 ≥ B2`, `actionability == manual` | `open` | `false` | Phase 4 |
+| `confirmed_report` | `score_phase4 ≥ B2`, `actionability == report_only` | `open` | `false` | Phase 4 |
 | `pre_existing_report` | `origin == pre_existing` AND `origin_confidence == high` (override, regardless of score) | `open` | `false` | Phase 3 / re-asserted Phase 4 |
 | `partial` | Phase 9 found fix incomplete; retry-eligible | `open` | `true` | Phase 9 |
 | `regression` | Phase 9 found new adjacent issue; group reverted; retry-eligible | `open` | `true` | Phase 9 |
@@ -57,21 +71,21 @@ origin == "pre_existing" AND origin_confidence == "high"
 **Phase 3 validation gate** (applies after the override):
 
 ```
-score_phase3 < 45 AND single source family   → disposition: below_gate (does not enter Phase 4)
-score_phase3 < 45 AND ≥ 2 source families    → advance to Phase 4 (auto-graduation)
-score_phase3 >= 45                           → advance to Phase 4
+score_phase3 < gates.phase3_gate AND single source family   → disposition: below_gate (does not enter Phase 4)
+score_phase3 < gates.phase3_gate AND ≥ 2 source families    → advance to Phase 4 (auto-graduation)
+score_phase3 >= gates.phase3_gate                           → advance to Phase 4
 ```
 
 **Phase 4 validation decision** (after Phase 4a deep / 4b light):
 
 ```
-score_phase4 < 45    → disposition: disproven,  is_actionable: false
-score_phase4 45–59   → disposition: uncertain,  is_actionable: false
-score_phase4 >= 60   → disposition depends on actionability set by validator:
-                         auto_fixable  → confirmed_mechanical   (is_actionable: true)
-                         manual        → confirmed_manual (is_actionable: false)
-                         report_only   → confirmed_report (is_actionable: false)
-                       confirmed_strength: "moderate" (60–74) or "strong" (75+)
+score_phase4 < B1        → disposition: disproven,  is_actionable: false
+score_phase4 B1..B2-1    → disposition: uncertain,  is_actionable: false
+score_phase4 >= B2       → disposition depends on actionability set by validator:
+                             auto_fixable  → confirmed_mechanical (is_actionable: true)
+                             manual        → confirmed_manual (is_actionable: false)
+                             report_only   → confirmed_report (is_actionable: false)
+                           confirmed_strength: moderate below B3, strong at B3+
 ```
 
 **Phase 9 outcome** (for findings attempted in a fix run):
@@ -97,9 +111,9 @@ current_state == open
   )
 ```
 
-"Gate" means three different things: Phase 3 scoring gate (45) decides Phase-4 entry; Phase 4 confirmation gate (45/60/75) maps `score_phase4` → disposition; Phase 8 fix gate (default 60, user-tunable via `:fix <N>`) is the composite gate above. `human_confirmation != null` bypasses both lane filter and threshold — promotion is additive metadata, not a state mutation. `below_gate` is a *disposition name*, not a threshold; `:walkthrough` at default Qualifying scope excludes it (run `:walkthrough 0` with the Full tier to audit Phase-3 demotions).
+`B1`/`B2`/`B3` are the resolved `gates.phase4_bands` values. "Gate" means three different things: the Phase 3 scoring gate decides Phase-4 entry; the Phase 4 bands map `score_phase4` to disposition/strength; the Phase 8 fix gate is the composite gate above. Defaults are `phase3_gate=45`, `phase4_bands=[45,60,75]`, and `fix_threshold=60`. `human_confirmation != null` bypasses both lane filter and threshold — promotion is additive metadata, not a state mutation. `below_gate` is a *disposition name*, not a threshold; `:walkthrough` at default Qualifying scope excludes it (run `:walkthrough 0` with the Full tier to audit Phase-3 demotions).
 
 ## Lanes
 
-- **Deep lane** (correctness, security): Phase 4a Opus per candidate with blast-radius tracing + comprehensive fix proposal; passes through Phase 5 cross-cutting. Phase 8 processes `confirmed_mechanical` here by default.
-- **Light lane** (ux, policy, architecture): Phase 4b Sonnet confirmation, report-biased (validators may emit `auto_fixable` for very mechanical rules, but `manual` and `report_only` are the common outcomes). Phase 8 excludes light-lane `confirmed_mechanical` unless `human_confirmation != null` (set by `:promote` or `:walkthrough`). `:walkthrough` exists to close this asymmetric default, restricted to its own score floor (default 60, independent of fix-gate threshold).
+- **Deep lane** (correctness, security): per-candidate Phase 4a validation with blast-radius tracing + comprehensive fix proposal; passes through Phase 5 cross-cutting. Phase 8 processes `confirmed_mechanical` here by default. The resolved `deep_validate`/`cross_cutting` roles choose the engines and models.
+- **Light lane** (ux, policy, architecture): chunked Phase 4b confirmation, report-biased (validators may emit `auto_fixable` for very mechanical rules, but `manual` and `report_only` are the common outcomes). Phase 8 excludes light-lane `confirmed_mechanical` unless `human_confirmation != null` (set by `:promote` or `:walkthrough`). `:walkthrough` exists to close this asymmetric default, restricted to its own score floor (default 60, independent of fix-gate threshold). The resolved `light_validate` role chooses the engine and model.

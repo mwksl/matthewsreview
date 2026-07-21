@@ -98,18 +98,28 @@ invoke bare (`repo-slug.sh ...`), which also keeps the command's
 plugin root ONCE at the start of the command:
 
 ```bash
-if command -v repo-slug.sh >/dev/null 2>&1; then
+MREVIEW_ROOT="${MREVIEW_ROOT:-}"
+if [[ -n "$MREVIEW_ROOT" ]]; then
+    # Generated Codex skills bake this path without requiring a trailing slash.
+    MREVIEW_ROOT="${MREVIEW_ROOT%/}/"
+elif command -v repo-slug.sh >/dev/null 2>&1; then
+    # Claude Code (and explicit user PATH setups) invoke helpers by bare name.
     MREVIEW_ROOT=""
 else
     for cand in \
         $(ls -dt "$HOME"/.claude/plugins/cache/matthewsreview/matthewsreview/*/ 2>/dev/null | head -1) \
         $(ls -dt "$HOME"/.omp/plugins/cache/plugins/*matthewsreview*/ 2>/dev/null | head -1); do
-        if [[ -n "$cand" && -x "$cand/bin/repo-slug.sh" ]]; then MREVIEW_ROOT="$cand"; break; fi
+        if [[ -n "$cand" && -x "$cand/bin/repo-slug.sh" ]]; then
+            MREVIEW_ROOT="${cand%/}/"
+            break
+        fi
     done
 fi
-[[ -n "$MREVIEW_ROOT" ]] || { echo "matthewsreview install not found; see README §Install"; exit 1; }
-# helper invocations below then use "${MREVIEW_ROOT}bin/<helper>" when
-# MREVIEW_ROOT is set, else the bare name. Shell-var convenience:
+if [[ -z "$MREVIEW_ROOT" ]] && ! command -v repo-slug.sh >/dev/null 2>&1; then
+    echo "matthewsreview install not found; see README §Install"
+    exit 1
+fi
+# Helpers use the resolved root when set, otherwise their PATH name.
 MRB="${MREVIEW_ROOT:+${MREVIEW_ROOT}bin/}"
 ```
 

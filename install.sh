@@ -32,7 +32,13 @@ link_skill() { # src-dir name target-root
     local src="$1" name="$2" root="$3"
     mkdir -p "$root"
     local dest="$root/$name"
-    if [[ -L "$dest" || -e "$dest" ]]; then rm -rf "$dest"; fi
+    if [[ -L "$dest" ]]; then
+        rm "$dest"
+    elif [[ -e "$dest" ]]; then
+        printf 'ERROR: refusing to replace existing skill directory: %s\n' "$dest" >&2
+        printf 'Action: move it aside, then rerun ./install.sh --codex.\n' >&2
+        return 1
+    fi
     ln -s "$src" "$dest"
     printf 'linked %s -> %s\n' "$dest" "$src"
 }
@@ -40,7 +46,24 @@ link_skill() { # src-dir name target-root
 ROOTS=("$HOME/.agents/skills")
 [[ -d "$HOME/.codex/skills" ]] && ROOTS+=("$HOME/.codex/skills")
 
+prune_stale_links() { # target-root
+    local root="$1" dest target
+    for dest in "$root"/matthewsreview-*; do
+        [[ -L "$dest" ]] || continue
+        target=$(readlink "$dest")
+        case "$target" in
+            */dist/codex-skills/matthewsreview-*)
+                if [[ ! -e "$dest" ]]; then
+                    rm "$dest"
+                    printf 'removed stale link %s\n' "$dest"
+                fi
+                ;;
+        esac
+    done
+}
+
 for root in "${ROOTS[@]}"; do
+    prune_stale_links "$root"
     for skill_dir in "$THIS"/dist/codex-skills/matthewsreview-*; do
         link_skill "$skill_dir" "$(basename "$skill_dir")" "$root"
     done

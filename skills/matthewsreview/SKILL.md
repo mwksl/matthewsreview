@@ -53,7 +53,7 @@ Role strings are `engine:model[:effort-or-thinking]`. Codex effort supports `low
 ## After the review: the artifact as a work queue
 
 - **Dispositions table** — `bin/artifact-render.py --format dispositions --artifact <path>/artifact.json > DISPOSITIONS.md` emits the full findings table with suggested actions (fix / walkthrough / issue / judge / skip) and engage/skip totals. This replaces hand-built ENGAGE/SKIP passes.
-- **Calibration** — `bin/calibration-report.sh ~/.matthews-reviews` aggregates your review history: demote rates, waste ratios, per-phase token medians, lens retries. Use it to tune `gates` and tiers in `~/.matthews-reviews/config.json`.
+- **Calibration** — `bin/calibration-report.py ~/.matthews-reviews` aggregates your review history: demote rates, waste ratios, per-phase token medians, lens retries, and score-band/disposition matrices grouped by the configured Phase 4 bands. Use it to tune `gates` and tiers in `~/.matthews-reviews/config.json`.
 - **Setup problems** — `bin/doctor.sh` checks deps, harness CLIs, config validity, and stale pre-rename remnants, printing the exact fix per finding.
 
 ## Gotchas

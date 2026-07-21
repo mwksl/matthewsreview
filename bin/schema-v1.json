@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://matthewsreview/schema-v1.json",
   "title": "matthewsreview artifact (v1)",
-  "description": "Canonical machine-state artifact produced by /matthewsreview:review and mutated by /matthewsreview:fix. Codifies docs/archive/DESIGN.md §5 (state model) and §6 (artifact schema). Rev 8.",
+  "description": "Canonical machine-state artifact produced by matthewsreview review commands and mutated across the add, walkthrough, promote, and fix lifecycle. Codifies the state model and artifact contract documented in docs/state-and-gates.md.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -101,18 +101,137 @@
     "model_plan": {
       "description": "Resolved per-role model plan for the current lifecycle command, written by review-config.sh at Phase 0 (review) / load time (fix, add, walkthrough, promote). Optional — pre-v1.0 artifacts omit it. Each command re-resolves fresh; the field reflects the most recent invocation.",
       "type": "object",
-      "required": ["orchestrator", "roles"],
-      "additionalProperties": true
+      "additionalProperties": false,
+      "required": ["orchestrator", "roles", "gates", "warnings"],
+      "properties": {
+        "orchestrator": { "enum": ["claude-code", "omp", "codex"] },
+        "roles": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "deep_lens", "deep_validate", "cross_cutting", "fix",
+            "post_fix_review", "reconcile", "light_lens", "light_validate",
+            "classifier", "normalizer", "dedup", "scoring", "fix_hint",
+            "briefer", "drafter", "ensemble_detect", "codex_detect",
+            "codex_validate", "codex_crosscut"
+          ],
+          "properties": {
+            "deep_lens": { "$ref": "#/$defs/model_role" },
+            "deep_validate": { "$ref": "#/$defs/model_role" },
+            "cross_cutting": { "$ref": "#/$defs/model_role" },
+            "fix": { "$ref": "#/$defs/model_role" },
+            "post_fix_review": { "$ref": "#/$defs/model_role" },
+            "reconcile": { "$ref": "#/$defs/model_role" },
+            "light_lens": { "$ref": "#/$defs/model_role" },
+            "light_validate": { "$ref": "#/$defs/model_role" },
+            "classifier": { "$ref": "#/$defs/model_role" },
+            "normalizer": { "$ref": "#/$defs/model_role" },
+            "dedup": { "$ref": "#/$defs/model_role" },
+            "scoring": { "$ref": "#/$defs/model_role" },
+            "fix_hint": { "$ref": "#/$defs/model_role" },
+            "briefer": { "$ref": "#/$defs/model_role" },
+            "drafter": { "$ref": "#/$defs/model_role" },
+            "ensemble_detect": { "$ref": "#/$defs/model_role" },
+            "codex_detect": { "$ref": "#/$defs/model_role" },
+            "codex_validate": { "$ref": "#/$defs/model_role" },
+            "codex_crosscut": { "$ref": "#/$defs/model_role" }
+          }
+        },
+        "gates": { "$ref": "#/$defs/gates" },
+        "warnings": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "model_role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engine", "model", "effort", "source"],
+      "properties": {
+        "engine": { "enum": ["claude", "codex", "omp"] },
+        "model": { "type": "string" },
+        "effort": {
+          "anyOf": [
+            { "type": "null" },
+            { "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] }
+          ]
+        },
+        "source": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "engine": { "const": "claude" } },
+            "required": ["engine"]
+          },
+          "then": {
+            "properties": {
+              "model": { "type": "string", "minLength": 1 },
+              "effort": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "engine": { "const": "codex" } },
+            "required": ["engine"]
+          },
+          "then": {
+            "properties": {
+              "effort": {
+                "anyOf": [
+                  { "type": "null" },
+                  { "enum": ["low", "medium", "high", "xhigh", "max", "ultra"] }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "engine": { "const": "omp" } },
+            "required": ["engine"]
+          },
+          "then": {
+            "properties": {
+              "model": { "type": "string", "minLength": 1 },
+              "effort": {
+                "anyOf": [
+                  { "type": "null" },
+                  { "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"] }
+                ]
+              }
+            }
+          }
+        }
+      ]
     },
     "degraded": {
-      "description": "Set by Phase 6.4b when any lens dispatch failed during the run. Presence with a non-zero count means the finding list has partial coverage — the renderer emits a REVIEW DEGRADED banner. Optional — absent means all detection lanes completed.",
+      "description": "Set by Phase 6.4b when one or more lens dispatches failed. Presence means the finding list has partial coverage and the renderer emits a REVIEW DEGRADED banner.",
       "type": "object",
-      "additionalProperties": true
+      "additionalProperties": false,
+      "required": ["lens_dispatch_failures"],
+      "properties": {
+        "lens_dispatch_failures": { "type": "integer", "minimum": 1 }
+      }
     },
     "gates": {
-      "description": "Resolved gate thresholds for this run (phase3_gate, phase4_bands, fix_threshold, walkthrough_threshold), from review-config.sh. Optional — absent means built-in defaults (45 / 45-60-75 / 60 / 60).",
+      "description": "Resolved gate thresholds for this run. Optional — absent means built-in defaults (45 / 45-60-75 / 60 / 60).",
       "type": "object",
-      "additionalProperties": true
+      "additionalProperties": false,
+      "required": ["phase3_gate", "phase4_bands", "fix_threshold", "walkthrough_threshold"],
+      "properties": {
+        "phase3_gate": { "type": "number", "minimum": 0, "maximum": 100 },
+        "phase4_bands": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "type": "number", "minimum": 0, "maximum": 100 }
+        },
+        "fix_threshold": { "type": "number", "minimum": 0, "maximum": 100 },
+        "walkthrough_threshold": { "type": "number", "minimum": 0, "maximum": 100 }
+      }
     },
     "base_context": {
       "description": "§13.10 base-branch freshness record. Optional — absent from pre-§13.10 artifacts.",

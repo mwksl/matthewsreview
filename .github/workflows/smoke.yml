@@ -30,7 +30,7 @@ jobs:
 
       - name: Bash portability check
         run: |
-          if grep -rnE 'declare -A|mapfile|readarray|\$\{[A-Za-z_][A-Za-z0-9_]*,,\}' bin/ scripts/; then
+          if git grep -nE 'declare -A|mapfile|readarray|\$\{[A-Za-z_][A-Za-z0-9_]*,,\}' -- '*.sh'; then
             echo "::error::bash 3.2-incompatible construct found (must stay portable to macOS /bin/bash)"
             exit 1
           fi
@@ -43,8 +43,7 @@ jobs:
           else
             brew list shellcheck >/dev/null 2>&1 || brew install shellcheck
           fi
-          shellcheck -S warning bin/*.sh scripts/*.sh install.sh hooks/*.sh 2>/dev/null \
-            || shellcheck -S warning bin/*.sh scripts/*.sh hooks/*.sh
+          shellcheck -S warning bin/*.sh scripts/*.sh install.sh hooks/*.sh
 
       - name: Smoke suite
         run: test/smoke.sh

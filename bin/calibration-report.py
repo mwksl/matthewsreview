@@ -28,15 +28,42 @@ import sys
 from pathlib import Path
 import _common as c
 
-BANDS = [(0, 45, "0-44"), (45, 60, "45-59"), (60, 75, "60-74"), (75, 101, "75+")]
+DEFAULT_PHASE4_BANDS = (45, 60, 75)
 DISPOSITIONS = [
-    "below_gate", "disproven", "uncertain", "confirmed_mechanical",
-    "confirmed_manual", "confirmed_report", "pre_existing_report", "resolved",
+    "below_gate", "pending_validation", "disproven", "uncertain",
+    "confirmed_mechanical", "confirmed_manual", "confirmed_report",
+    "pre_existing_report", "partial", "regression", "resolved",
 ]
 
 
-def band_of(score):
-    for lo, hi, label in BANDS:
+def _fmt_boundary(value):
+    return str(int(value)) if float(value).is_integer() else f"{value:g}"
+
+
+def phase4_thresholds(artifact):
+    raw = (artifact.get("gates") or {}).get("phase4_bands")
+    if (
+        isinstance(raw, list)
+        and len(raw) == 3
+        and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in raw)
+        and 0 <= raw[0] < raw[1] < raw[2] <= 100
+    ):
+        return tuple(raw)
+    return DEFAULT_PHASE4_BANDS
+
+
+def band_specs(thresholds):
+    low, medium, high = thresholds
+    return [
+        (0, low, f"<{_fmt_boundary(low)}"),
+        (low, medium, f"{_fmt_boundary(low)}–<{_fmt_boundary(medium)}"),
+        (medium, high, f"{_fmt_boundary(medium)}–<{_fmt_boundary(high)}"),
+        (high, 101, f"{_fmt_boundary(high)}+"),
+    ]
+
+
+def band_of(score, specs):
+    for lo, hi, label in specs:
         if lo <= score < hi:
             return label
     return "?"
@@ -157,26 +184,51 @@ def main(argv):
     out += [f"Total lens anomalies (killed/resume/wall_clock): **{total_anomalies}**", ""]
 
     # --- score band → disposition matrix -------------------------------
-    out += ["## Score-band → disposition matrix (validated findings)", "",
-            "| Band | " + " | ".join(DISPOSITIONS) + " |",
-            "|---|" + "---|" * len(DISPOSITIONS)]
-    matrix = {label: {d: 0 for d in DISPOSITIONS} for _, _, label in BANDS}
+    out += ["## Score-band → disposition matrix (validated findings)", ""]
+    matrices = {}
     for _, artifact, _, _, _ in runs:
+        thresholds = phase4_thresholds(artifact)
+        specs = band_specs(thresholds)
+        group = matrices.setdefault(
+            thresholds,
+            {
+                "runs": 0,
+                "specs": specs,
+                "matrix": {
+                    label: {d: 0 for d in DISPOSITIONS}
+                    for _, _, label in specs
+                },
+            },
+        )
+        group["runs"] += 1
         for f in artifact.get("findings", []):
-            s = f.get("score_phase4")
-            if s is None:
+            score = f.get("score_phase4")
+            if score is None:
                 continue
-            d = f.get("disposition")
-            if d in DISPOSITIONS:
-                matrix[band_of(s)][d] += 1
-    for _, _, label in BANDS:
-        row = matrix[label]
-        out.append(f"| {label} | " + " | ".join(str(row[d]) for d in DISPOSITIONS) + " |")
-    out += ["",
-            "Reading: disproven/uncertain counts at or above the Phase-3 gate band",
-            "(45+) are validation-spend on non-actionable findings — a high share",
-            "suggests raising `gates.phase3_gate`; confirmed_* below the gate band",
-            "suggests lowering it. Set values in `~/.matthews-reviews/config.json`.", ""]
+            disposition = f.get("disposition")
+            if disposition in DISPOSITIONS:
+                group["matrix"][band_of(score, specs)][disposition] += 1
+
+    for thresholds, group in sorted(matrices.items()):
+        out += [
+            f"Phase 4 bands: **{' / '.join(_fmt_boundary(v) for v in thresholds)}** "
+            f"({group['runs']} run{'s' if group['runs'] != 1 else ''})",
+            "",
+            "| Band | " + " | ".join(DISPOSITIONS) + " |",
+            "|---|" + "---|" * len(DISPOSITIONS),
+        ]
+        for _, _, label in group["specs"]:
+            row = group["matrix"][label]
+            out.append(f"| {label} | " + " | ".join(str(row[d]) for d in DISPOSITIONS) + " |")
+        out.append("")
+    out += [
+        "Reading: disproven/uncertain counts in higher score bands are",
+        "validation spend on non-actionable findings; a high share suggests",
+        "raising `gates.phase3_gate`. Compare separate tables when runs used",
+        "different Phase 4 bands. Set values in",
+        "`~/.matthews-reviews/config.json`.",
+        "",
+    ]
 
     # --- per-phase token medians ---------------------------------------
     out += ["## Per-phase token medians (sub-agent)", "",

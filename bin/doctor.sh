@@ -46,8 +46,10 @@ for tool in uv jq gh git; do
         had_fail=1
     fi
 done
-bash_ver="${BASH_VERSINFO[0]:-0}.${BASH_VERSINFO[1]:-0}"
-if [[ "${BASH_VERSINFO[0]:-0}" -ge 3 ]]; then
+bash_major="${BASH_VERSINFO[0]:-0}"
+bash_minor="${BASH_VERSINFO[1]:-0}"
+bash_ver="$bash_major.$bash_minor"
+if [[ "$bash_major" -gt 3 || ( "$bash_major" -eq 3 && "$bash_minor" -ge 2 ) ]]; then
     say PASS "dep: bash $bash_ver (3.2-portable helpers OK)"
 else
     say FAIL "dep: bash $bash_ver too old (need >= 3.2)"

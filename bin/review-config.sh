@@ -44,6 +44,9 @@ die_usage() {
     echo "Valid input: $PROG --repo-root <abs> --orchestrator <claude-code|omp|codex> [--profile <name>] [--models \"<k=v,k=v>\"]" >&2
     exit 64
 }
+require_value() {
+    [[ $# -ge 2 ]] || die_usage "$1 requires a value"
+}
 die_validation() { # msg action
     err "$1"
     [[ -n "${2:-}" ]] && echo "Action: $2" >&2
@@ -57,10 +60,10 @@ MODELS_CSV=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --repo-root)    REPO_ROOT="${2:-}"; shift 2 ;;
-        --orchestrator) ORCHESTRATOR="${2:-}"; shift 2 ;;
-        --profile)      PROFILE="${2:-}"; shift 2 ;;
-        --models)       MODELS_CSV="${2:-}"; shift 2 ;;
+        --repo-root)    require_value "$@"; REPO_ROOT="$2"; shift 2 ;;
+        --orchestrator) require_value "$@"; ORCHESTRATOR="$2"; shift 2 ;;
+        --profile)      require_value "$@"; PROFILE="$2"; shift 2 ;;
+        --models)       require_value "$@"; MODELS_CSV="$2"; shift 2 ;;
         *) die_usage "unknown argument: $1" ;;
     esac
 done
@@ -124,6 +127,8 @@ cfg_get() { # file expr  — empty string when file missing or key absent
 # Assoc-free (bash 3.2): tiers/roles stay newline "key|value|source" lists.
 TIER_LIST=""   # deep|claude:opus|default
 ROLE_LIST=""   # deep_validate|claude:sonnet|repo-config (empty = inherit tier)
+# Accessed indirectly by name in set_kv/get_kv.
+: "$TIER_LIST" "$ROLE_LIST"
 GATES_JSON="$GATES_DEFAULT"
 
 set_kv() { # listname key value source

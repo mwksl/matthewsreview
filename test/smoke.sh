@@ -4861,6 +4861,45 @@ else
 fi
 echo '{"roles":{"scoring":"claude:sonnet"}}' > "$RC_REPO/.matthewsreview.json"
 
+# RC-11: every value-taking option rejects a dangling flag cleanly. This
+# guards `shift 2` under set -u from surfacing an unstructured shell error.
+rc11_problems=""
+for rc11_flag in --repo-root --orchestrator --profile --models; do
+    rc11_err=$(rc_run "$rc11_flag" 2>&1); rc11_code=$?
+    if [[ $rc11_code -ne 64 || "$rc11_err" != *"requires a value"* ]]; then
+        rc11_problems="$rc11_problems $rc11_flag=$rc11_code:$rc11_err"
+    fi
+done
+if [[ -z "$rc11_problems" ]]; then
+    pass "RC-11: dangling value-taking options exit 64 with structured usage errors"
+else
+    fail "RC-11: dangling option handling mismatch" "$rc11_problems"
+fi
+
+# AS-1: the optional v1.0 artifact extensions validate at their real shape.
+AS_DIR="$WORK/artifact-schema"
+mkdir -p "$AS_DIR"
+as_plan=$(rc_run --orchestrator claude-code)
+jq --argjson plan "$as_plan" \
+    '.model_plan=$plan | .gates=$plan.gates | .degraded={"lens_dispatch_failures":2}' \
+    "$FIX/artifact-seed.json" > "$AS_DIR/valid.json"
+if "$TOOLS/artifact-validate.sh" --path "$AS_DIR/valid.json" >/dev/null 2>&1; then
+    pass "AS-1: resolved model_plan + gates + degraded extension shape is schema-valid"
+else
+    fail "AS-1: valid artifact extensions rejected"
+fi
+
+# AS-2: extension objects are closed and degraded counts are positive.
+jq '.model_plan.roles.deep_lens.typo=true' "$AS_DIR/valid.json" > "$AS_DIR/extra.json"
+jq '.degraded.lens_dispatch_failures=0' "$AS_DIR/valid.json" > "$AS_DIR/degraded-zero.json"
+as_extra_code=$(rc "$TOOLS/artifact-validate.sh" --path "$AS_DIR/extra.json")
+as_zero_code=$(rc "$TOOLS/artifact-validate.sh" --path "$AS_DIR/degraded-zero.json")
+if [[ "$as_extra_code" == "1" && "$as_zero_code" == "1" ]]; then
+    pass "AS-2: schema rejects unknown model-role fields and zero degraded counts"
+else
+    fail "AS-2: extension schema accepted malformed state" "extra=$as_extra_code degraded_zero=$as_zero_code"
+fi
+
 # GB-1: --apply-decisions honors artifact gates.phase4_bands over the
 # 45/60/75 defaults. Bands [50,70,90] → score 65 lands in the uncertain
 # band (default would call it confirmed_* and demand actionability).
@@ -4880,9 +4919,8 @@ fi
 
 # GB-2: malformed bands (non-ascending) fall back to defaults — 65 with
 # default band demands actionability → validation error without it.
-cp "$FIX/artifact-seed.json" "$GB_DIR/art2.json"
-"$TOOLS/artifact-patch.py" --path "$GB_DIR/art2.json" \
-    --set-json 'gates={"phase4_bands":[70,50,90]}' >/dev/null
+jq '.gates={"phase4_bands":[70,50,90]}' \
+    "$FIX/artifact-seed.json" > "$GB_DIR/art2.json"
 gb_err=$("$TOOLS/artifact-patch.py" --path "$GB_DIR/art2.json" \
     --apply-decisions '[{"id":"F001","score_phase4":65,"validation_result":null}]' 2>&1); code=$?
 if [[ $code -ne 0 && "$gb_err" == *"confirmed band (>=60)"* ]]; then
@@ -4946,15 +4984,15 @@ else
     fail "AD-2: codex dispatch mismatch" "$ad_out"
 fi
 
-# AD-3: omp engine appends the configured thinking level to the model
-# selector and completes with tokens null (no usage surface)
+# AD-3: omp engine passes model and thinking as separate CLI options and
+# completes with tokens null (no usage surface).
 ad_j=$(ad_path "$AD" start --engine omp --model "openai-codex/gpt-5.6-sol" --effort max --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
 sleep 1
 ad_out=$(ad_path "$AD" poll --job "$ad_j" --scratch-dir "$AD_HOME/scratch")
 if [[ $(printf '%s' "$ad_out" | jq -r '.verdict') == "completed" ]] \
    && [[ $(printf '%s' "$ad_out" | jq -r '.tokens') == "null" ]] \
-   && [[ $(printf '%s' "$ad_out" | jq -r '.raw_output') == *"--model openai-codex/gpt-5.6-sol:max"* ]]; then
-    pass "AD-3: omp engine passes model thinking suffix (:max), tokens=null"
+   && [[ $(printf '%s' "$ad_out" | jq -r '.raw_output') == *"--model openai-codex/gpt-5.6-sol --thinking max @"* ]]; then
+    pass "AD-3: omp engine passes explicit --model + --thinking options, tokens=null"
 else
     fail "AD-3: omp dispatch/thinking mismatch" "$ad_out"
 fi
@@ -4977,10 +5015,12 @@ else
 fi
 
 # AD-5: start returns immediately (background child must not hold the
-# caller's stdout pipe — the 30s-stub regression) and stop → failed 143
+# caller's stdout pipe), stop terminates the actual engine process, and
+# poll reports an explicit cancelled terminal state.
 cat > "$AD_HOME/bin/sleeper-engine.sh" <<'EOF'
 #!/usr/bin/env bash
-cat >/dev/null; sleep 30
+cat >/dev/null
+exec /bin/sleep 30
 EOF
 chmod +x "$AD_HOME/bin/sleeper-engine.sh"
 cp "$AD_HOME/bin/sleeper-engine.sh" "$AD_HOME/bin/codex.sav"
@@ -4988,15 +5028,24 @@ mv "$AD_HOME/bin/codex" "$AD_HOME/bin/codex.fast"
 cp "$AD_HOME/bin/sleeper-engine.sh" "$AD_HOME/bin/codex"
 ad_t0=$(date +%s)
 ad_j=$(ad_path "$AD" start --engine codex --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+ad_engine_pid=""
+ad_wait=0
+while [[ -z "$ad_engine_pid" && $ad_wait -lt 50 ]]; do
+    [[ -s "$AD_HOME/scratch/$ad_j/child_pid" ]] \
+        && ad_engine_pid=$(cat "$AD_HOME/scratch/$ad_j/child_pid")
+    [[ -n "$ad_engine_pid" ]] || sleep 0.1
+    ad_wait=$((ad_wait + 1))
+done
 ad_elapsed=$(( $(date +%s) - ad_t0 ))
 ad_v1=$(ad_path "$AD" poll --job "$ad_j" --scratch-dir "$AD_HOME/scratch" | jq -r .verdict)
 ad_path "$AD" stop --job "$ad_j" --scratch-dir "$AD_HOME/scratch" >/dev/null
-ad_v2=$(ad_path "$AD" poll --job "$ad_j" --scratch-dir "$AD_HOME/scratch" | jq -r '.verdict + ":" + (.exit_code|tostring)')
+ad_v2=$(ad_path "$AD" poll --job "$ad_j" --scratch-dir "$AD_HOME/scratch" | jq -r '.verdict + ":" + .status')
 mv "$AD_HOME/bin/codex.fast" "$AD_HOME/bin/codex"
-if [[ $ad_elapsed -lt 5 && "$ad_v1" == "alive" && "$ad_v2" == "failed_terminal:143" ]]; then
-    pass "AD-5: start non-blocking (<5s on 30s child); alive → stop → failed_terminal:143"
+if [[ $ad_elapsed -lt 5 && "$ad_v1" == "alive" && "$ad_v2" == "cancelled:cancelled" ]] \
+   && [[ -n "$ad_engine_pid" ]] && ! kill -0 "$ad_engine_pid" 2>/dev/null; then
+    pass "AD-5: non-blocking start; alive → stop → cancelled; engine process terminated"
 else
-    fail "AD-5: lifecycle mismatch" "elapsed=${ad_elapsed}s v1=$ad_v1 v2=$ad_v2"
+    fail "AD-5: lifecycle/process cleanup mismatch" "elapsed=${ad_elapsed}s v1=$ad_v1 v2=$ad_v2 child=$ad_engine_pid"
 fi
 
 # AD-6: missing engine CLI → exit 5 with install action
@@ -5018,6 +5067,114 @@ if [[ $ad_prompt_code -eq 1 && "$ad_prompt_err" == *"Action:"* \
     pass "AD-7: missing prompt/job paths include recovery actions"
 else
     fail "AD-7: structured path errors missing" "prompt=$ad_prompt_err poll=$ad_poll_err stop=$ad_stop_err"
+fi
+
+# AD-8: every value-taking option rejects a dangling flag with usage exit 64.
+ad8_problems=""
+for ad8_flag in --engine --model --effort --prompt-file --scratch-dir --job \
+        --stall-threshold-sec --wall-clock-ceiling-sec; do
+    ad8_err=$(ad_path "$AD" start "$ad8_flag" 2>&1); ad8_code=$?
+    if [[ $ad8_code -ne 64 || "$ad8_err" != *"requires a value"* ]]; then
+        ad8_problems="$ad8_problems $ad8_flag=$ad8_code:$ad8_err"
+    fi
+done
+if [[ -z "$ad8_problems" ]]; then
+    pass "AD-8: dangling value-taking options exit 64 with structured usage errors"
+else
+    fail "AD-8: dangling option handling mismatch" "$ad8_problems"
+fi
+
+# AD-9: jq is an explicit dependency, not a late command-not-found failure.
+ad9_err=$(PATH="$AD_HOME/bin" /bin/bash "$AD" start --engine claude \
+    --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" 2>&1)
+ad9_code=$?
+if [[ $ad9_code -eq 5 && "$ad9_err" == *"requires jq"* && "$ad9_err" == *"Action:"* ]]; then
+    pass "AD-9: missing jq exits 5 with an install action before dispatch"
+else
+    fail "AD-9: missing-jq contract mismatch" "code=$ad9_code err=$ad9_err"
+fi
+
+# AD-10: large omp prompts are passed by @file reference, not copied into
+# argv (which exceeds Darwin/Linux argument limits on realistic reviews).
+AD_LARGE="$AD_HOME/large-prompt.md"
+awk 'BEGIN { s="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"; for (i=0; i<16384; i++) printf "%s", s }' > "$AD_LARGE"
+ad_j=$(ad_path "$AD" start --engine omp --model "openai-codex/gpt-5.6-sol" \
+    --effort high --prompt-file "$AD_LARGE" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+sleep 1
+ad_out=$(ad_path "$AD" poll --job "$ad_j" --scratch-dir "$AD_HOME/scratch")
+ad_large_raw=$(printf '%s' "$ad_out" | jq -r '.raw_output')
+if [[ $(printf '%s' "$ad_out" | jq -r '.verdict') == "completed" ]] \
+   && [[ "$ad_large_raw" == *"@$AD_HOME/scratch/$ad_j/prompt.md"* ]] \
+   && [[ ${#ad_large_raw} -lt 500 ]]; then
+    pass "AD-10: 1 MiB omp prompt dispatches via compact @file argument"
+else
+    fail "AD-10: large omp prompt was not file-backed" "$ad_out"
+fi
+
+# CG-1: generated Codex skills preserve thematic `---` lines after command
+# frontmatter; only the first frontmatter pair is stripped.
+CG_REPO="$WORK/codex-gen"
+mkdir -p "$CG_REPO/commands"
+cat > "$CG_REPO/commands/example.md" <<'EOF'
+---
+description: Frontmatter parser fixture
+---
+# Example command
+
+Before thematic break.
+
+---
+
+After thematic break.
+EOF
+if "$REPO/scripts/build-codex-skills.sh" "$CG_REPO" >/dev/null \
+   && grep -qF -- '---' "$CG_REPO/dist/codex-skills/matthewsreview-example/SKILL.md" \
+   && grep -qF 'After thematic break.' "$CG_REPO/dist/codex-skills/matthewsreview-example/SKILL.md"; then
+    pass "CG-1: Codex generator strips only frontmatter and preserves later --- content"
+else
+    fail "CG-1: generated skill truncated content after a thematic break"
+fi
+
+# CG-2: generation is atomic. A later source failure cannot destroy the
+# previously complete output tree that installed symlinks target.
+cg_skill="$CG_REPO/dist/codex-skills/matthewsreview-example/SKILL.md"
+cg_before=$(sha_of "$cg_skill")
+ln -s "$CG_REPO/does-not-exist" "$CG_REPO/commands/zbad.md"
+"$REPO/scripts/build-codex-skills.sh" "$CG_REPO" >/dev/null 2>&1
+cg_code=$?
+cg_after=$(sha_of "$cg_skill")
+if [[ $cg_code -ne 0 && "$cg_before" == "$cg_after" \
+      && ! -e "$CG_REPO/dist/codex-skills/matthewsreview-zbad" ]]; then
+    pass "CG-2: failed Codex generation preserves the previous complete output"
+else
+    fail "CG-2: failed generation exposed a partial output tree" "code=$cg_code before=$cg_before after=$cg_after"
+fi
+
+# CI-1: reinstall removes stale generated matthewsreview links even when
+# they point at a checkout that moved, then refreshes current links.
+CI_HOME="$WORK/codex-install-home"
+mkdir -p "$CI_HOME/.agents/skills"
+ln -s "$WORK/old-checkout/dist/codex-skills/matthewsreview-obsolete" \
+    "$CI_HOME/.agents/skills/matthewsreview-obsolete"
+if HOME="$CI_HOME" "$REPO/install.sh" --codex >/dev/null \
+   && [[ ! -L "$CI_HOME/.agents/skills/matthewsreview-obsolete" ]] \
+   && [[ -L "$CI_HOME/.agents/skills/matthewsreview-review" ]]; then
+    pass "CI-1: Codex reinstall prunes stale owned links and refreshes current skills"
+else
+    fail "CI-1: Codex reinstall did not converge generated symlinks"
+fi
+
+# CI-2: a real skill directory is user data, never recursively replaced.
+CI_COLLIDE_HOME="$WORK/codex-install-collision"
+mkdir -p "$CI_COLLIDE_HOME/.agents/skills/matthewsreview-review"
+printf 'keep\n' > "$CI_COLLIDE_HOME/.agents/skills/matthewsreview-review/sentinel"
+ci_err=$(HOME="$CI_COLLIDE_HOME" "$REPO/install.sh" --codex 2>&1)
+ci_code=$?
+if [[ $ci_code -ne 0 && "$ci_err" == *"refusing to replace existing skill directory"* \
+      && $(cat "$CI_COLLIDE_HOME/.agents/skills/matthewsreview-review/sentinel") == "keep" ]]; then
+    pass "CI-2: Codex installer refuses real-directory collisions without data loss"
+else
+    fail "CI-2: Codex installer collision safety mismatch" "code=$ci_code err=$ci_err"
 fi
 
 # DP-1: artifact-render.py --format dispositions emits one row per finding
@@ -5050,6 +5207,10 @@ CAL_HOME="$WORK/cal"
 mkdir -p "$CAL_HOME/slug-a/branch-x/rev_001" "$CAL_HOME/slug-b/nested/branch-y/rev_002"
 cp "$FIX/artifact-seed.json" "$CAL_HOME/slug-a/branch-x/rev_001/artifact.json"
 cp "$FIX/artifact-seed.json" "$CAL_HOME/slug-b/nested/branch-y/rev_002/artifact.json"
+cal_tmp="$CAL_HOME/slug-b/nested/branch-y/rev_002/artifact.tmp"
+jq '.gates={"phase3_gate":12,"phase4_bands":[10,20,30],"fix_threshold":25,"walkthrough_threshold":25}' \
+    "$CAL_HOME/slug-b/nested/branch-y/rev_002/artifact.json" > "$cal_tmp"
+mv "$cal_tmp" "$CAL_HOME/slug-b/nested/branch-y/rev_002/artifact.json"
 printf '%s\n' '{"name":"scoring-gate","demote_rate":0.5}' > "$CAL_HOME/slug-a/branch-x/rev_001/phases.jsonl"
 printf '%s\n' '{"phase":"phase_1","tokens":1000}' > "$CAL_HOME/slug-a/branch-x/rev_001/tokens.jsonl"
 cal_out=$("$TOOLS/calibration-report.py" "$CAL_HOME")
@@ -5058,8 +5219,10 @@ cal_total=$(jq '.findings | length' "$FIX/artifact-seed.json")
 if printf '%s' "$cal_out" | grep -q 'Runs analyzed: \*\*2\*\*' \
    && printf '%s' "$cal_out" | grep -q 'median \*\*0.500\*\*' \
    && printf '%s' "$cal_out" | grep -qF "$(python3 -c "print(f'{$cal_findings/$cal_total:.1%}')")" \
-   && printf '%s' "$cal_out" | grep -q 'Score-band → disposition matrix'; then
-    pass "CAL-1: calibration report aggregates 2 runs (demote median, waste basis, band matrix)"
+   && printf '%s' "$cal_out" | grep -qF 'Phase 4 bands: **45 / 60 / 75** (1 run)' \
+   && printf '%s' "$cal_out" | grep -qF 'Phase 4 bands: **10 / 20 / 30** (1 run)' \
+   && printf '%s' "$cal_out" | grep -qF '| 20–<30 |'; then
+    pass "CAL-1: calibration groups score matrices by each run's resolved bands"
 else
     fail "CAL-1: calibration aggregation mismatch" "$(printf '%s' "$cal_out" | head -12)"
 fi

@@ -7,7 +7,7 @@ Fork of [adamsreview](https://github.com/adamjgmiller/adamsreview) (v0.4.3), exp
 The six commands:
 
 - **`review`** — multi-lens code review of a branch or PR. Up to seven parallel sub-agent lenses (correctness, security, UX, etc.) feed a dedup pass, a cheap-then-deep validation gate, and a holistic cross-cutting pass. High-confidence auto-fix proposals are pre-computed so `fix` and `walkthrough` can batch-accept them in one confirm. `--ensemble` adds a Codex pass and PR bot-comment scrape on top of the internal lenses; `--full` forces every lens even on small/docs-only diffs.
-- **`codex-review`** — Codex-driven peer to `review`. Same artifact shape, drop-in for everything downstream. Effort tunable via `--effort low|medium|high|xhigh|max|ultra` (default `high`).
+- **`codex-review`** — Codex-driven peer to `review`. Same artifact shape, drop-in for everything downstream. Effort tunable via `--effort low|medium|high|xhigh|max|ultra` (default `high`); `--full` forces all detection lenses.
 - **`add`** — inject externally-sourced findings (a cloud `/ultrareview` paste, an Opus once-over, a teammate's note) into the most recent review's artifact. Deduped, validated by the same gates, re-published to the existing PR comment.
 - **`walkthrough`** — interactive driver for findings `fix` would skip. Per-finding briefing + options + recommendation; promote what you want auto-fixed.
 - **`fix`** — automated fix loop. Per-fix-group agents, post-fix review, **reverts regressions, commits survivors** (`--granular-commits` for one commit per group).
@@ -19,9 +19,19 @@ The six commands:
 |---|---|---|
 | Claude Code | `/plugin marketplace add mwksl/matthewsreview` then `/plugin install matthewsreview@matthewsreview` | `/matthewsreview:review` |
 | Oh My Pi | `omp plugin marketplace add mwksl/matthewsreview` then `omp plugin install matthewsreview@matthewsreview` — **or zero-install**: if the plugin is already installed in Claude Code, omp discovers it automatically | `/matthewsreview:review` |
-| Codex | clone, then `./install.sh --codex` (generates skills into `~/.agents/skills/`) | `$matthewsreview-review` |
+| Codex | clone, then `./install.sh --codex` (generates `$matthewsreview-*` skills from `commands/*.md` and links them into `~/.agents/skills/`; also `~/.codex/skills/` when present) | `$matthewsreview-review` or select `matthewsreview-review` from `/skills` |
 
 Runtime deps (all harnesses): `uv`, `jq`, `gh`, `git`, bash 3.2+. Run `bin/doctor.sh` after install — it checks deps, harness CLIs, config validity, and stale pre-rename remnants, printing the exact fix for anything off.
+
+Codex generated skills are an install artifact, not another source tree. Re-run `./install.sh --codex` after updates. To uninstall them:
+
+```bash
+for root in ~/.agents/skills ~/.codex/skills; do
+  for skill in "$root"/matthewsreview "$root"/matthewsreview-*; do
+    [ -L "$skill" ] && rm "$skill"
+  done
+done
+```
 
 ### Local checkout installs
 
@@ -106,7 +116,7 @@ Score gates are config values with unchanged defaults: `phase3_gate=45`, `phase4
 ## Maintenance
 
 - **Version bumps**: patch for fixes, minor for new commands or breaking output-shape changes — bump `.claude-plugin/plugin.json` or `/plugin marketplace update` / `omp plugin upgrade` won't pick up changes.
-- **CI**: `.github/workflows/smoke.yml` runs `test/smoke.sh` (361 assertions) on ubuntu + macOS, plus shellcheck and a bash-3.2 portability gate. Run `test/smoke.sh` locally before pushing.
+- **CI**: `.github/workflows/smoke.yml` runs `test/smoke.sh` (388 assertions) on ubuntu + macOS, plus shellcheck and a bash-3.2 portability gate. Run `test/smoke.sh` locally before pushing.
 - **Upgrading**: Claude Code `/plugin marketplace update matthewsreview && /plugin update`; omp `omp plugin upgrade matthewsreview@matthewsreview`; Codex `git pull && ./install.sh --codex`.
 - **Working on the pipeline itself**: read `AGENTS.md` first. `docs/state-and-gates.md` (state model, gates, lanes) is the normative spec; `docs/pipeline.md` has phase trees; `docs/helpers.md` the helper inventory.
 
@@ -147,4 +157,4 @@ matthewsreview/
 
 ## Status
 
-Current release: **v1.0.0** — rebrand + multi-harness (Claude Code / Codex / Oh My Pi), per-stage model selection, efficiency pass informed by 98 real review runs. Fork of adamsreview v0.4.3 by Adam Miller.
+Current release: **v1.0.1** — rebrand + multi-harness (Claude Code / Codex / Oh My Pi), per-stage model selection, telemetry-informed efficiency tuning, and hardened cross-harness dispatch/install contracts. Fork of adamsreview v0.4.3 by Adam Miller.

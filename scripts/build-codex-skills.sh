@@ -14,19 +14,21 @@ set -e
 THIS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${1:-$(cd "$THIS/.." && pwd)}"
 OUT="$REPO/dist/codex-skills"
-
-rm -rf "$OUT"
-mkdir -p "$OUT"
+TMP="$REPO/dist/.codex-skills.tmp.$$"
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+mkdir -p "$REPO/dist"
+rm -rf "$TMP"
+mkdir -p "$TMP"
 
 for cmd_file in "$REPO"/commands/*.md; do
     cmd="$(basename "$cmd_file" .md)"
-    skill_dir="$OUT/matthewsreview-$cmd"
+    skill_dir="$TMP/matthewsreview-$cmd"
     mkdir -p "$skill_dir"
 
     # Extract description from frontmatter (between first pair of ---)
     desc=$(awk '/^---$/{n++; next} n==1 && /^description:/{sub(/^description: */,""); print; exit}' "$cmd_file")
     # Strip frontmatter block from body
-    body=$(awk '/^---$/{n++; next} n>=2' "$cmd_file")
+    body=$(awk '/^---$/ && n < 2 {n++; next} n == 2 {print}' "$cmd_file")
 
     {
         printf -- '---\n'
@@ -54,5 +56,11 @@ PREAMBLE
         printf '%s\n' "$body"
     } > "$skill_dir/SKILL.md"
 
-    printf 'built %s\n' "$skill_dir/SKILL.md"
+    printf 'built %s\n' "$OUT/matthewsreview-$cmd/SKILL.md"
 done
+
+# Publish only after every skill is complete. A generation failure leaves the
+# currently installed symlink targets intact.
+rm -rf "$OUT"
+mv "$TMP" "$OUT"
+trap - EXIT HUP INT TERM

@@ -8,10 +8,10 @@
 #   claude  → claude -p --model <m> --output-format json (prompt on stdin)
 #   codex   → codex exec - --model <m> -c model_reasoning_effort=<e>
 #             --sandbox read-only|workspace-write --json -o <last-msg>
-#   omp     → omp -p --model <m>[:<thinking>] "<prompt>" (positional)
+#   omp     → omp -p --model <m> --thinking <level> @<prompt-file>
 #
-# Job layout: <scratch-dir>/<job_id>/{pid,engine,model,effort,started_epoch,
-# out,err,last_message,exit_code,prompt.md}
+# Job layout: <scratch-dir>/<job_id>/{pid,child_pid,engine,model,effort,
+# started_epoch,out,err,last_message,exit_code,cancelled,prompt.md}
 #
 # Subcommands:
 #   start --engine <claude|codex|omp> --model <m> [--effort <e>]
@@ -50,6 +50,21 @@ exit 64
 }
 
 err() { echo "ERROR: $1" >&2; }
+require_value() {
+    [[ $# -ge 2 ]] || { err "$1 requires a value"; usage; }
+}
+require_jq() {
+    if ! command -v jq >/dev/null 2>&1; then
+        err "agent-dispatch.sh requires jq, which is not on PATH"
+        echo "Action: install jq before dispatching model jobs." >&2
+        exit 5
+    fi
+}
+atomic_write() { # path value
+    local path="$1" value="$2" tmp="${1}.tmp.$$.$RANDOM"
+    printf '%s\n' "$value" > "$tmp"
+    mv "$tmp" "$path"
+}
 
 SUB="${1:-}"
 [[ $# -ge 1 ]] || usage
@@ -60,15 +75,15 @@ STALL=90 CEILING=600
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --engine) ENGINE="${2:-}"; shift 2 ;;
-        --model) MODEL="${2:-}"; shift 2 ;;
-        --effort) EFFORT="${2:-}"; shift 2 ;;
-        --prompt-file) PROMPT_FILE="${2:-}"; shift 2 ;;
-        --scratch-dir) SCRATCH="${2:-}"; shift 2 ;;
-        --job) JOB="${2:-}"; shift 2 ;;
+        --engine) require_value "$@"; ENGINE="$2"; shift 2 ;;
+        --model) require_value "$@"; MODEL="$2"; shift 2 ;;
+        --effort) require_value "$@"; EFFORT="$2"; shift 2 ;;
+        --prompt-file) require_value "$@"; PROMPT_FILE="$2"; shift 2 ;;
+        --scratch-dir) require_value "$@"; SCRATCH="$2"; shift 2 ;;
+        --job) require_value "$@"; JOB="$2"; shift 2 ;;
         --write) WRITE=1; shift ;;
-        --stall-threshold-sec) STALL="${2:-}"; shift 2 ;;
-        --wall-clock-ceiling-sec) CEILING="${2:-}"; shift 2 ;;
+        --stall-threshold-sec) require_value "$@"; STALL="$2"; shift 2 ;;
+        --wall-clock-ceiling-sec) require_value "$@"; CEILING="$2"; shift 2 ;;
         *) err "unknown argument: $1"; usage ;;
     esac
 done
@@ -103,6 +118,7 @@ case "$SUB" in
 
 # ---------------------------------------------------------------- start
 start)
+    require_jq
     [[ -n "$ENGINE" && -n "$PROMPT_FILE" && -n "$SCRATCH" ]] || usage
     if [[ ! -f "$PROMPT_FILE" ]]; then
         err "prompt file not found: $PROMPT_FILE"
@@ -120,11 +136,11 @@ start)
     printf '%s' "$EFFORT" > "$dir/effort"
     date +%s > "$dir/started_epoch"
 
+    prompt_mode=stdin
     case "$ENGINE" in
         claude)
             args=(claude -p --output-format json)
             [[ -n "$MODEL" ]] && args+=(--model "$MODEL")
-            ( "${args[@]}" < "$dir/prompt.md" > "$dir/out" 2> "$dir/err"; echo $? > "$dir/exit_code" ) >/dev/null 2>&1 &
             ;;
         codex)
             sandbox=read-only
@@ -132,21 +148,42 @@ start)
             args=(codex exec - --sandbox "$sandbox" --json --skip-git-repo-check -o "$dir/last_message")
             [[ -n "$MODEL" ]] && args+=(--model "$MODEL")
             [[ -n "$EFFORT" ]] && args+=(-c "model_reasoning_effort=\"$EFFORT\"")
-            ( "${args[@]}" < "$dir/prompt.md" > "$dir/out" 2> "$dir/err"; echo $? > "$dir/exit_code" ) >/dev/null 2>&1 &
             ;;
         omp)
-            prompt_text=$(cat "$dir/prompt.md")
+            prompt_mode=file-argument
             args=(omp -p)
-            if [[ -n "$MODEL" ]]; then
-                omp_model="$MODEL"
-                [[ -n "$EFFORT" ]] && omp_model="$omp_model:$EFFORT"
-                args+=(--model "$omp_model")
-            fi
-            ( "${args[@]}" "$prompt_text" > "$dir/out" 2> "$dir/err"; echo $? > "$dir/exit_code" ) >/dev/null 2>&1 &
+            [[ -n "$MODEL" ]] && args+=(--model "$MODEL")
+            [[ -n "$EFFORT" ]] && args+=(--thinking "$EFFORT")
             ;;
     esac
+
+    (
+        child_pid=""
+        forward_signal() {
+            trap - TERM INT HUP
+            if [[ -n "$child_pid" ]] && kill -0 "$child_pid" 2>/dev/null; then
+                kill "$child_pid" 2>/dev/null || true
+            fi
+            atomic_write "$dir/exit_code" 143
+            exit 143
+        }
+        trap forward_signal TERM INT HUP
+
+        if [[ "$prompt_mode" == "file-argument" ]]; then
+            "${args[@]}" "@$dir/prompt.md" > "$dir/out" 2> "$dir/err" &
+        else
+            "${args[@]}" < "$dir/prompt.md" > "$dir/out" 2> "$dir/err" &
+        fi
+        child_pid=$!
+        atomic_write "$dir/child_pid" "$child_pid"
+        wait "$child_pid"
+        code=$?
+        trap - TERM INT HUP
+        atomic_write "$dir/exit_code" "$code"
+        exit "$code"
+    ) >/dev/null 2>&1 &
     pid=$!
-    printf '%s' "$pid" > "$dir/pid"
+    atomic_write "$dir/pid" "$pid"
 
     jq -n --arg j "$job_id" --argjson p "$pid" --arg o "$dir/out" \
         '{job_id:$j, pid:$p, out_file:$o}'
@@ -154,6 +191,7 @@ start)
 
 # ---------------------------------------------------------------- poll
 poll)
+    require_jq
     [[ -n "$JOB" && -n "$SCRATCH" ]] || usage
     dir=$(job_dir)
     if [[ ! -d "$dir" ]]; then
@@ -163,6 +201,10 @@ poll)
     fi
     ENGINE=$(cat "$dir/engine" 2>/dev/null || echo "")
     pid=$(cat "$dir/pid" 2>/dev/null || echo "")
+    if [[ -f "$dir/cancelled" ]]; then
+        jq -n --arg j "$JOB" '{verdict:"cancelled", status:"cancelled", job_id:$j}'
+        exit 0
+    fi
 
     if [[ -f "$dir/exit_code" ]]; then
         code=$(tr -d '[:space:]' < "$dir/exit_code")
@@ -245,6 +287,7 @@ poll)
 
 # ---------------------------------------------------------------- stop
 stop)
+    require_jq
     [[ -n "$JOB" && -n "$SCRATCH" ]] || usage
     dir=$(job_dir)
     if [[ ! -d "$dir" ]]; then
@@ -253,12 +296,21 @@ stop)
         exit 1
     fi
     pid=$(cat "$dir/pid" 2>/dev/null || echo "")
+    child_pid=$(cat "$dir/child_pid" 2>/dev/null || echo "")
+    atomic_write "$dir/cancelled" "$(date +%s)"
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
         kill "$pid" 2>/dev/null || true
-        sleep 2
-        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
     fi
-    [[ -f "$dir/exit_code" ]] || echo 143 > "$dir/exit_code"
+    if [[ -n "$child_pid" ]] && kill -0 "$child_pid" 2>/dev/null; then
+        kill "$child_pid" 2>/dev/null || true
+    fi
+    sleep 2
+    if [[ -n "$child_pid" ]] && kill -0 "$child_pid" 2>/dev/null; then
+        kill -9 "$child_pid" 2>/dev/null || true
+    fi
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        kill -9 "$pid" 2>/dev/null || true
+    fi
     jq -n --arg j "$JOB" '{verdict:"cancelled", status:"cancelled", job_id:$j}'
     ;;
 

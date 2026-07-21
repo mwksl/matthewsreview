@@ -837,9 +837,13 @@ def _suggested_action(f):
         return "judge"
     if disp in ("disproven", "below_gate"):
         return "skip"
+    if disp in ("partial", "regression"):
+        return "fix"
     if disp == "confirmed_mechanical":
         # auto-eligible = deep lane + auto_fixable, or human-promoted
-        if f.get("human_confirmation") or (f.get("validation_lane") == "deep" and f.get("actionability") == "auto_fixable"):
+        if f.get("human_confirmation") is not None or (
+            f.get("validation_lane") == "deep" and f.get("auto_fixable") is True
+        ):
             return "fix"
         return "walkthrough"
     if disp in ("confirmed_manual", "confirmed_report"):
@@ -861,7 +865,7 @@ def render_dispositions(artifact):
     for f in findings:
         action = _suggested_action(f)
         disp = f.get("disposition") or ""
-        if disp.startswith("confirmed_") or disp == "uncertain":
+        if disp.startswith("confirmed_") or disp in ("uncertain", "partial", "regression"):
             engage += 1
         else:
             skip += 1
@@ -883,7 +887,8 @@ def render_dispositions(artifact):
         )
     lines += [
         "",
-        f"**{engage} engage / {skip} skip** (engage = confirmed_* + uncertain; "
+        f"**{engage} engage / {skip} skip** "
+        "(engage = confirmed_* + uncertain + retry-eligible partial/regression; "
         "actions: fix → `/matthewsreview:fix`, walkthrough → `/matthewsreview:walkthrough`, "
         "issue → pre-existing, judge/skip → no action)",
         "",
