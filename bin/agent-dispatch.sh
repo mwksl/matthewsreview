@@ -317,8 +317,17 @@ start)
         [[ -n "$pid_identity" ]] || sleep 0.05
         identity_attempt=$((identity_attempt + 1))
     done
-    if [[ -z "$pid_identity" ]] \
-       || ! atomic_write "$dir/pid_identity" "$pid_identity"; then
+    if [[ -z "$pid_identity" ]]; then
+        # A fast engine may complete and be reaped before ps can identify the
+        # wrapper. The ready + exit records prove startup and completion; no
+        # live process remains for stop to authenticate.
+        if [[ ! -f "$dir/ready" || ! -f "$dir/exit_code" ]]; then
+            terminate_pid_tree "$pid" TERM
+            err "cannot persist dispatch wrapper identity under: $dir"
+            echo "Action: inspect process permissions and verify --scratch-dir remains writable." >&2
+            exit 1
+        fi
+    elif ! atomic_write "$dir/pid_identity" "$pid_identity"; then
         terminate_pid_tree "$pid" TERM
         err "cannot persist dispatch wrapper identity under: $dir"
         echo "Action: inspect process permissions and verify --scratch-dir remains writable." >&2
