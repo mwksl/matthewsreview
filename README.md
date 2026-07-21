@@ -78,7 +78,7 @@ Where config lives (later wins): built-in defaults → `~/.matthews-reviews/conf
 }
 ```
 
-**Running from Codex.** On the Codex orchestrator the built-in tiers default to the codex engine (`codex::high` for every role) — a codex-driven run is self-contained and never stalls on cross-engine consent prompts. Mix engines per role via `--models` (e.g. `deep_validate=claude:opus` shells out to `claude -p` when the Claude CLI is installed and authed).
+**Running from Codex.** Defaults stay harness-invariant: deep roles use `claude:opus`, light/utility roles use `claude:sonnet`, and dedicated Codex lanes use `codex::high`. A Codex-orchestrated run shells out to an authenticated Claude CLI for `claude:*` roles. Use `orchestrator_defaults.codex.tiers`, a profile, or `--models` when you want an all-Codex run.
 
 **Running on omp models.** Role strings with the `omp:` engine dispatch through omp's eval bridge to any model your omp installation serves (`omp models` lists the registry). Append an omp thinking level when the model supports one, e.g. `omp:openai-codex/gpt-5.6-sol:max`. Example per-run: `--models "deep=omp:openai-codex/gpt-5.6-sol:max,light=omp:openai-codex/gpt-5.6-sol:max,utility=omp:openai-codex/gpt-5.6-sol:max"`. To make it permanent, set `orchestrator_defaults.omp.tiers` (above) — Claude Code sessions are unaffected. Without it, `claude:*` roles under omp require Anthropic auth in omp; if a role's model isn't servable, the preflight Model plan prints a warning and lens dispatches 404 (the run is then marked **REVIEW DEGRADED** in the report). `bin/doctor.sh` probes this upfront.
 
@@ -92,6 +92,31 @@ The preflight prints the resolved **Model plan** table (role / engine / model / 
 ### Gate thresholds
 
 Score gates are config values with unchanged defaults: `phase3_gate=45`, `phase4_bands=[45,60,75]`, `fix_threshold=60`, `walkthrough_threshold=60`. `bin/calibration-report.py ~/.matthews-reviews` aggregates your review history (demote rates, waste ratios, band→disposition matrix, per-phase token medians) so you can tune them from evidence. CLI thresholds on `fix`/`walkthrough` still override per run.
+
+## Token counts
+
+`subagent_tokens` is always rolled up from the review's own `tokens.jsonl`.
+Claude Code can also capture the orchestrator's main-session spend:
+
+```bash
+export MATTHEWS_REVIEW_TALLY_ORCHESTRATOR=1
+```
+
+The `SessionStart` hook records the active session ID and exact transcript path.
+Each tally reads only that file, filters to matching assistant turns at or after
+the review start, and merges the session's counters into the artifact. It never
+scans sibling transcripts. Later `fix`, `add`, or `walkthrough` sessions retain
+earlier lifecycle-session counters; re-tallying the same session replaces its
+row rather than double-counting it.
+
+This remains opt-in because reading a Claude Code transcript can trigger macOS's
+“access data from other apps” prompt (`com.apple.provenance`). Grant Full Disk
+Access to the terminal/Claude Code host if macOS blocks the read. Without the
+export, the helper skips and leaves any previously captured value untouched.
+The legacy `ADAMS_REVIEW_TALLY_ORCHESTRATOR=1` export still works. Codex- and
+omp-orchestrated runs have no Claude `SessionStart` transcript metadata, so this
+field remains absent; their dispatched-agent usage still appears under
+`subagent_tokens`.
 
 ## The artifact as a work queue
 
@@ -116,7 +141,7 @@ Score gates are config values with unchanged defaults: `phase3_gate=45`, `phase4
 ## Maintenance
 
 - **Version bumps**: patch for fixes, minor for new commands or breaking output-shape changes — bump `.claude-plugin/plugin.json` or `/plugin marketplace update` / `omp plugin upgrade` won't pick up changes.
-- **CI**: `.github/workflows/smoke.yml` runs `test/smoke.sh` (388 assertions) on ubuntu + macOS, plus shellcheck and a bash-3.2 portability gate. Run `test/smoke.sh` locally before pushing.
+- **CI**: `.github/workflows/smoke.yml` runs `test/smoke.sh` (416 assertions) on ubuntu + macOS, plus shellcheck and a bash-3.2 portability gate. Run `test/smoke.sh` locally before pushing.
 - **Upgrading**: Claude Code `/plugin marketplace update matthewsreview && /plugin update`; omp `omp plugin upgrade matthewsreview@matthewsreview`; Codex `git pull && ./install.sh --codex`.
 - **Working on the pipeline itself**: read `AGENTS.md` first. `docs/state-and-gates.md` (state model, gates, lanes) is the normative spec; `docs/pipeline.md` has phase trees; `docs/helpers.md` the helper inventory.
 
@@ -142,7 +167,7 @@ matthewsreview/
 ├── bin/                       ← helpers (review-config.sh, agent-dispatch.sh, doctor.sh,
 │                                 calibration-report.py, artifact-*, codex-poll.sh, …)
 ├── scripts/build-codex-skills.sh + install.sh   ← Codex skill generation/install
-├── hooks/                     ← SessionStart dep-check (thin wrapper over doctor.sh)
+├── hooks/                     ← SessionStart dependency check + exact transcript/session export
 ├── docs/                      ← state-and-gates.md, pipeline.md, helpers.md, case-studies/
 ├── test/                      ← smoke.sh + fixtures
 └── .github/workflows/smoke.yml
@@ -157,4 +182,4 @@ matthewsreview/
 
 ## Status
 
-Current release: **v1.0.1** — rebrand + multi-harness (Claude Code / Codex / Oh My Pi), per-stage model selection, telemetry-informed efficiency tuning, and hardened cross-harness dispatch/install contracts. Fork of adamsreview v0.4.3 by Adam Miller.
+Current release: **v1.0.2** — exact-session Claude orchestrator telemetry, rebrand + multi-harness (Claude Code / Codex / Oh My Pi), per-stage model selection, telemetry-informed efficiency tuning, and hardened cross-harness dispatch/install contracts. Fork of adamsreview v0.4.3 by Adam Miller.

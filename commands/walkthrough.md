@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(doctor.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(repo-slug.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(cat:*), Bash(printf:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(tr:*), Bash(awk:*), Bash(mktemp:*), Agent, Read, AskUserQuestion
+allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(review-root.sh:*), Bash(doctor.sh:*), Bash(agent-dispatch.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(repo-slug.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(cat:*), Bash(printf:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(tr:*), Bash(awk:*), Bash(mktemp:*), Agent, Read, AskUserQuestion
 argument-hint: "[threshold] [--profile <name>] [--models \"<csv>\"]"
 description: Walk interactively through findings /matthewsreview:fix would skip, above a score floor. Per-finding briefing + options + recommendation, then batch re-render/re-publish and post a decisions-log PR comment.
 disable-model-invocation: false
@@ -95,7 +95,7 @@ If no integer was provided, step 2b sets `threshold` from the resolved
 ### 2. Locate the artifact
 
 ```bash
-reviews_root="${MATTHEWS_REVIEW_REVIEWS_ROOT:-$HOME/.matthews-reviews}"
+reviews_root=$(review-root.sh)
 head_branch=$(git rev-parse --abbrev-ref HEAD)
 repo_root=$(git rev-parse --show-toplevel)
 repo_slug=$(repo-slug.sh --repo-root "$repo_root")
@@ -131,6 +131,10 @@ if [[ -z "${threshold:-}" ]]; then
     threshold=$(printf '%s' "$model_plan_json" | jq -er '.gates.walkthrough_threshold')
 fi
 fix_threshold=$(printf '%s' "$model_plan_json" | jq -er '.gates.fix_threshold')
+phase3_gate=$(printf '%s' "$model_plan_json" | jq -er '.gates.phase3_gate')
+phase4_b1=$(printf '%s' "$model_plan_json" | jq -er '.gates.phase4_bands[0]')
+phase4_b2=$(printf '%s' "$model_plan_json" | jq -er '.gates.phase4_bands[1]')
+phase4_b3=$(printf '%s' "$model_plan_json" | jq -er '.gates.phase4_bands[2]')
 plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX)
 printf '%s' "$model_plan_json" > "$plan_tmp"
 artifact-patch.py --path "$artifact_path" \
@@ -237,7 +241,8 @@ judged these low-impact × low-confidence) and `pre_existing_report`
 the new default tier.
 
 ```bash
-scope_qualifying_ids=$(jq -r --argjson thr "$threshold" '
+scope_qualifying_ids=$(jq -r \
+  --argjson walk_thr "$threshold" --argjson fix_thr "$fix_threshold" '
     [.findings[]
      | select(.current_state == "open")
      | select(.disposition != "resolved")
@@ -251,14 +256,14 @@ scope_qualifying_ids=$(jq -r --argjson thr "$threshold" '
            (.disposition == "confirmed_mechanical" or .disposition == "partial" or .disposition == "regression")
            and (
              (.impact_type == "correctness" or .impact_type == "security")
-             and (.score_phase4 != null and .score_phase4 >= $thr)
+             and (.score_phase4 != null and .score_phase4 >= $fix_thr)
            )
          ) | not
        )
      # Score floor — same rule as scope_full_ids. Phase3 fallback is
      # irrelevant here (below_gate is already excluded above), but kept
      # for symmetry with scope_full_ids so the two stay easy to diff.
-     | select((.score_phase4 // .score_phase3 // -1) >= $thr)
+     | select((.score_phase4 // .score_phase3 // -1) >= $walk_thr)
      | .id
     ] | join(",")
 ' "$artifact_path")
@@ -333,15 +338,18 @@ understands what "scope" means here:
 **Understanding the scope.** Three different gates govern this pipeline,
 plus a fourth floor specific to this walkthrough:
 
-- **Phase 3 scoring gate (45)** — filters candidates into validation.
-  Failures get `disposition=below_gate` and no `score_phase4`.
-- **Phase 4 confirmation gate (45/60/75)** — maps `score_phase4` into
+- **Phase 3 scoring gate (`$phase3_gate`)** — filters candidates into
+  validation. Failures get `disposition=below_gate` and no
+  `score_phase4`.
+- **Phase 4 confirmation cutoffs
+  (`$phase4_b1/$phase4_b2/$phase4_b3`)** — map `score_phase4` into
   `disproven` / `uncertain` / `confirmed_*`.
-- **Phase 8 fix gate (`$fix_threshold`, default 60)** — what
+- **Phase 8 fix gate (`$fix_threshold`)** — what
   `/matthewsreview:fix` touches: confirmed_mechanical + deep lane +
   score ≥ this independently configured threshold.
-- **Walkthrough score floor (`$threshold`, default 60)** — the argument
-  to this command. A display filter that drops findings below the floor
+- **Walkthrough score floor (`$threshold`)** — the argument or resolved
+  config value for this command. A display filter that drops findings
+  below the floor
   so the session focuses on high-signal items. Independent of the fix
   gate: findings promoted here get picked up by `/matthewsreview:fix`
   regardless of its threshold, via the `human_confirmation` bypass.
@@ -349,8 +357,8 @@ plus a fourth floor specific to this walkthrough:
 The walkthrough surfaces what Phase 8 would SKIP, minus anything below
 the floor. `below_gate` is a **disposition name**, not a threshold —
 Phase 3 already demoted those as low-impact × low-confidence, and the
-score floor excludes them at default threshold=60 (fall back to
-`score_phase3` means a low threshold like 30 would surface them for
+score floor excludes them at the resolved walkthrough threshold (the
+`score_phase3` fallback lets a lower threshold surface them for
 auditing). Pre-existing findings (`pre_existing_report`) are handled
 on a separate track at the end of the run (file GitHub issues for
 base-branch bugs instead of trying to fix them here); they are not
@@ -908,10 +916,11 @@ Budget: ~3-5k tokens. Prompt:
 >      pick the walkthrough's Skip.
 >      **For `confirmed_manual` and `confirmed_report` findings:**
 >      propose a best-effort fix hint anyway. These are above the
->      Phase 4 confirmation threshold (score ≥ 60) — the validator
->      said the finding is real, just not mechanically trivial (manual)
->      or not worth a fix (report-only). If a concrete fix path exists,
->      emit it as your top option with a specific `fix_hint_if_picked`.
+>      resolved Phase 4 confirmation cutoff (`gates.phase4_bands[1]`) —
+>      the validator said the finding is real, just not mechanically
+>      trivial (manual) or not worth a fix (report-only). If a concrete
+>      fix path exists, emit it as your top option with a specific
+>      `fix_hint_if_picked`.
 >      If you genuinely can't see a clean fix (rare), emit one or two
 >      weak-conviction options and say so in your recommendation
 >      rationale — the reviewer can still pick Skip.

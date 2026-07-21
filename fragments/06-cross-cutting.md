@@ -129,12 +129,23 @@ Write the groups to a tmpfile so `--set-json` can use `@file` form
 # If the sub-agent already returned just the groups array, the `// .`
 # fallback preserves the value. If it returned the outer envelope,
 # we pluck the inner array.
-jq -c '.cross_cutting_groups // .' <<<"$subagent_response_json" \
-    > "/tmp/matthews-review-ccg-$review_id.json"
-artifact-patch.py \
-  --path "$artifact_path" \
-  --set-json "cross_cutting_groups=@/tmp/matthews-review-ccg-$review_id.json"
-rm -f "/tmp/matthews-review-ccg-$review_id.json"
+groups_tmp=$(mktemp -t matthews-review-ccg.XXXXXX)
+cleanup_groups_tmp() { rm -f "$groups_tmp"; }
+trap cleanup_groups_tmp EXIT HUP INT TERM
+if jq -c '.cross_cutting_groups // .' \
+    <<<"$subagent_response_json" > "$groups_tmp"; then
+    artifact-patch.py \
+      --path "$artifact_path" \
+      --set-json "cross_cutting_groups=@$groups_tmp"
+    patch_rc=$?
+else
+    patch_rc=1
+fi
+cleanup_groups_tmp
+trap - EXIT HUP INT TERM
+[[ "$patch_rc" -eq 0 ]] || {
+    printf 'phase_5_groups_apply_failed\n' >> "$trace_log_path"
+}
 ```
 
 The schema validates each group: id must match `^G[0-9]+$`,

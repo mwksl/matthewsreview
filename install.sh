@@ -13,18 +13,18 @@
 # MREVIEW_ROOT as an absolute path.
 set -u
 set -e
+shopt -s nullglob
 
 THIS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-case "${1:-}" in
-    --codex) ;;
-    *)
-        echo "Usage: ./install.sh --codex" >&2
-        echo "  Claude Code: /plugin marketplace add mwksl/matthewsreview && /plugin install matthewsreview@matthewsreview" >&2
-        echo "  Oh My Pi:    omp plugin marketplace add mwksl/matthewsreview && omp plugin install matthewsreview@matthewsreview" >&2
-        exit 64
-        ;;
-esac
+if [[ $# -ne 1 || "${1:-}" != "--codex" ]]; then
+    echo "ERROR: invalid installer invocation." >&2
+    echo "Usage: ./install.sh --codex" >&2
+    echo "  Claude Code: /plugin marketplace add mwksl/matthewsreview && /plugin install matthewsreview@matthewsreview" >&2
+    echo "  Oh My Pi:    omp plugin marketplace add mwksl/matthewsreview && omp plugin install matthewsreview@matthewsreview" >&2
+    echo "Action: pass exactly --codex, with no additional arguments." >&2
+    exit 64
+fi
 
 "$THIS/scripts/build-codex-skills.sh" "$THIS"
 
@@ -43,6 +43,15 @@ link_skill() { # src-dir name target-root
     printf 'linked %s -> %s\n' "$dest" "$src"
 }
 
+assert_linkable() { # destination
+    local dest="$1"
+    if [[ -e "$dest" && ! -L "$dest" ]]; then
+        printf 'ERROR: refusing to replace existing skill directory: %s\n' "$dest" >&2
+        printf 'Action: move it aside, then rerun ./install.sh --codex.\n' >&2
+        return 1
+    fi
+}
+
 ROOTS=("$HOME/.agents/skills")
 [[ -d "$HOME/.codex/skills" ]] && ROOTS+=("$HOME/.codex/skills")
 
@@ -53,14 +62,22 @@ prune_stale_links() { # target-root
         target=$(readlink "$dest")
         case "$target" in
             */dist/codex-skills/matthewsreview-*)
-                if [[ ! -e "$dest" ]]; then
-                    rm "$dest"
-                    printf 'removed stale link %s\n' "$dest"
-                fi
+                rm "$dest"
+                printf 'removed generated link %s\n' "$dest"
                 ;;
         esac
     done
 }
+
+# Validate every destination before removing or refreshing any live link. A
+# single real-directory collision must leave the previous installation whole.
+for root in "${ROOTS[@]}"; do
+    mkdir -p "$root"
+    for skill_dir in "$THIS"/dist/codex-skills/matthewsreview-*; do
+        assert_linkable "$root/$(basename "$skill_dir")"
+    done
+    assert_linkable "$root/matthewsreview"
+done
 
 for root in "${ROOTS[@]}"; do
     prune_stale_links "$root"

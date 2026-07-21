@@ -95,11 +95,17 @@ reviewer_sources=$(printf '%s' "$finalize_artifact_snapshot" | jq -c --arg inter
   | unique
 ')
 
-printf '%s\n' "$reviewer_sources" > "/tmp/matthews-review-rs-$review_id.json"
+reviewer_sources_tmp=$(mktemp -t matthews-review-rs.XXXXXX)
+cleanup_reviewer_sources_tmp() { rm -f "$reviewer_sources_tmp"; }
+trap cleanup_reviewer_sources_tmp EXIT HUP INT TERM
+printf '%s\n' "$reviewer_sources" > "$reviewer_sources_tmp"
 artifact-patch.py \
   --path "$artifact_path" \
-  --set-json "reviewer_sources=@/tmp/matthews-review-rs-$review_id.json"
-rm -f "/tmp/matthews-review-rs-$review_id.json"
+  --set-json "reviewer_sources=@$reviewer_sources_tmp"
+reviewer_sources_rc=$?
+cleanup_reviewer_sources_tmp
+trap - EXIT HUP INT TERM
+[[ "$reviewer_sources_rc" -eq 0 ]] || exit "$reviewer_sources_rc"
 ```
 
 If `findings[]` is empty (no candidates detected), the union is `[]` —
@@ -129,11 +135,17 @@ metrics=$(jq -n \
     pr_size_buckets: {files_changed: $files_changed, lines_changed: $lines_changed}
   }')
 
-echo "$metrics" > "/tmp/matthews-review-metrics-$review_id.json"
+metrics_tmp=$(mktemp -t matthews-review-metrics.XXXXXX)
+cleanup_metrics_tmp() { rm -f "$metrics_tmp"; }
+trap cleanup_metrics_tmp EXIT HUP INT TERM
+printf '%s\n' "$metrics" > "$metrics_tmp"
 artifact-patch.py \
   --path "$artifact_path" \
-  --set-json "metrics=@/tmp/matthews-review-metrics-$review_id.json"
-rm -f "/tmp/matthews-review-metrics-$review_id.json"
+  --set-json "metrics=@$metrics_tmp"
+metrics_rc=$?
+cleanup_metrics_tmp
+trap - EXIT HUP INT TERM
+[[ "$metrics_rc" -eq 0 ]] || exit "$metrics_rc"
 ```
 
 ### 6.4. Append Phase 6 record to `phases.jsonl`
@@ -165,12 +177,21 @@ failures are surfaced — detection failures live in
 scrolls away. Compute and store:
 
 ```bash
-degraded_count=$(jq -s '[.[] | select(.lens_dispatch_failures != null)
-  | .lens_dispatch_failures] | add // 0' "$phases_log_path")
+degraded_json=$(jq -s '
+  {
+    lens_dispatch_failures:
+      ([.[].lens_dispatch_failures // 0] | add // 0),
+    candidate_drop_failures:
+      ([.[].candidate_drop_failures // 0] | add // 0),
+    finalization_failures:
+      ([.[].finalization_failures // 0] | add // 0)
+  }
+' "$phases_log_path")
+degraded_count=$(printf '%s' "$degraded_json" | jq \
+  '.lens_dispatch_failures + .candidate_drop_failures + .finalization_failures')
 if [[ "$degraded_count" -gt 0 ]]; then
     artifact-patch.py --path "$artifact_path" \
-      --set-json "degraded=$(jq -nc --argjson n "$degraded_count" \
-        '{lens_dispatch_failures:$n}')"
+      --set-json "degraded=$degraded_json"
 fi
 ```
 
@@ -287,20 +308,68 @@ Prepend a one-line mode-aware header:
 After the main report body (the contents of `artifact.md`), add a
 **Next steps** block. Do NOT use ASK here.
 
-Build the rows from the finalized artifact's actual counts — no
-generic rows for work that doesn't exist. Compute in-context from the
-artifact:
+Build the rows from the finalized artifact with the same selectors the
+lifecycle commands use:
 
-- `auto_eligible_count` — findings where `disposition ==
-  "confirmed_mechanical"` AND (`validation_lane == "deep"` OR
-  `human_confirmation != null`) AND `current_state == "open"`
-- `walkthrough_count` — open findings with `disposition` in
-  {`confirmed_manual`, `confirmed_report`} (deep) plus all open
-  light-lane `confirmed_*`
-- `preexisting_count` — open findings with `disposition ==
-  "pre_existing_report"`
-- `internal_only` — `reviewer_sources` is non-empty and every member is
-  either `"internal"` or `"internal-codex"`
+```bash
+next_step_counts=$(jq -c '
+  (.gates.fix_threshold // 60) as $fix_thr
+  | (.gates.walkthrough_threshold // 60) as $walk_thr
+  | def fix_disposition:
+      (.disposition == "confirmed_mechanical"
+       or .disposition == "partial"
+       or .disposition == "regression");
+    def auto_eligible:
+      fix_disposition
+      and (
+        .human_confirmation != null
+        or (
+          (.impact_type == "correctness" or .impact_type == "security")
+          and (.score_phase4 != null and .score_phase4 >= $fix_thr)
+        )
+      );
+    {
+      auto_eligible_count: ([.findings[]
+        | select(.current_state == "open" and auto_eligible)] | length),
+      walkthrough_count: ([.findings[]
+        | select(.current_state == "open")
+        | select(.disposition != "resolved"
+                 and .disposition != "disproven"
+                 and .disposition != "pending_validation"
+                 and .disposition != "below_gate"
+                 and .disposition != "pre_existing_report")
+        | select(.human_confirmation == null)
+        | select(auto_eligible | not)
+        | select((.score_phase4 // .score_phase3 // -1) >= $walk_thr)
+      ] | length),
+      preexisting_count: ([.findings[]
+        | select(.current_state == "open"
+                 and .disposition == "pre_existing_report")] | length),
+      internal_only: (
+        (.reviewer_sources | length) > 0
+        and all(.reviewer_sources[];
+          . == "internal" or . == "internal-codex")
+      )
+    }
+' "$artifact_path")
+auto_eligible_count=$(printf '%s' "$next_step_counts" | jq -r '.auto_eligible_count')
+walkthrough_count=$(printf '%s' "$next_step_counts" | jq -r '.walkthrough_count')
+preexisting_count=$(printf '%s' "$next_step_counts" | jq -r '.preexisting_count')
+internal_only=$(printf '%s' "$next_step_counts" | jq -r '.internal_only')
+```
+
+Resolve the user-facing command spelling from `harness_id` before
+rendering the rows:
+
+- `codex`: `$matthewsreview-fix`, `$matthewsreview-walkthrough`, and
+  `$matthewsreview-add`
+- `claude-code` or `omp`: `/matthewsreview:fix`,
+  `/matthewsreview:walkthrough`, and `/matthewsreview:add`
+
+For the work-queue row, resolve `artifact-render.py` with `command -v`
+on Claude Code; otherwise use the absolute `${MRB}artifact-render.py`.
+Always print the absolute `$artifact_path`. Never address `bin/`
+relative to the repository being reviewed.
 
 Then emit ONLY the rows whose counts are non-zero (plus the always
 row), in this order:
@@ -310,24 +379,27 @@ row), in this order:
 
 **Next steps**
 
-- `/matthewsreview:fix <fix_threshold>` — applies N auto-fixable
-  finding(s), re-reviews, reverts regressions, commits survivors.
+- `<fix_command> <fix_threshold>` — applies N auto-fixable finding(s),
+  re-reviews, reverts regressions, commits survivors.
   [only when auto_eligible_count > 0]
-- `/matthewsreview:walkthrough <walkthrough_threshold>` — M finding(s)
-  need human judgment; step through with briefings, promote the ones
-  you want auto-fixed. [only when walkthrough_count > 0]
-- K pre-existing issue(s) — the walkthrough files GitHub issues for
-  these. [only when preexisting_count > 0]
-- Add a second opinion — re-run with `--ensemble`, or
-  `/matthewsreview:add <paste>` to inject an external review.
+- `<walkthrough_command> <walkthrough_threshold>` — M finding(s) need
+  human judgment; step through with briefings, promote the ones you want
+  auto-fixed. [only when walkthrough_count > 0]
+- K pre-existing issue(s) — in `pr` mode, the walkthrough files
+  GitHub issues for these; in `local` or `draft` mode, it keeps them
+  report-only because there is no eligible parent PR link.
+  [only when preexisting_count > 0]
+- Add a second opinion — use `<add_command> <paste>` to inject an
+  external review. On Claude Code or OMP, re-running
+  `/matthewsreview:review --ensemble` is also available.
   [only when internal_only]
-- Work queue: `bin/artifact-render.py --input <artifact_path>
+- Work queue: `<artifact_render_command> --input <absolute_artifact_path>
   --format dispositions > DISPOSITIONS.md` — one row per finding with
   suggested actions. [always]
 ```
 
 When every count is zero (clean review), the block collapses to the
-dispositions row only.
+work-queue row only.
 
 `<fix_threshold>` / `<walkthrough_threshold>` are the resolved
 `gates.*` values (default 60).
@@ -336,7 +408,7 @@ Then add (still chat-only, not in `artifact.md`):
 
 - If PR mode: a one-line "Full artifact: `$artifact_path`" (so the user
   knows where the JSON lives).
-- If local mode: "Fix commit will land locally if you run /matthewsreview:fix.
+- If local mode: "Fix commit will land locally if you run `<fix_command>`.
   It will not be pushed without `--push` (Stage 3 future flag)."
 
 (None of these trailing lines are part of `artifact.md` itself — keeps

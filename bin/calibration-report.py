@@ -16,7 +16,7 @@ Per run directory (<root>/<slug>/<branch>/<rev_*>/):
   artifact.json  — findings[].{disposition, score_phase3, score_phase4}
   phases.jsonl   — rows with demote_rate (Phase 3)
   tokens.jsonl   — rows with {phase, tokens}
-  trace.md       — anomaly grep (killed | resume | wall_clock_exceeded)
+  trace.md       — structured lens transport anomaly events
 
 Exit codes: 0 OK, 1 no runs found / bad root, 64 usage.
 """
@@ -68,6 +68,19 @@ def band_of(score, specs):
             return label
     return "?"
 
+_LENS_ANOMALY_TOKEN = re.compile(
+    r"(?:^|[^A-Za-z0-9])(?:killed|resume(?:d)?|wall_clock_exceeded)(?:$|[^A-Za-z0-9])"
+)
+
+
+def count_lens_anomalies(trace):
+    """Count event rows, excluding paths, prose, summaries, and Codex events."""
+    return sum(
+        1
+        for line in trace.splitlines()
+        if line.startswith("lens_") and _LENS_ANOMALY_TOKEN.search(line)
+    )
+
 
 def load_runs(root: Path):
     # Layout: <slug>/<branch (may contain slashes)>/<rev_*>/artifact.json —
@@ -104,8 +117,9 @@ def load_runs(root: Path):
         anomalies = 0
         trace_path = run_dir / "trace.md"
         if trace_path.exists():
-            anomalies = len(re.findall(r"killed|resume|wall_clock_exceeded",
-                                       trace_path.read_text(errors="replace")))
+            anomalies = count_lens_anomalies(
+                trace_path.read_text(errors="replace")
+            )
         yield run_dir, artifact, demote, tokens, anomalies
 
 
@@ -119,13 +133,39 @@ def main(argv):
     if len(argv) == 2:
         root = Path(argv[1]).expanduser()
     else:
-        configured_root = os.environ.get("MATTHEWS_REVIEW_REVIEWS_ROOT")
+        configured_root = (
+            os.environ.get("MATTHEWS_REVIEW_REVIEWS_ROOT")
+            or os.environ.get("ADAMS_REVIEW_REVIEWS_ROOT")
+        )
         if configured_root:
             root = Path(configured_root).expanduser()
+            if not os.environ.get("MATTHEWS_REVIEW_REVIEWS_ROOT"):
+                print(
+                    "WARNING: ADAMS_REVIEW_REVIEWS_ROOT is legacy; rename it to "
+                    "MATTHEWS_REVIEW_REVIEWS_ROOT.",
+                    file=sys.stderr,
+                )
         else:
-            root = Path.home() / ".matthews-reviews"
-            if not root.is_dir():
-                root = Path.home() / ".adams-reviews"
+            canonical_root = Path.home() / ".matthews-reviews"
+            legacy_root = Path.home() / ".adams-reviews"
+            if canonical_root.is_dir():
+                root = canonical_root
+                if legacy_root.is_dir():
+                    print(
+                        "WARNING: both ~/.matthews-reviews and ~/.adams-reviews "
+                        "exist; using ~/.matthews-reviews. Migrate or remove the "
+                        "legacy root to avoid split history.",
+                        file=sys.stderr,
+                    )
+            elif legacy_root.is_dir():
+                print(
+                    "WARNING: using legacy ~/.adams-reviews; migrate with: "
+                    "mv ~/.adams-reviews ~/.matthews-reviews",
+                    file=sys.stderr,
+                )
+                root = legacy_root
+            else:
+                root = canonical_root
     if not root.is_dir():
         c.err_prompt(
             f"reviews root not found: {root}",

@@ -8,7 +8,7 @@
 # Checks:
 #   deps       uv, jq, gh, git, bash >= 3.2
 #   harnesses  claude / codex / omp CLIs (informational — any one is enough)
-#   config     ~/.matthews-reviews/config.json and ./.matthewsreview.json parse
+#   config     user/repo config syntax and semantic schema
 #   stale      pre-rename remnants: ~/.adams-reviews, ADAMS_REVIEW_* env,
 #              adamsreview@adamsreview in Claude settings, cache-path allowlists
 #
@@ -17,18 +17,35 @@
 #   doctor.sh --quiet    only print WARN/FAIL lines (SessionStart hook mode)
 #
 # Exit codes (bin/_common.py conventions):
-#   0  all checks pass or warn only
-#   5  missing required dependency
+#   0   all checks pass or warn only
+#   5   missing required dependency or invalid configuration
+#   64  usage error
 set -u
 
+usage() {
+    echo "Usage: doctor.sh [--quiet]" >&2
+}
+if [[ $# -gt 1 || ( $# -eq 1 && "${1:-}" != "--quiet" && "${1:-}" != "-h" && "${1:-}" != "--help" ) ]]; then
+    echo "ERROR: unsupported doctor.sh arguments: $*" >&2
+    usage
+    echo "Action: run doctor.sh with no arguments, or pass only --quiet." >&2
+    exit 64
+fi
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    usage
+    exit 0
+fi
 QUIET=0
 [[ "${1:-}" == "--quiet" ]] && QUIET=1
+THIS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+REVIEWS_ROOT=$("$THIS/review-root.sh" 2>/dev/null)
 
 had_fail=0
 
 say() { # level message
     local level="$1" msg="$2"
-    if [[ "$QUIET" == "1" && "$level" == "PASS" ]]; then return; fi
+    if [[ "$QUIET" == "1" && "$level" != "WARN" && "$level" != "FAIL" ]]; then return; fi
     printf '%-4s %s\n' "$level" "$msg"
 }
 fix() { printf '      fix: %s\n' "$1"; }
@@ -59,47 +76,111 @@ fi
 
 # --- harnesses ------------------------------------------------------------
 found_harness=0
+missing_harnesses=""
 for h in claude codex omp; do
     if command -v "$h" >/dev/null 2>&1; then
         say PASS "harness: $h found"
         found_harness=1
     else
-        say WARN "harness: $h not on PATH"
+        missing_harnesses="${missing_harnesses}${missing_harnesses:+, }$h"
     fi
 done
 if [[ "$found_harness" == "0" ]]; then
     say WARN "harness: no claude/codex/omp CLI found — matthewsreview needs at least one"
     fix "install Claude Code, Codex CLI, or Oh My Pi"
+elif [[ -n "$missing_harnesses" ]]; then
+    say INFO "optional harnesses not installed: $missing_harnesses"
 fi
 
 # --- model availability (per harness) --------------------------------------
 # A role whose model the active harness can't serve fails at dispatch time,
-# deep into a run. Probe resolvability upfront for the default tier models.
-if command -v omp >/dev/null 2>&1 && command -v review-config.sh >/dev/null 2>&1; then
-    plan_json=$(review-config.sh --repo-root "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" --orchestrator omp 2>/dev/null || true)
+# deep into a run. Resolve the plan, then compare every omp-native selector
+# with the live registry rather than treating syntactic validity as
+# availability.
+if command -v omp >/dev/null 2>&1; then
+    plan_json=$("$THIS/review-config.sh" --repo-root "$REPO_ROOT" --orchestrator omp 2>/dev/null || true)
     if [[ -n "$plan_json" ]]; then
+        model_warning=0
         plan_warn=$(printf '%s' "$plan_json" | jq -r '.warnings[0] // empty')
         if [[ -n "$plan_warn" ]]; then
             say WARN "models: $plan_warn"
             fix "set orchestrator_defaults.omp.tiers in ~/.matthews-reviews/config.json"
+            model_warning=1
+        fi
+
+        omp_registry=$(omp models --json 2>/dev/null)
+        registry_rc=$?
+        if [[ "$registry_rc" -ne 0 ]] \
+           || ! printf '%s' "$omp_registry" | jq -e '.models | type == "array"' >/dev/null 2>&1; then
+            say WARN "models: could not read the live omp model registry"
+            fix "run 'omp models --json' and repair omp provider/model configuration"
+            model_warning=1
         else
-            say PASS "models: default roles resolve for omp orchestrator"
+            required_omp_models=$(printf '%s' "$plan_json" | jq -r '
+              .roles | to_entries[]
+              | select(.value.engine == "omp")
+              | .value.model' | sort -u)
+            missing_omp_models=""
+            if [[ -n "$required_omp_models" ]]; then
+                while IFS= read -r model; do
+                    [[ -n "$model" ]] || continue
+                    if ! printf '%s' "$omp_registry" \
+                        | jq -e --arg model "$model" \
+                            '.models | any(.selector == $model)' >/dev/null 2>&1; then
+                        if [[ -n "$missing_omp_models" ]]; then
+                            missing_omp_models="$missing_omp_models, $model"
+                        else
+                            missing_omp_models="$model"
+                        fi
+                    fi
+                done <<EOF
+$required_omp_models
+EOF
+            fi
+            if [[ -n "$missing_omp_models" ]]; then
+                say WARN "models: omp selector(s) $missing_omp_models not present in \`omp models\`"
+                fix "choose installed selectors from 'omp models', or configure the missing provider"
+                model_warning=1
+            fi
+        fi
+
+        if [[ "$model_warning" == "0" ]]; then
+            say PASS "models: resolved omp roles exist in the live registry"
         fi
     fi
 fi
 
 # --- config ---------------------------------------------------------------
-for cfg in "$HOME/.matthews-reviews/config.json" ".matthewsreview.json"; do
+config_seen=0
+config_syntax_ok=1
+for cfg in "$REVIEWS_ROOT/config.json" "$REPO_ROOT/.matthewsreview.json"; do
     if [[ -f "$cfg" ]]; then
+        config_seen=1
         if jq empty "$cfg" 2>/dev/null; then
             say PASS "config: $cfg parses"
         else
             say FAIL "config: $cfg is not valid JSON"
             fix "jq . $cfg   # locate the syntax error"
             had_fail=1
+            config_syntax_ok=0
         fi
     fi
 done
+if [[ "$config_seen" == "1" && "$config_syntax_ok" == "1" ]]; then
+    set +e
+    config_error=$("$THIS/review-config.sh" \
+        --repo-root "$REPO_ROOT" --orchestrator omp 2>&1 >/dev/null)
+    config_rc=$?
+    set -e
+    if [[ "$config_rc" == "0" ]]; then
+        say PASS "config: semantic schema valid"
+    else
+        say FAIL "config: semantic validation failed — $(printf '%s' "$config_error" | head -1)"
+        config_action=$(printf '%s\n' "$config_error" | grep '^Action:' | head -1 | sed 's/^Action: //')
+        fix "${config_action:-run $THIS/review-config.sh --repo-root \"$REPO_ROOT\" --orchestrator omp}"
+        had_fail=1
+    fi
+fi
 
 # --- stale pre-rename remnants --------------------------------------------
 if [[ -d "$HOME/.adams-reviews" && ! -d "$HOME/.matthews-reviews" ]]; then

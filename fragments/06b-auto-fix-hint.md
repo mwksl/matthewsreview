@@ -30,8 +30,8 @@ hints_before=$(artifact-read.sh \
 Read findings that qualify per the umbrella's predicate
 (`current_state == "open"` AND `human_confirmation == null` AND
 `auto_fix_hint == null` AND disposition ∈ {`confirmed_manual`,
-`confirmed_report`, `confirmed_mechanical`} AND `score_phase4 >= 60`
-AND disposition ≠ `pre_existing_report`):
+`confirmed_report`, `confirmed_mechanical`} AND `score_phase4 >=
+gates.phase4_bands[1]` AND disposition ≠ `pre_existing_report`):
 
 Lane is **not** gated here. Without this widening, dedup-induced
 lane/impact_type mismatches (a finding deduplicated from both a
@@ -46,24 +46,34 @@ and must be resolved via `:walkthrough` or `:promote` (Phase 8's
 `impact_type` filter alone does NOT pick up mismatched cases on the
 decline path).
 
+```bash
+confirmation_threshold=$(artifact-read.sh \
+  --path "$artifact_path" \
+  --filter '.gates.phase4_bands[1]')
+```
 <!-- AFH-PREDICATE-START -->
 ```bash
-eligible_findings=$(artifact-read.sh \
-  --path "$artifact_path" \
-  --filter '
-    [.findings[]
-       | select(.current_state == "open")
-       | select(.human_confirmation == null)
-       | select(.auto_fix_hint == null)
-       | select(.disposition != "pre_existing_report")
-       | select(
-           (.disposition == "confirmed_manual")
-           or (.disposition == "confirmed_report")
-           or (.disposition == "confirmed_mechanical")
-         )
-       | select(.score_phase4 != null and .score_phase4 >= 60)
-       | {id, file, line_range, claim, disposition, validation_lane, score_phase4, impact_type, validation_result}]
-  ')
+eligible_findings=$(
+  MATTHEWS_REVIEW_CONFIRM_THRESHOLD="$confirmation_threshold" \
+  artifact-read.sh \
+    --path "$artifact_path" \
+    --filter '
+      [.findings[]
+         | select(.current_state == "open")
+         | select(.human_confirmation == null)
+         | select(.auto_fix_hint == null)
+         | select(.disposition != "pre_existing_report")
+         | select(
+             (.disposition == "confirmed_manual")
+             or (.disposition == "confirmed_report")
+             or (.disposition == "confirmed_mechanical")
+           )
+         | select(
+             .score_phase4 != null
+             and .score_phase4 >= (env.MATTHEWS_REVIEW_CONFIRM_THRESHOLD | tonumber)
+           )
+         | {id, file, line_range, claim, disposition, validation_lane, score_phase4, impact_type, validation_result}]
+    ')
 eligible_count=$(printf '%s' "$eligible_findings" | jq 'length')
 ```
 <!-- AFH-PREDICATE-END -->

@@ -8,12 +8,12 @@ batched apply pattern. The differences are concentrated in the
 dispatch shape:
 
 - **Phase 4a deep lane**: one parallel **Codex** job per candidate
-  (instead of one Opus `Agent` per candidate). Each Codex output runs
-  through a per-finding **Sonnet shape-fixer** sub-agent that emits
+  (instead of one `deep_validate` dispatch). Each Codex output runs
+  through a per-finding **`normalizer`-role shape-fixer** sub-agent that emits
   the canonical `validation_result` tuple.
 - **Phase 4b light lane**: chunked-batch **Codex** (≤25 candidates per
-  chunk) instead of chunked-batch Sonnet. Each chunk's freeform output
-  runs through one chunk-level Sonnet shape-fixer that emits the tuple
+  chunk) instead of `light_validate` dispatches. Each chunk's freeform output
+  runs through one chunk-level `normalizer`-role shape-fixer that emits the tuple
   array.
 - **Wave 2 (chain retry) is DISABLED**. Plan §2 — keeps wall-clock
   bounded for codex-review, mirrors `/matthewsreview:add`'s no-Wave-2
@@ -21,6 +21,14 @@ dispatch shape:
 
 Capture `phase_4_start_epoch=$(date +%s)` as the first action of this
 phase, then materialize the resolved Codex validation role once:
+
+```bash
+phase4_bands=$(artifact-read.sh \
+  --path "$artifact_path" --filter '.gates.phase4_bands')
+phase4_b1=$(printf '%s' "$phase4_bands" | jq -r '.[0]')
+phase4_b2=$(printf '%s' "$phase4_bands" | jq -r '.[1]')
+phase4_b3=$(printf '%s' "$phase4_bands" | jq -r '.[2]')
+```
 
 ```bash
 [[ "$role_codex_validate" == codex:* ]] || {
@@ -35,8 +43,7 @@ else
     codex_validate_model="$codex_validate_spec"
     codex_validate_effort=""
 fi
-[[ -n "$codex_validate_effort" ]] || codex_validate_effort="${effort:-high}"
-codex_dispatch_scratch="${scratch_dir:-/tmp/matthews-review-codex-$review_id/jobs}"
+codex_dispatch_scratch="${scratch_dir:-/tmp/matthews-review-$review_id}/jobs"
 mkdir -p "$codex_dispatch_scratch"
 ```
 
@@ -178,9 +185,11 @@ For each deep-lane finding:
 prompt_file="/tmp/matthews-review-codex-${review_id}-V-${finding_id}.md"
 set +e
 if [[ "$codex_launch_mode" == "companion" ]]; then
-    launch_json=$(node "$CODEX_COMPANION" task --background \
-        --effort "$codex_validate_effort" \
+    companion_args=(node "$CODEX_COMPANION" task --background \
         --prompt-file "$prompt_file" --json)
+    [[ -n "$codex_validate_model" ]] && companion_args+=(--model "$codex_validate_model")
+    [[ -n "$codex_validate_effort" ]] && companion_args+=(--effort "$codex_validate_effort")
+    launch_json=$("${companion_args[@]}")
     launch_rc=$?
     job_id=$(printf '%s' "$launch_json" | jq -r '.jobId // empty')
 else
@@ -262,7 +271,7 @@ printf 'phase_4a_codex_watchdog: finding=%s mode=%s verdict=%s job=%s elapsed=%s
     "$elapsed_for_log" >> "$trace_log_path"
 ```
 
-Then dispatch ONE Sonnet shape-fixer per finding. Each shape-fixer
+Then dispatch ONE `normalizer`-role shape-fixer per finding. Each shape-fixer
 takes that freeform Codex output and returns a single canonical tuple.
 
 > **One turn for all shape-fixer `Agent` dispatches — not one turn per
@@ -366,7 +375,7 @@ Options:
 #### 4.2.5. Log tokens
 
 Log the Codex job's normalized usage (`null` when the selected
-transport does not report it), then the Sonnet shape-fixer:
+transport does not report it), then the `normalizer`-role shape-fixer:
 
 ```bash
 log-tokens.sh \
@@ -425,9 +434,10 @@ candidate score accordingly.
 ordering, specific constant naming). Judgment calls → \`manual\`.
 Architecture findings default to \`report_only\`.
 
-**Use the full 0-100 range.** Do not snap to anchors at 45/60/75 —
-emit values like 65 or 70 between anchors when warranted. Compressed
-scores lose the resolution Phase 6 needs.
+**Use the full 0-100 range.** The resolved Phase-4 routing cutoffs are
+$phase4_b1/$phase4_b2/$phase4_b3. Do not snap to those cutoffs — emit
+interior values when warranted. Compressed scores lose the resolution
+Phase 6 needs.
 
 **Candidates (N total):**
 
@@ -469,9 +479,11 @@ turn:
 prompt_file="/tmp/matthews-review-codex-${review_id}-LB-chunk${chunk_n}.md"
 set +e
 if [[ "$codex_launch_mode" == "companion" ]]; then
-    launch_json=$(node "$CODEX_COMPANION" task --background \
-        --effort "$codex_validate_effort" \
+    companion_args=(node "$CODEX_COMPANION" task --background \
         --prompt-file "$prompt_file" --json)
+    [[ -n "$codex_validate_model" ]] && companion_args+=(--model "$codex_validate_model")
+    [[ -n "$codex_validate_effort" ]] && companion_args+=(--effort "$codex_validate_effort")
+    launch_json=$("${companion_args[@]}")
     launch_rc=$?
     job_id=$(printf '%s' "$launch_json" | jq -r '.jobId // empty')
 else
@@ -545,7 +557,7 @@ printf 'phase_4b_codex_watchdog: chunk=%s mode=%s verdict=%s job=%s elapsed=%s\n
     "$elapsed_for_log" >> "$trace_log_path"
 ```
 
-Dispatch ONE Sonnet shape-fixer per chunk:
+Dispatch ONE `normalizer`-role shape-fixer per chunk:
 
 > You are normalizing one Codex light-validator output into a JSON
 > array of validation tuples.
@@ -664,11 +676,12 @@ through the helper — exit 2 on non-object input).
 
 **Project the canonical object to the allowed tuple keys before adding
 to the batch.** `parse-validator-result.py`'s canonical output includes
-`related_candidates_to_investigate` (deep-lane passthrough), `notes`,
-and `confirmed_strength` at the top level — all three are NOT in
-`artifact-patch.py --apply-decisions`'s `ALLOWED_DECISION_TUPLE_KEYS`,
-and feeding them through unchanged halts the batch with an unknown-key
-error.
+`related_candidates_to_investigate` (deep-lane passthrough) and `notes`
+at the top level; neither is in `artifact-patch.py --apply-decisions`'s
+`ALLOWED_DECISION_TUPLE_KEYS`, so feeding them through unchanged halts
+the batch with an unknown-key error. The normalizer deliberately omits
+`confirmed_strength`; `--apply-decisions` derives it from the artifact's
+resolved Phase-4 bands.
 
 There's also a subtlety with `reason`: `apply-decisions` checks
 `if "reason" in tup` (NOT truthiness) — so `reason: ""` short-circuits
@@ -737,10 +750,9 @@ tuple=$(jq -nc \
 The mapping pattern follows `fragments/05-validation.md` §4.4 ("The
 helper's `notes` field flows into the tuple's `reason` when the
 validator didn't supply one — preserving the scale-inference audit
-trail in the persisted finding"). `confirmed_strength` is dropped
-because `--apply-decisions` derives it from score; passing it through
-would conflict with the helper's derivation.
-`related_candidates_to_investigate` is dropped per Wave 2 being
+trail in the persisted finding"). `confirmed_strength` is absent
+because `--apply-decisions` derives it from the artifact's resolved
+bands. `related_candidates_to_investigate` is dropped per Wave 2 being
 disabled in codex-review (§4.5).
 
 Recovery paths for `--apply-decisions` non-zero exit codes (6 expected-

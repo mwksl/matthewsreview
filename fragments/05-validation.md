@@ -16,6 +16,17 @@ one Opus per candidate.
 Capture `phase_4_start_epoch=$(date +%s)` as the first action of this
 phase — step 4.7 logs the elapsed time.
 
+Read the resolved Phase-4 bands once and retain the three cutoffs for
+validator prompts and tuple assembly:
+
+```bash
+phase4_bands=$(artifact-read.sh \
+  --path "$artifact_path" --filter '.gates.phase4_bands')
+phase4_b1=$(printf '%s' "$phase4_bands" | jq -r '.[0]')
+phase4_b2=$(printf '%s' "$phase4_bands" | jq -r '.[1]')
+phase4_b3=$(printf '%s' "$phase4_bands" | jq -r '.[2]')
+```
+
 ### 4.1. Partition candidates into lanes
 
 Read the phase-3 survivors (findings parked at `pending_validation`;
@@ -250,9 +261,10 @@ Prompt essence:
 > `report_only`.
 >
 > **Anti-anchor-clustering instruction (chunk-batch specific):** Use
-> the full 0-100 range. The §13.1 Phase-4 routing has cutoffs at 45,
-> 60, and 75; a finding that sits between 60 and 75 should score 65 or
-> 70 — do not snap it to an anchor. If multiple candidates in the
+> the full 0-100 range. The §13.1 Phase-4 routing has resolved cutoffs
+> at `$phase4_b1`, `$phase4_b2`, and `$phase4_b3`; a finding between
+> adjacent cutoffs should use the available interior scores rather
+> than snap to an anchor. If multiple candidates in the
 > chunk would naturally land at the same anchor, resolve which ones
 > are actually higher / lower before returning. Compressed-onto-anchor
 > scores lose the resolution Phase 6 needs to render confirmed_strength.
@@ -327,11 +339,28 @@ The helper writes `validation_result` only when the derived
 disposition lands in the confirmed band; pass it for every deep-lane
 tuple — uncertain / disproven tuples have it silently ignored.
 
+**Reject transport failures before normalization.** A response is
+eligible for `parse-validator-result.py` only when its dispatch
+transport completed successfully: a native harness tool returned
+without error/cancellation/timeout, or a subprocess poll returned
+`verdict=completed`. Never pass a failed tool envelope, cancellation
+payload, timeout payload, or `failed_terminal` stderr through the
+semantic parser — wrapper metadata can contain numbers and prose that
+look like a validator score.
+
+Retry the same validator unit once on transport failure. If the retry
+also fails, append the transport verdict/error to `trace.md` and
+synthesize `score_phase4: null`, `actionability: null`, and reason
+`"Phase 4 validator transport failure after retry — manual review"`.
+For a light-lane chunk, synthesize one such tuple for every id owned by
+the failed chunk so `--expected` remains a structural guard rather than
+silently dropping candidates.
+
 **Normalize validator output before tuple compose.** Pipe each raw
 validator response through `parse-validator-result.py --lane
 deep|light` before composing the tuple; the helper returns a canonical
-shape (`score_phase4`, `actionability`, `confirmed_strength`,
-`decision`, `validation_result`, `notes`) with `scale_inferred:` audit
+shape (`score_phase4`, `actionability`, `decision`,
+`validation_result`, `notes`) with `scale_inferred:` audit
 notes when it had to guess. Exit 2 from the helper means the score was
 unrecoverable — emit `score_phase4: null` in the tuple so
 `--apply-decisions` routes to `uncertain`, and stash the stderr in
@@ -368,8 +397,9 @@ any co-located ad-hoc helper you wrote). Then invoke the helper on
 that path.
 
 Tuple shape (the helper rejects unknown keys; `id` is required;
-`actionability` is required when `score_phase4 >= 60`; everything else
-is optional and gets a sensible default):
+`actionability` is required when `score_phase4 >= $phase4_b2`, the
+resolved confirmation cutoff; everything else is optional and gets a
+sensible default):
 
 ```json
 [
@@ -551,7 +581,7 @@ If the resulting list is non-empty AND we haven't already done Wave 2:
         reason: null,
         confirmed_strength: null,
         file: $cand.file,
-        line_range: ($cand.line_range // [1,1]),
+        line_range: ($cand.line_range // null),
         claim: $cand.claim,
         score_phase3: null,
         score_phase4: null,

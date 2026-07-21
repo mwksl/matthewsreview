@@ -100,27 +100,52 @@ plugin root ONCE at the start of the command:
 ```bash
 MREVIEW_ROOT="${MREVIEW_ROOT:-}"
 if [[ -n "$MREVIEW_ROOT" ]]; then
-    # Generated Codex skills bake this path without requiring a trailing slash.
-    MREVIEW_ROOT="${MREVIEW_ROOT%/}/"
+    # Generated Codex skills bake this path. Canonicalize it before any
+    # fragment path is assembled, and fail loudly after a moved checkout.
+    if [[ ! -d "$MREVIEW_ROOT/fragments" ]]; then
+        echo "matthewsreview root is stale or invalid: $MREVIEW_ROOT"
+        echo "Action: rerun ./install.sh --codex from the current checkout."
+        exit 1
+    fi
+    MREVIEW_ROOT="$(cd "$MREVIEW_ROOT" && pwd -P)/"
 elif command -v repo-slug.sh >/dev/null 2>&1; then
-    # Claude Code (and explicit user PATH setups) invoke helpers by bare name.
-    MREVIEW_ROOT=""
-else
+    # Resolve the helper's actual target. Leaving MREVIEW_ROOT empty merely
+    # because a helper is on PATH makes later fragment reads point into the
+    # repository under review.
+    helper_path=$(command -v repo-slug.sh)
+    while [[ -L "$helper_path" ]]; do
+        helper_dir=$(cd "$(dirname "$helper_path")" && pwd -P)
+        helper_link=$(readlink "$helper_path")
+        case "$helper_link" in
+            /*) helper_path="$helper_link" ;;
+            *)  helper_path="$helper_dir/$helper_link" ;;
+        esac
+    done
+    helper_root=$(cd "$(dirname "$helper_path")/.." && pwd -P)
+    if [[ -d "$helper_root/fragments" ]]; then
+        MREVIEW_ROOT="${helper_root%/}/"
+    fi
+fi
+
+if [[ -z "$MREVIEW_ROOT" ]]; then
+    newest_root=""
     for cand in \
-        $(ls -dt "$HOME"/.claude/plugins/cache/matthewsreview/matthewsreview/*/ 2>/dev/null | head -1) \
-        $(ls -dt "$HOME"/.omp/plugins/cache/plugins/*matthewsreview*/ 2>/dev/null | head -1); do
-        if [[ -n "$cand" && -x "$cand/bin/repo-slug.sh" ]]; then
-            MREVIEW_ROOT="${cand%/}/"
-            break
+        "$HOME"/.claude/plugins/cache/matthewsreview/matthewsreview/*/ \
+        "$HOME"/.omp/plugins/cache/plugins/*matthewsreview*/; do
+        [[ -x "$cand/bin/repo-slug.sh" && -d "$cand/fragments" ]] || continue
+        if [[ -z "$newest_root" || "$cand" -nt "$newest_root" ]]; then
+            newest_root="$cand"
         fi
     done
+    [[ -z "$newest_root" ]] || MREVIEW_ROOT="$(cd "$newest_root" && pwd -P)/"
 fi
-if [[ -z "$MREVIEW_ROOT" ]] && ! command -v repo-slug.sh >/dev/null 2>&1; then
+
+if [[ -z "$MREVIEW_ROOT" ]]; then
     echo "matthewsreview install not found; see README §Install"
+    echo "Action: install the plugin, or export MREVIEW_ROOT to its checkout."
     exit 1
 fi
-# Helpers use the resolved root when set, otherwise their PATH name.
-MRB="${MREVIEW_ROOT:+${MREVIEW_ROOT}bin/}"
+MRB="${MREVIEW_ROOT}bin/"
 ```
 
 A generated Codex skill bakes `MREVIEW_ROOT=<abs path>` into its
@@ -129,6 +154,9 @@ preamble — that value wins over the probe when present.
 ### 3.3. DISPATCH(role, prompt, [finding_id])
 
 One sub-agent run with the model the plan resolved for `role`.
+
+Role `fix` is the only write lane. Every subprocess dispatch for that
+role appends `--write`; all other roles omit it and run read-only.
 
 - **claude-code**: `Agent` tool-use, `subagent_type: general-purpose`,
   `model:` = the model segment of `role_<name>` (e.g. `opus` from
@@ -143,8 +171,9 @@ One sub-agent run with the model the plan resolved for `role`.
   shared poll loop. Token accounting: if the result exposes no usage,
   log `--tokens null`.
 - **codex**: write the prompt to `$scratch/<role>-<id>.md`, then
-  `"${MRB}agent-dispatch.sh" start --engine <engine> --model <model>
-  [--effort <effort>] --prompt-file … --scratch-dir …`, then the shared
+  build `"${MRB}agent-dispatch.sh" start --engine <engine> --model
+  <model> [--effort <effort>] --prompt-file … --scratch-dir …`.
+  Append `--write` when and only when `role == fix`, then use the shared
   poll loop (`agent-dispatch.sh poll`) until `completed`.
 
 ### 3.4. Parallel fan-out

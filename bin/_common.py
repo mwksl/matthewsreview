@@ -99,6 +99,24 @@ def _load_validator():
     return schema, Draft202012Validator
 
 
+def _semantic_finding_errors(finding, prefix=""):
+    """Cross-value invariants JSON Schema cannot express portably."""
+    if not isinstance(finding, dict):
+        return []
+    errors = []
+    line_range = finding.get("line_range")
+    if (
+        isinstance(line_range, list)
+        and len(line_range) == 2
+        and all(isinstance(value, int) and not isinstance(value, bool) for value in line_range)
+        and line_range[0] > line_range[1]
+    ):
+        errors.append(
+            f"${prefix}.line_range: start {line_range[0]} exceeds end {line_range[1]}"
+        )
+    return errors
+
+
 def validate(artifact):
     """Validate `artifact` against schema-v1.json.
 
@@ -111,6 +129,9 @@ def validate(artifact):
     for e in sorted(v.iter_errors(artifact), key=lambda x: list(x.absolute_path)):
         path = _pretty_path(e.absolute_path) or "(root)"
         errors.append(f"${path}: {e.message}")
+    if isinstance(artifact, dict) and isinstance(artifact.get("findings"), list):
+        for index, finding in enumerate(artifact["findings"]):
+            errors.extend(_semantic_finding_errors(finding, f"findings[{index}]"))
     return errors
 
 
@@ -197,6 +218,7 @@ def validate_finding(finding, validator):
     for e in sorted(validator.iter_errors(finding), key=lambda x: list(x.absolute_path)):
         path = _pretty_path(e.absolute_path) or "(root)"
         errors.append(f"${path}: {e.message}")
+    errors.extend(_semantic_finding_errors(finding))
     return errors
 
 

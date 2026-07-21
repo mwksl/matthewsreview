@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(doctor.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(claude-md-paths.sh:*), Bash(staleness.sh:*), Bash(prior-fix-diff.sh:*), Bash(line-range-check.sh:*), Bash(assign-finding-ids.sh:*), Bash(origin-crosscheck.sh:*), Bash(parse-with-repair.py:*), Bash(parse-validator-result.py:*), Bash(source-family-map.py:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(freshness-gate.sh:*), Bash(trivial-check.sh:*), Bash(artifact-seed.sh:*), Bash(codex-poll.sh:*), Bash(agent-dispatch.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(mktemp:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(node:*), Bash(find:*), AskUserQuestion, Agent, Read, BashOutput, KillShell
+allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(review-root.sh:*), Bash(doctor.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(claude-md-paths.sh:*), Bash(staleness.sh:*), Bash(prior-fix-diff.sh:*), Bash(line-range-check.sh:*), Bash(assign-finding-ids.sh:*), Bash(origin-crosscheck.sh:*), Bash(parse-with-repair.py:*), Bash(parse-validator-result.py:*), Bash(source-family-map.py:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(freshness-gate.sh:*), Bash(trivial-check.sh:*), Bash(artifact-seed.sh:*), Bash(codex-poll.sh:*), Bash(agent-dispatch.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(mktemp:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(node:*), Bash(find:*), AskUserQuestion, Agent, Read, BashOutput, KillShell
 argument-hint: "[--effort <low|medium|high|xhigh|max|ultra>] [--full] [--profile <name>] [--models \"<csv>\"]"
 description: Codex-driven deep code review producing the same artifact.json shape as :review (drop-in for /matthewsreview:fix, :add, :walkthrough, :promote).
 disable-model-invocation: false
@@ -94,7 +94,7 @@ branch. Never call raw companion `status` or `result` commands:
 companion mode must go through `codex-poll.sh`, and standalone mode
 must go through `agent-dispatch.sh poll`.
 
-**Claude sub-agents** (Sonnet shape-fixers, normalizer, dedup, scoring):
+**Normalizer sub-agents** (resolved roles `normalizer`, `dedup`, and `scoring`):
 
 Every DISPATCH specifies:
 - `subagent_type: general-purpose`
@@ -108,23 +108,28 @@ Parallel fan-outs happen by issuing every DISPATCH in one batch
 ## Argument handling
 
 Parse `$ARGUMENTS` (whitespace-split) for:
-- `--effort <value>` → `effort=<value>` (validate against `low|medium|high|xhigh|max|ultra`; reject other values with a usage message)
+- `--effort <value>` → `effort=<value>` and `effort_explicit=true`
+  (validate against `low|medium|high|xhigh|max|ultra`; reject other
+  values with a usage message)
 - `--full` → `force_full=true` (else `false`)
 - `--profile <name>` → `profile=<name>` (else unset)
 - `--models "<csv>"` → `models_csv=<csv>` (else unset)
 - Any other token → stop and ask the user to clarify.
 
-`--effort` overrides the effort segment of the `codex_detect` /
-`codex_validate` / `codex_crosscut` roles after Phase 0 step 0.14b
-resolves the model plan (see the preflight fragment). `--profile` and
-`--models` behave as in `:review`.
+`--effort` explicitly overrides the effort segment of the
+`codex_detect` / `codex_validate` / `codex_crosscut` roles after Phase
+0 resolves the model plan (see the preflight fragment). `--profile`
+and `--models` behave as in `:review`.
 
-If `--effort` is omitted, set `effort=high`.
+If `--effort` is omitted, set `effort=""` and
+`effort_explicit=false`. The resolved per-role config values remain
+authoritative; an empty resolved effort means use the Codex CLI
+default.
 
 Set the following working-context values BEFORE executing Phase 0:
 
-- `effort` (default `high`) — used by every Codex `task` invocation in
-  Phases 1, 4a, 4b, 5.
+- `effort` and `effort_explicit` — only an explicit CLI value overrides
+  the three resolved Codex role efforts.
 - `force_full` (default `false`) — consumed by Phase 0 step 0.11.
 - `reviewer_sources_label="internal-codex"` — consumed by Phase 0 step
   0.15 (the orchestrator passes it to `artifact-seed.sh

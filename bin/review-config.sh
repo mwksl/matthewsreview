@@ -3,7 +3,8 @@
 #
 # Merge order (later wins):
 #   built-in defaults
-#   ~/.matthews-reviews/config.json      (user config; legacy ~/.adams-reviews fallback)
+#   $MATTHEWS_REVIEW_REVIEWS_ROOT/config.json
+#     (user config; canonical/legacy home fallback via review-root.sh)
 #   <repo>/.matthewsreview.json          (repo config)
 #   profiles.<name> (repo config first, then user config)   [--profile]
 #   --models "<k=v,k=v>"                 (CLI; keys = tier name or role name)
@@ -35,6 +36,7 @@
 set -u
 
 PROG=review-config.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 err() { # msg
     echo "ERROR: $1" >&2
@@ -101,12 +103,14 @@ VALID_ROLE_KEYS=$(jq -r 'keys | join(" | ")' <<<"$ROLE_DEFS")
 VALID_GATE_KEYS=$(jq -r 'keys | join(" | ")' <<<"$GATE_DEFS")
 
 # ---------------------------------------------------------------- load files
-USER_CFG=""
-if [[ -f "$HOME/.matthews-reviews/config.json" ]]; then
-    USER_CFG="$HOME/.matthews-reviews/config.json"
-elif [[ -f "$HOME/.adams-reviews/config.json" ]]; then
-    USER_CFG="$HOME/.adams-reviews/config.json"
+REVIEWS_ROOT=$("$SCRIPT_DIR/review-root.sh")
+USER_CFG="$REVIEWS_ROOT/config.json"
+[[ -f "$USER_CFG" ]] || USER_CFG=""
+if [[ -n "$USER_CFG" && "$REVIEWS_ROOT" == "$HOME/.adams-reviews" ]]; then
     LEGACY_WARN="legacy config path ~/.adams-reviews/config.json in use; run: mv ~/.adams-reviews ~/.matthews-reviews"
+elif [[ -n "${ADAMS_REVIEW_REVIEWS_ROOT:-}" \
+     && -z "${MATTHEWS_REVIEW_REVIEWS_ROOT:-}" ]]; then
+    LEGACY_WARN="legacy ADAMS_REVIEW_REVIEWS_ROOT is in use; rename it to MATTHEWS_REVIEW_REVIEWS_ROOT"
 fi
 REPO_CFG="$REPO_ROOT/.matthewsreview.json"
 [[ -f "$REPO_CFG" ]] || REPO_CFG=""
@@ -125,10 +129,10 @@ cfg_get() { # file expr  — empty string when file missing or key absent
 
 # ---------------------------------------------------------------- merge
 # Assoc-free (bash 3.2): tiers/roles stay newline "key|value|source" lists.
+# shellcheck disable=SC2034 # accessed indirectly by name in set_kv/get_kv
 TIER_LIST=""   # deep|claude:opus|default
+# shellcheck disable=SC2034 # accessed indirectly by name in set_kv/get_kv
 ROLE_LIST=""   # deep_validate|claude:sonnet|repo-config (empty = inherit tier)
-# Accessed indirectly by name in set_kv/get_kv.
-: "$TIER_LIST" "$ROLE_LIST"
 GATES_JSON="$GATES_DEFAULT"
 
 set_kv() { # listname key value source
@@ -202,6 +206,10 @@ validate_tier_object() { # json source-context
         [[ -z "$key" ]] && continue
         require_tier_key "$key" "$context"
     done < <(json_object_keys "$tiers")
+    jq -e 'all(to_entries[]; (.value | type) == "string" and (.value | length) > 0)' \
+        <<<"$tiers" >/dev/null \
+        || die_validation "tier values $context must be non-empty role strings" \
+            "use engine:model[:effort-or-thinking] for every tier"
 }
 
 validate_role_object() { # json source-context
@@ -212,6 +220,10 @@ validate_role_object() { # json source-context
         [[ -z "$key" ]] && continue
         require_role_key "$key" "$context"
     done < <(json_object_keys "$roles")
+    jq -e 'all(to_entries[]; (.value | type) == "string" and (.value | length) > 0)' \
+        <<<"$roles" >/dev/null \
+        || die_validation "role values $context must be non-empty role strings" \
+            "use engine:model[:effort-or-thinking] for every role"
 }
 
 validate_gates_object() { # json source-context
@@ -245,14 +257,93 @@ validate_gates_object() { # json source-context
     done < <(json_object_keys "$gates")
 }
 
-# seed defaults. On the codex orchestrator the built-in tiers switch to
-# the codex engine (codex::high) — a codex-driven run should be
-# self-contained (matches :codex-review's all-codex shape) instead of
-# stalling on cross-engine consent prompts. Config/CLI still overrides.
+validate_profile_object() { # json profile-name source-file
+    local prof="$1" profile_name="$2" source_file="$3" key section
+    jq -e 'type == "object"' <<<"$prof" >/dev/null \
+        || die_validation "profile '$profile_name' in $source_file must be a JSON object" \
+            "define only tiers and/or roles under profiles.$profile_name"
+    while IFS= read -r key; do
+        case "$key" in
+            tiers|roles) ;;
+            *) die_validation "unknown profile key '$key' in profiles.$profile_name in $source_file" \
+                "Valid profile keys: tiers | roles" ;;
+        esac
+    done < <(json_object_keys "$prof")
+    if jq -e 'has("tiers")' <<<"$prof" >/dev/null; then
+        section=$(jq -c '.tiers' <<<"$prof")
+        validate_tier_object "$section" "in profile '$profile_name' in $source_file"
+    fi
+    if jq -e 'has("roles")' <<<"$prof" >/dev/null; then
+        section=$(jq -c '.roles' <<<"$prof")
+        validate_role_object "$section" "in profile '$profile_name' in $source_file"
+    fi
+}
+
+validate_config_file() { # file user|repo
+    local file="$1" kind="$2" key section profile_name profile_json orch
+    jq -e 'type == "object"' "$file" >/dev/null \
+        || die_validation "config file $file must contain a top-level JSON object" \
+            "replace the top-level value with an object"
+    while IFS= read -r key; do
+        case "$key" in
+            tiers|roles|gates|profiles) ;;
+            orchestrator_defaults)
+                [[ "$kind" == "user" ]] \
+                    || die_validation "orchestrator_defaults is only valid in the user config, not $file" \
+                        "move it to ~/.matthews-reviews/config.json"
+                ;;
+            *) die_validation "unknown top-level config key '$key' in $file" \
+                "Valid keys: tiers | roles | gates | profiles$([[ "$kind" == "user" ]] && printf ' | orchestrator_defaults')" ;;
+        esac
+    done < <(jq -r 'keys[]' "$file")
+
+    if jq -e 'has("tiers")' "$file" >/dev/null; then
+        validate_tier_object "$(jq -c '.tiers' "$file")" "in $file"
+    fi
+    if jq -e 'has("roles")' "$file" >/dev/null; then
+        validate_role_object "$(jq -c '.roles' "$file")" "in $file"
+    fi
+    if jq -e 'has("gates")' "$file" >/dev/null; then
+        validate_gates_object "$(jq -c '.gates' "$file")" "in $file"
+    fi
+    if jq -e 'has("profiles")' "$file" >/dev/null; then
+        section=$(jq -c '.profiles' "$file")
+        jq -e 'type == "object"' <<<"$section" >/dev/null \
+            || die_validation "profiles in $file must be a JSON object" \
+                "map each profile name to an object containing tiers and/or roles"
+        while IFS= read -r profile_name; do
+            profile_json=$(jq -c --arg p "$profile_name" '.[$p]' <<<"$section")
+            validate_profile_object "$profile_json" "$profile_name" "$file"
+        done < <(json_object_keys "$section")
+    fi
+    if jq -e 'has("orchestrator_defaults")' "$file" >/dev/null; then
+        section=$(jq -c '.orchestrator_defaults' "$file")
+        jq -e 'type == "object"' <<<"$section" >/dev/null \
+            || die_validation "orchestrator_defaults in $file must be a JSON object" \
+                "map orchestrator names to objects containing tiers"
+        while IFS= read -r orch; do
+            case "$orch" in
+                claude-code|omp|codex) ;;
+                *) die_validation "unknown orchestrator_defaults key '$orch' in $file" \
+                    "Valid orchestrators: claude-code | omp | codex" ;;
+            esac
+            profile_json=$(jq -c --arg o "$orch" '.[$o]' <<<"$section")
+            jq -e 'type == "object" and (keys - ["tiers"] | length == 0) and has("tiers")' \
+                <<<"$profile_json" >/dev/null \
+                || die_validation "orchestrator_defaults.$orch in $file must contain only a tiers object" \
+                    "use {\"tiers\":{\"deep\":\"engine:model\"}}"
+            validate_tier_object "$(jq -c '.tiers' <<<"$profile_json")" \
+                "in orchestrator_defaults.$orch in $file"
+        done < <(json_object_keys "$section")
+    fi
+}
+
+[[ -n "$USER_CFG" ]] && validate_config_file "$USER_CFG" user
+[[ -n "$REPO_CFG" ]] && validate_config_file "$REPO_CFG" repo
+
+# Built-in model choices are harness-invariant. Users who want a
+# self-contained Codex run opt in through config, profiles, or --models.
 TIERS_SEED="$TIERS_DEFAULT"
-if [[ "$ORCHESTRATOR" == "codex" ]]; then
-    TIERS_SEED=$(jq -c 'with_entries(.value = "codex::high")' <<<"$TIERS_DEFAULT")
-fi
 while IFS= read -r t; do
     set_kv TIER_LIST "$t" "$(jq -r --arg k "$t" '.[$k]' <<<"$TIERS_SEED")" "default"
 done < <(json_object_keys "$TIERS_DEFAULT")
@@ -407,6 +498,13 @@ validate_role_string() { # role value
     if [[ -z "$model" && "$engine" != "codex" ]]; then
         die_validation "role '$role': empty model only allowed for codex: (got '$value')" "specify a model, e.g. $engine:opus"
     fi
+    case "$role" in
+        ensemble_detect|codex_detect|codex_validate|codex_crosscut)
+            [[ "$engine" == "codex" ]] \
+                || die_validation "role '$role' must use the codex engine (got '$value')" \
+                    "set $role=codex:<model>:<effort> (empty model is allowed as codex::<effort>)"
+            ;;
+    esac
     # orchestrator matrix
     if [[ "$engine" == "omp" ]]; then
         case "$ORCHESTRATOR" in

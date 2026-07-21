@@ -16,20 +16,12 @@ Canonical output shape (always emitted on exit 0):
     {
       "score_phase4": <int 0-100>,
       "actionability": "auto_fixable" | "manual" | "report_only" | null,
-      "confirmed_strength": "strong" | "moderate" | "weak",
       "decision": "confirmed" | "disproven" | "uncertain" | null,
       "notes": "<free-form — records scale inference or source shape>",
       "validation_result": { ... } | null,   (deep-lane passthrough)
       "related_candidates_to_investigate": [ ... ]   (deep-lane passthrough)
     }
 
-The `confirmed_strength` convention matches CLAUDE.md §Phase 4 — the
-§13.1 Phase-4 table:
-  - `score_phase4 >= 75`             → "strong"
-  - `60 <= score_phase4 < 75`        → "moderate"
-  - `score_phase4 < 60`              → "weak"  (below the confirmed band;
-    artifact-patch.py's --apply-decisions normalizes this to null when
-    writing, so this field is advisory for pipe consumers only)
 
 Input shapes handled (normalized to `score_phase4` int on 0-100):
 
@@ -100,18 +92,6 @@ from _common import (  # noqa: E402
 # ----- score coercion ----------------------------------------------------
 
 SEVERITY_MAP = {"low": 35, "medium": 60, "high": 85}
-STRENGTH_BANDS = (
-    (75, "strong"),
-    (60, "moderate"),
-    (0,  "weak"),
-)
-
-
-def _strength(score: int) -> str:
-    for threshold, label in STRENGTH_BANDS:
-        if score >= threshold:
-            return label
-    return "weak"
 
 
 def _coerce_score(raw: dict) -> tuple[int, list[str]]:
@@ -303,7 +283,6 @@ def canonicalize(raw: dict, lane: str) -> dict:
     return {
         "score_phase4": score,
         "actionability": actionability,
-        "confirmed_strength": _strength(score),
         "decision": decision,
         "notes": "; ".join(notes) if notes else "",
         "validation_result": vr,

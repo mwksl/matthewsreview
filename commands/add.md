@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(doctor.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(assign-finding-ids.sh:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(git:*), Bash(jq:*), Bash(date:*), Bash(timeout:*), Bash(sleep:*), Bash(kill:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(cat:*), Bash(printf:*), Bash(tr:*), Bash(awk:*), Bash(grep:*), Bash(mktemp:*), Read, Agent, AskUserQuestion
+allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(review-root.sh:*), Bash(doctor.sh:*), Bash(agent-dispatch.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(assign-finding-ids.sh:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(git:*), Bash(jq:*), Bash(date:*), Bash(timeout:*), Bash(sleep:*), Bash(kill:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(cat:*), Bash(printf:*), Bash(tr:*), Bash(awk:*), Bash(grep:*), Bash(mktemp:*), Read, Agent, AskUserQuestion
 argument-hint: "[<paste...>] [--file path --line N --claim \"...\"] [--impact <type>] [--no-dedup] [--profile <name>] [--models \"<csv>\"]"
 description: Inject externally-sourced findings (cloud /ultrareview, manual finds, etc.) into the most recent /matthewsreview:review artifact for this branch. Validates via Phase 4, re-renders, re-publishes.
 disable-model-invocation: false
@@ -95,7 +95,7 @@ Validate `cli_impact` against the enum (`correctness`, `security`, `ux`,
 ### 2. Locate the artifact
 
 ```bash
-reviews_root="${MATTHEWS_REVIEW_REVIEWS_ROOT:-$HOME/.matthews-reviews}"
+reviews_root=$(review-root.sh)
 head_branch=$(git rev-parse --abbrev-ref HEAD)
 repo_root=$(git rev-parse --show-toplevel)
 repo_slug=$(repo-slug.sh --repo-root "$repo_root")
@@ -366,9 +366,10 @@ jq fails loudly — surface as error-as-prompt.)
 Dispatch the paste normalizer sub-agent (the prompt is at the bottom
 of this file under "Sub-agent prompts"). After it returns:
 
-- Repair missing location info, mirroring Phase 1.5 §1.5.5: `file: null
-  → "(unknown)"`, `line_range: null → [1, 1]`. The §13.10/§13.13
-  downstream pipeline already handles `(unknown)` as a sentinel.
+- Preserve missing location uncertainty, mirroring Phase 1.5 §1.5.5:
+  `file: null → "(unknown)"`, `line_range: null → null`. Schema,
+  validation, and rendering all support a nullable range; `[1,1]`
+  would fabricate a real source citation.
 - If `--impact` was set, overlay it on every candidate — it overrides
   the normalizer's guess.
 - If the normalizer returns `[]`, print:
@@ -387,7 +388,7 @@ if [[ "$cli_impact_set" == "true" ]]; then
     new_candidates=$(echo "$normalizer_output" | jq -c --arg impact "$cli_impact" '
       [ .[] | . + {
           file:        (.file // "(unknown)"),
-          line_range:  (.line_range // [1,1]),
+          line_range:  (.line_range // null),
           impact_type: $impact,
           source_family: "external-add-family"
         } ]')
@@ -395,7 +396,7 @@ else
     new_candidates=$(echo "$normalizer_output" | jq -c '
       [ .[] | . + {
           file:        (.file // "(unknown)"),
-          line_range:  (.line_range // [1,1]),
+          line_range:  (.line_range // null),
           source_family: "external-add-family"
         } ]')
 fi
@@ -660,6 +661,16 @@ light_count=0
 [[ -n "$light_ids" ]] && light_count=$(awk -F, '{print NF}' <<<"$light_ids")
 ```
 
+Read the resolved Phase-4 cutoffs once for every validator prompt:
+
+```bash
+add_phase4_bands=$(artifact-read.sh \
+  --path "$artifact_path" --filter '.gates.phase4_bands')
+add_phase4_b1=$(printf '%s' "$add_phase4_bands" | jq -r '.[0]')
+add_phase4_b2=$(printf '%s' "$add_phase4_bands" | jq -r '.[1]')
+add_phase4_b3=$(printf '%s' "$add_phase4_bands" | jq -r '.[2]')
+```
+
 #### 7.3 Deep-lane dispatch (Opus, one sub-agent per candidate)
 
 For each id in `deep_ids`, launch ONE sub-agent with role
@@ -768,9 +779,9 @@ Prompt essence — verbatim from `05-validation.md` §4.3:
 > `manual`. Architecture findings default to `report_only`.
 >
 > **Anti-anchor-clustering instruction (chunk-batch specific):** Use
-> the full 0-100 range. Phase-4 routing has cutoffs at 45, 60, 75 — a
-> finding between adjacent anchors should score in between (e.g. 60,
-> 65). Do not snap onto an anchor.
+> the full 0-100 range. Phase-4 routing has resolved cutoffs at
+> `$add_phase4_b1`, `$add_phase4_b2`, `$add_phase4_b3`; score between
+> adjacent cutoffs when warranted. Do not snap onto a cutoff.
 >
 > Return JSON array, one entry per candidate (order does not matter,
 > routing is by `id`):
@@ -1055,23 +1066,24 @@ artifact-read.sh \
             | join(\"\n\")"
 ```
 
-Read the cumulative spend numbers through `artifact-read.sh`, then use
-`jq -r` only to decode the helper's JSON output into chat text. Omit
-each line entirely if its source field is absent — matches
-`artifact-render.py`'s renderer guard so the chat never shows `null
-tokens across null invocations`:
+Read only the cumulative spend fields through `artifact-read.sh`, then use
+`jq -r` to decode that compact object into chat text. Do not load the full
+artifact for this two-line summary. Omit each line entirely if its source
+field is absent — matches `artifact-render.py`'s renderer guard so the chat
+never shows `null tokens across null invocations`:
 
 ```bash
-artifact_snapshot=$(artifact-read.sh \
-    --path "$artifact_path" --filter '.')
+artifact_costs=$(artifact-read.sh \
+    --path "$artifact_path" \
+    --filter '{subagent_tokens, orchestrator_tokens}')
 
-subagent_token_line=$(printf '%s' "$artifact_snapshot" | jq -r '
+subagent_token_line=$(printf '%s' "$artifact_costs" | jq -r '
     if (.subagent_tokens.total // null) != null and (.subagent_tokens.invocations // null) != null
     then "Cumulative sub-agent spend: \(.subagent_tokens.total) tokens across \(.subagent_tokens.invocations) invocations."
     else empty end
 ')
 
-orchestrator_token_line=$(printf '%s' "$artifact_snapshot" | jq -r '
+orchestrator_token_line=$(printf '%s' "$artifact_costs" | jq -r '
     if (.orchestrator_tokens.turn_count // null) != null
     then "Cumulative orchestrator spend: \(.orchestrator_tokens.total_output) output / \(.orchestrator_tokens.total_input) input across \(.orchestrator_tokens.turn_count) turns."
     else empty end

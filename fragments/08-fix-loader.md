@@ -10,14 +10,14 @@ Parse `$ARGUMENTS` left-to-right, respecting quoted values:
   Each value-taking flag requires the next non-empty token.
 - Any unknown option or unconsumed token → stop with a usage error.
 
-If no integer was provided, `threshold` is set by step 7.2b from the
+If no integer was provided, `threshold` is set by step 7.2c from the
 resolved `gates.fix_threshold` (default 60). Capture `profile`,
 `models_csv`, `threshold`, and `granular_commits` in working context.
 
 ### 7.2. Locate the artifact via `latest.txt`
 
 ```bash
-reviews_root="${MATTHEWS_REVIEW_REVIEWS_ROOT:-$HOME/.matthews-reviews}"
+reviews_root=$(review-root.sh)
 head_branch=$(git rev-parse --abbrev-ref HEAD)
 repo_root=$(git rev-parse --show-toplevel)
 ```
@@ -44,7 +44,28 @@ review_dir="$reviews_root/$repo_slug/$head_branch/$review_id"
 artifact_path="$review_dir/artifact.json"
 ```
 
-### 7.2b. Resolve the model plan
+### 7.2b. Capture paths and schema-validate the artifact
+
+```bash
+trace_log_path="$review_dir/trace.md"
+phases_log_path="$review_dir/phases.jsonl"
+tokens_log_path="$review_dir/tokens.jsonl"
+
+if ! validation_stderr=$(artifact-validate.sh --path "$artifact_path" 2>&1); then
+    printf '%s\n' "$validation_stderr" >> "$trace_log_path"
+    invalid_copy="/tmp/matthews-review-invalid-$(date -u +%Y%m%dT%H%M%SZ).json"
+    cp "$artifact_path" "$invalid_copy"
+    printf '%s\nInvalid artifact copy: %s\n' \
+        "$validation_stderr" "$invalid_copy" >&2
+    exit 1
+fi
+```
+
+A schema-invalid artifact means something upstream broke the invariant.
+Do NOT resolve/store a fresh model plan or otherwise mutate it first;
+surface the validator error and recovery copy to the user.
+
+### 7.2c. Resolve the model plan
 
 Resolve fresh for this invocation (a `:fix` days after the review uses
 today's config, not the review-time plan), store it, and print the
@@ -76,31 +97,6 @@ printf '%s' "$model_plan_json" | jq -r '
 On non-zero from `review-config.sh`: surface the error-as-prompt
 stderr verbatim and stop. `$harness_id` is the Dispatch Protocol
 identity (`claude-code` / `omp` / `codex`).
-
-```bash
-trace_log_path="$review_dir/trace.md"
-phases_log_path="$review_dir/phases.jsonl"
-tokens_log_path="$review_dir/tokens.jsonl"
-```
-
-Capture all paths. Append a Phase 7 header to `trace.md`:
-
-```bash
-log-phase.sh \
-  --review-dir "$review_dir" --phase 7 --name fix-loader \
-  --summary "loading review $review_id; threshold=$threshold granular_commits=$granular_commits"
-```
-
-### 7.3. Schema-validate the artifact
-
-```bash
-artifact-validate.sh --path "$artifact_path"
-```
-
-On non-zero: log the validator stderr to `trace.md`, dump a copy to
-`/tmp/matthews-review-invalid-$(date -u +%Y%m%dT%H%M%SZ).json`,
-and abort. A schema-invalid artifact means something upstream broke
-the invariant; do NOT try to "fix" by patching — surface to the user.
 
 ### 7.4. Leftover-`attempted` hard abort (§4 Phase 7 step 4)
 

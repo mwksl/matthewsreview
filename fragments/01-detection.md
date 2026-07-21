@@ -155,7 +155,17 @@ Check Codex availability:
 
 ```bash
 CODEX_COMPANION="$(find ~/.claude/plugins -type f -name codex-companion.mjs -path '*codex*' 2>/dev/null | head -1)"
-if [[ -z "$CODEX_COMPANION" ]]; then
+if [[ "${codex_requires_standalone:-false}" == "true" ]]; then
+    if command -v codex >/dev/null 2>&1; then
+        codex_available=true
+        codex_launch_mode="agent-dispatch"
+        printf '%s\n' "Phase 1 readiness: max/ultra effort requires standalone Codex CLI" \
+            >> "$review_dir/trace.md"
+    else
+        codex_available=false
+        codex_reason="resolved max/ultra effort requires standalone Codex CLI, but codex is not on PATH"
+    fi
+elif [[ -z "$CODEX_COMPANION" ]]; then
     # Non-Claude-Code orchestrators (omp, Codex) have no codex plugin.
     # Fall back to the standalone CLI via agent-dispatch.sh when present.
     if command -v codex >/dev/null 2>&1; then
@@ -170,37 +180,13 @@ if [[ -z "$CODEX_COMPANION" ]]; then
 else
     codex_launch_mode="companion"
     # Companion CLI surface: `setup --json` emits {"ready": true|false, ...}.
-    # The older `ready` subcommand does not exist — parse the JSON's
-    # `.ready` boolean instead of grep-matching a literal string.
     codex_setup_json=$(node "$CODEX_COMPANION" setup --json 2>&1)
     codex_ready=$(jq -r '.ready // false' <<<"$codex_setup_json" 2>/dev/null)
     if [[ "$codex_ready" == "true" ]]; then
         codex_available=true
     else
-        # Cold-start false-negative bypass (shared session mode):
-        # `.ready` rolls up `.auth.loggedIn`, which is verified through
-        # the broker socket. The broker only materializes once a task
-        # is running, so a fresh probe sees ENOENT on
-        # /tmp/cxc-*/broker.sock and reports not-ready even though
-        # `.codex.available` (CLI binary present) is true. Treat that
-        # exact shape as ready; the first lens dispatch warms the
-        # broker. (`.auth.available` is intentionally NOT checked — the
-        # companion's auth-status builder hardcodes it true regardless
-        # of credential state, so it's cargo-cult; `.auth.loggedIn` is
-        # the real auth signal and is what the broker round-trip
-        # gates.)
-        #
-        # Edge case: if the user has logged out but a stale saved
-        # broker-session file remains, the probe is structurally
-        # indistinguishable from a legitimate cold start (same ENOENT
-        # path), so this bypass also fires. The first lens dispatch
-        # then surfaces the auth failure with an actionable error.
-        # Acceptable trade-off; the alternative (active warm-up +
-        # re-probe) costs a Codex turn on every cold start.
-        #
-        # Any other not-ready shape (missing CLI, direct-mode failure,
-        # malformed payload) falls through to the ASK
-        # prompt below.
+        # Shared-mode cold start reports ENOENT until the first task starts.
+        # Accept only that exact available-CLI shape; all others fail below.
         cx_mode=$(jq -r '.sessionRuntime.mode // ""' <<<"$codex_setup_json" 2>/dev/null)
         cx_cli=$(jq -r '.codex.available // false' <<<"$codex_setup_json" 2>/dev/null)
         cx_auth_detail=$(jq -r '.auth.detail // ""' <<<"$codex_setup_json" 2>/dev/null)
@@ -341,28 +327,27 @@ dispatch turn and the two `elapsed_sec` values naturally overlap in
 `fragments/lens-prompts/L<N>.md` files plus
 `fragments/lens-prompts/_shared-invariants.md` first (these `Read`
 tool-uses can run in parallel within one orchestrator turn). Then
-issue EVERY applicable lens's DISPATCH in a SINGLE
-batch (Prelude §3.4) so they run concurrently — alongside the ensemble
-fan-out's background `Bash` call when `ensemble_mode == true` (see
-the "Ensemble fan-out" sub-section below). The per-lens sub-sections
-that follow are declarative spec data — the dispatch model, prompt
-body location, and substitution rules (`$prior_fix_suspects`,
-`$claude_md_paths`) for each lens; they are reference material, NOT
-seven serial action targets. The unambiguous action target is the
-"#### Dispatch turn" sub-section after L7. Treating each per-lens
-sub-section as its own dispatch turn defeats the parallelism this
-phase relies on: Phase 1 wall-clock latency goes from
-`max(lens_durations)` to `sum(lens_durations)`, and the ensemble
-fan-out's background CLI loses its overlap window with the lens
-dispatches.
+issue every applicable non-sharded lens plus the first L1 shard wave
+in a SINGLE batch (Prelude §3.4) so they run concurrently — alongside
+the ensemble fan-out's background `Bash` call when `ensemble_mode ==
+true` (see the "Ensemble fan-out" sub-section below). If L1 needs more
+than three shards, dispatch later L1 waves only after the preceding
+wave settles; each wave contains at most three shards. This is the
+sole exception to the single-turn rule and bounds concurrency without
+dropping coverage. The per-lens sub-sections that follow are
+declarative spec data — the dispatch model, prompt body location, and
+substitution rules (`$prior_fix_suspects`, `$claude_md_paths`) for each
+lens; they are reference material, NOT seven serial action targets.
+The unambiguous action target is the "#### Dispatch turn" sub-section
+after L7. Treating ordinary lenses as separate dispatch turns defeats
+the parallelism this phase relies on.
 
 #### L1 — diff-local scan (role `light_lens`)
 
-> **Read L1–L7 before issuing any Agent tool-use.** The per-lens sub-sections
-> below are spec data (model, prompt body, substitutions). Issue every
-> applicable lens's `Agent` block in the single `#### Dispatch turn` at the
-> end of this section — one orchestrator turn, not seven. Phase 1 latency is
-> `max(lens_durations)`, not `sum(lens_durations)`.
+> **Read L1–L7 before issuing any Agent tool-use.** The per-lens
+> sub-sections below are spec data. Issue every applicable ordinary
+> lens and up to three L1 shards in the first `#### Dispatch turn`;
+> only additional L1 shard waves may require later turns.
 
 Dispatch spec: role `light_lens` (default claude:sonnet), `subagent_type: general-purpose`.
 
@@ -370,13 +355,17 @@ Dispatch spec: role `light_lens` (default claude:sonnet), `subagent_type: genera
 twice hit the 30-minute sub-agent limit on multi-thousand-line PRs
 (killed once, resumed once at +348k tokens). When Phase 0's
 `lines_changed > 4000`, split `reviewed_files_all` into
-⌈lines_changed/4000⌉ balanced shards (never more than 3), generate one
-per-shard diff (`git diff $comparison_ref -- <shard files>`), and
-dispatch ONE L1 sub-agent per shard with only its subset's diff.
-Shard results merge at the Phase-1 join like any lens output —
-duplicates across shard boundaries are resolved by Phase 2 dedup, so
-no cross-shard coordination is needed. At 3 shards the per-shard diff
-stays ≲4000 lines regardless of PR size.
+⌈lines_changed/4000⌉ balanced shards with a target of ≤4000 changed lines
+per shard where file boundaries allow. **Do not cap the total shard count**:
+that silently recreates oversized prompts above 12,000 lines. Bound
+runtime concurrency instead — dispatch shards in waves of at most 3,
+parallel within each wave, until every shard has run. A single file
+larger than the target is an indivisible oversized shard; record
+`phase_1_l1_oversized_file: path=<file> lines=<N>` in `trace.md`.
+Generate one per-shard diff (`git diff $comparison_ref -- <shard
+files>`) and give each L1 sub-agent only its subset's diff. Shard
+results merge at the Phase-1 join like any lens output; duplicates
+across shard boundaries are resolved by Phase 2 dedup.
 
 Prompt body: `fragments/lens-prompts/L1.md` (read in step 1.3's bulk
 pre-read; its content is the L1 prompt body verbatim). Final prompt =
@@ -661,15 +650,13 @@ For each sub-agent result, in the order it returns:
    artifact writes. If the orchestrator loses context mid-collection,
    Phase 1 has to re-run from dispatch.
 
-   A common lens failure is `line_range: null` instead of `[N, N]`.
-   Default to `[1, 1]` with a one-line `trace.md` note at collection
-   time so the join step's jq builder doesn't blow up on a schema-
-   invalid pool entry:
-
-   ```bash
-   tagged=$(echo "$tagged" \
-     | jq '[.[] | .line_range //= [1,1]]')
-   ```
+   `line_range: null` means the lens found a concrete issue but could
+   not establish a trustworthy source line. Preserve that uncertainty:
+   schema v1 accepts a nullable range, the validators can relocate the
+   claim from `file + claim`, and the renderer omits a line citation.
+   **Never coerce a missing range to `[1,1]`** — line 1 is a real
+   location and would turn uncertainty into fabricated evidence. Step
+   1.5's full-finding builder materializes an absent key as JSON null.
 
 ### 1.5. Join + assign IDs + batched add-findings (§13.12)
 
@@ -833,6 +820,7 @@ build_result=$(printf '%s' "$ided" | jq -c --argjson trivial "$trivial_mode" '
         is_actionable: false,
         reason: null,
         confirmed_strength: null,
+        line_range: ($cand.line_range // null),
         score_phase3: null,
         score_phase4: null,
         score_history: [],
@@ -985,11 +973,13 @@ jq_builder_count_drops=$(grep -c '^phase_1_jq_builder_count_drop:' "$trace_log_p
 add_findings_total_failures=$(grep -c '^phase_1_add_findings_total_failure:' "$trace_log_path" 2>/dev/null || true)
 
 lens_dispatch_failures=$(grep -c '^lens_dropped_dispatch_failed:' "$trace_log_path" 2>/dev/null || true)
+candidate_drop_failures=$((lens_drops + add_findings_rejected \
+  + jq_builder_count_drops + add_findings_total_failures))
 
 log-phase.sh \
   --review-dir "$review_dir" --phase 1 --name detection \
   --elapsed "$phase_1_elapsed" \
-  --summary "total=$total_candidates; counts_by_family=$counts_by_family; skipped_lenses=<list-if-any>; lens_drops=$lens_drops; lens_dispatch_failures=$lens_dispatch_failures; origin_crosscheck_skipped=$oc_skipped; add_findings_rejected=$add_findings_rejected; jq_builder_count_drops=$jq_builder_count_drops; add_findings_total_failures=$add_findings_total_failures"
+  --summary "total=$total_candidates; counts_by_family=$counts_by_family; skipped_lenses=<list-if-any>; lens_drops=$lens_drops; lens_dispatch_failures=$lens_dispatch_failures; origin_crosscheck_skipped=$oc_skipped; add_findings_rejected=$add_findings_rejected; jq_builder_count_drops=$jq_builder_count_drops; add_findings_total_failures=$add_findings_total_failures; candidate_drop_failures=$candidate_drop_failures"
 
 log-phase.sh \
   --review-dir "$review_dir" --phase 1 --record "$(jq -nc \
@@ -997,7 +987,13 @@ log-phase.sh \
     --argjson elapsed "$phase_1_elapsed" \
     --argjson total "$total_candidates" \
     --argjson lens_dispatch_failures "$lens_dispatch_failures" \
-    '{name:$name, elapsed_sec:$elapsed, counts_by_state:{open:$total}, counts_by_disposition:{pending_validation:$total}, delta:"+\($total) open", lens_dispatch_failures:$lens_dispatch_failures}')"
+    --argjson candidate_drop_failures "$candidate_drop_failures" \
+    '{name:$name, elapsed_sec:$elapsed,
+      counts_by_state:{open:$total},
+      counts_by_disposition:{pending_validation:$total},
+      delta:"+\($total) open",
+      lens_dispatch_failures:$lens_dispatch_failures,
+      candidate_drop_failures:$candidate_drop_failures}')"
 ```
 
 Under `--ensemble`, `phase_1_elapsed` and Phase 1.5's elapsed will overlap — both phases share a dispatch-turn start boundary; the overlap is the intended observability signal.

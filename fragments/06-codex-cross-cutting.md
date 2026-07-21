@@ -7,7 +7,7 @@ only difference is the dispatch shape:
 
 - **Opus is replaced by ONE Codex job** that proposes cross-cutting
   groups over the confirmed deep-lane findings.
-- The freeform Codex output runs through ONE **Sonnet shape-fixer**
+- The freeform Codex output runs through ONE **`normalizer`-role shape-fixer**
   that emits the structured `cross_cutting_groups` JSON the schema
   expects.
 
@@ -60,8 +60,7 @@ else
     codex_crosscut_model="$codex_crosscut_spec"
     codex_crosscut_effort=""
 fi
-[[ -n "$codex_crosscut_effort" ]] || codex_crosscut_effort="${effort:-high}"
-codex_dispatch_scratch="${codex_dispatch_scratch:-${scratch_dir:-/tmp/matthews-review-codex-$review_id/jobs}}"
+codex_dispatch_scratch="${codex_dispatch_scratch:-${scratch_dir:-/tmp/matthews-review-$review_id}/jobs}"
 mkdir -p "$codex_dispatch_scratch"
 ```
 
@@ -134,9 +133,11 @@ Launch through the transport selected by preflight:
 ```bash
 set +e
 if [[ "$codex_launch_mode" == "companion" ]]; then
-    launch_json=$(node "$CODEX_COMPANION" task --background \
-        --effort "$codex_crosscut_effort" \
+    companion_args=(node "$CODEX_COMPANION" task --background \
         --prompt-file "$prompt_file" --json)
+    [[ -n "$codex_crosscut_model" ]] && companion_args+=(--model "$codex_crosscut_model")
+    [[ -n "$codex_crosscut_effort" ]] && companion_args+=(--effort "$codex_crosscut_effort")
+    launch_json=$("${companion_args[@]}")
     launch_rc=$?
     xc_job_id=$(printf '%s' "$launch_json" | jq -r '.jobId // empty')
 else
@@ -227,9 +228,9 @@ Apply the §3.7 retry policy:
    On Continue: log `phase_5_codex_dropped: continuing without groups`
    and proceed to Phase 6.
 
-#### 5.2.4. Sonnet shape-fixer
+#### 5.2.4. `normalizer`-role shape-fixer
 
-Dispatch ONE Sonnet `Agent` to canonicalize Codex's freeform output
+Dispatch ONE sub-agent with the resolved `normalizer` role to canonicalize Codex's freeform output
 into the structured shape:
 
 > You are normalizing one Codex cross-cutting analysis output into the
@@ -299,23 +300,22 @@ write to a tmpfile, apply via `artifact-patch.py --set-json`:
 
 Mirror `fragments/06-cross-cutting.md` §5.3's pluck — accept either
 the envelope (with `.cross_cutting_groups`) or a bare groups array.
-The shape-fixer's prompt asks for the envelope, but a Sonnet that
+The shape-fixer's prompt asks for the envelope, but a normalizer that
 returns just the array shouldn't lose its work. The `// .` fallback
 is the same shape :review uses; `// []` would silently zero-out a
 valid bare-array response.
 
 ```bash
-groups_tmp="/tmp/matthews-review-ccg-$review_id.json"
+groups_tmp=$(mktemp -t matthews-review-ccg.XXXXXX)
+cleanup_groups_tmp() { rm -f "$groups_tmp" || true; }
+trap cleanup_groups_tmp EXIT HUP INT TERM
 if ! jq -c '.cross_cutting_groups // .' <<<"$xc_response_json" > "$groups_tmp"; then
     printf 'phase_5_codex_groups_unparseable: shape-fixer output is invalid JSON; setting to []\n' \
         >> "$trace_log_path"
     printf '%s\n' '[]' > "$groups_tmp"
 fi
 
-# Defensive type-guard: if neither path produced an array (e.g. the
-# shape-fixer emitted a string or object), fall back to [] before
-# applying so artifact-patch.py's set-json doesn't choke on the type
-# mismatch and we still log a clean trace tag.
+# Defensive type-guard: if neither path produced an array, fall back to [].
 if ! jq -e 'type == "array"' "$groups_tmp" >/dev/null; then
     printf 'phase_5_codex_groups_unparseable: shape-fixer output not an array; setting to []\n' \
         >> "$trace_log_path"
@@ -325,8 +325,10 @@ fi
 artifact-patch.py \
   --path "$artifact_path" \
   --set-json "cross_cutting_groups=@$groups_tmp"
-
-rm -f "$groups_tmp"
+patch_rc=$?
+cleanup_groups_tmp
+trap - EXIT HUP INT TERM
+[[ "$patch_rc" -eq 0 ]] || printf 'phase_5_codex_groups_apply_failed\n' >> "$trace_log_path"
 ```
 
 If `artifact-patch.py` rejects the write (schema validation — invalid
@@ -339,6 +341,7 @@ Clean up the Phase 5 Codex prompt + output files:
 ```bash
 rm -f "/tmp/matthews-review-codex-${review_id}-XC.md" \
       "/tmp/matthews-review-codex-${review_id}-XC.out.json"
+rm -rf -- "$codex_dispatch_scratch"
 ```
 
 ### 5.4. Log Phase 5 summary

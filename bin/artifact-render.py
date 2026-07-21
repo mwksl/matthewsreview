@@ -195,6 +195,14 @@ def render_freshness_line(artifact):
     return f"**Base freshness:** `{freshness}` (see trace.md)"
 
 
+def command_name(artifact, command):
+    """Return the command spelling exposed by the artifact's orchestrator."""
+    orchestrator = (artifact.get("model_plan") or {}).get("orchestrator")
+    if orchestrator == "codex":
+        return f"$matthewsreview-{command}"
+    return f"/matthewsreview:{command}"
+
+
 def render_header(artifact):
     lines = []
     head = artifact.get("head_branch", "?")
@@ -213,7 +221,9 @@ def render_header(artifact):
     if freshness_line:
         lines.append(freshness_line)
     if not any_fix_attempts(artifact):
-        lines.append("**Fix threshold:** not yet set (run `/matthewsreview:fix [threshold]` to apply fixes)")
+        lines.append(
+            f"**Fix threshold:** not yet set (run `{command_name(artifact, 'fix')} [threshold]` to apply fixes)"
+        )
     tokens = artifact.get("subagent_tokens") or {}
     total = tokens.get("total")
     invs = tokens.get("invocations")
@@ -243,7 +253,7 @@ def render_header(artifact):
     return "\n".join(lines)
 
 
-def render_summary(buckets):
+def render_summary(buckets, phase3_gate=45):
     findings_count = sum(len(v) for v in buckets.values())
     if findings_count == 0:
         return "No findings."
@@ -287,7 +297,6 @@ def render_summary(buckets):
     # below_gate is split: findings surfaced by render_polish_clusters
     # appear visibly downstream, so labeling them "filtered out" without
     # qualification contradicts the polish table. The split bullet keeps
-    # the headline label honest while preserving the "<45" affordance.
     filtered_bits = []
     disproven_n = len(buckets.get("disproven", []))
     below_gate_findings = buckets.get("below_gate", [])
@@ -307,16 +316,16 @@ def render_summary(buckets):
     if below_gate_n:
         if below_gate_clustered and below_gate_filtered:
             filtered_bits.append(
-                f"{below_gate_filtered} below score gate (<45); "
+                f"{below_gate_filtered} below score gate (<{phase3_gate}); "
                 f"{below_gate_clustered} surfaced in Polish clusters below"
             )
         elif below_gate_clustered:
             filtered_bits.append(
-                f"{below_gate_clustered} below score gate (<45), "
+                f"{below_gate_clustered} below score gate (<{phase3_gate}), "
                 "surfaced in Polish clusters below"
             )
         else:
-            filtered_bits.append(f"{below_gate_n} below score gate (<45)")
+            filtered_bits.append(f"{below_gate_n} below score gate (<{phase3_gate})")
 
     lines = [f"Found {findings_count} finding{'s' if findings_count != 1 else ''} across all lanes:"]
     if deep_bits:
@@ -530,7 +539,7 @@ def _finding_detail(f):
     return "\n".join(lines)
 
 
-def render_auto_recommendations(buckets):
+def render_auto_recommendations(buckets, artifact):
     """Findings with auto_fix_hint, regardless of disposition or lane.
 
     Surfaces AI-authored fix recommendations in the rendered MD so reviewers
@@ -548,11 +557,13 @@ def render_auto_recommendations(buckets):
     if not rows:
         return ""
 
+    fix_command = command_name(artifact, "fix")
+    walkthrough_command = command_name(artifact, "walkthrough")
     lines = [f"### Auto-recommendations ({len(rows)})", ""]
     lines.append(
         "_AI-authored fix directions for findings that aren't auto-fixable today. "
-        "Run `/matthewsreview:fix` to batch-apply with one confirmation, or "
-        "`/matthewsreview:walkthrough` to review one-by-one._"
+        f"Run `{fix_command}` to batch-apply with one confirmation, or "
+        f"`{walkthrough_command}` to review one-by-one._"
     )
     lines.append("")
     lines.append("| # | Score | Disp | File | Recommendation |")
@@ -580,18 +591,21 @@ def render_auto_recommendations(buckets):
     return "\n".join(lines)
 
 
-def render_deep_other(buckets, disposition):
+def render_deep_other(buckets, disposition, artifact):
     rows = [f for f in buckets.get(disposition, []) if f.get("validation_lane") == "deep"]
     if not rows:
         return ""
     _, label, glyph, _short = SECTION_LABEL[disposition]
     lines = [f"### {glyph} {label} ({len(rows)})", ""]
     if disposition == "confirmed_manual":
+        fix_command = command_name(artifact, "fix")
+        walkthrough_command = command_name(artifact, "walkthrough")
+        promote_command = command_name(artifact, "promote")
         lines.append(
-            "_Not auto-applied by `/matthewsreview:fix` directly — these need a confirmation step. "
-            "Findings with an auto-recommendation get batch-confirmed at `:fix`'s Phase 7.5 "
-            "preflight (or `:walkthrough` Step 4.5); use `/matthewsreview:promote <finding_id>` "
-            "for a single-finding manual override._"
+            f"_Not auto-applied by `{fix_command}` directly — these need a confirmation step. "
+            "Findings with an auto-recommendation get batch-confirmed at the fix command's "
+            f"Phase 7.5 preflight (or `{walkthrough_command}` Step 4.5); use "
+            f"`{promote_command} <finding_id>` for a single-finding manual override._"
         )
         lines.append("")
         lines.append("| # | Score | Impact | File | Issue | Why manual |")
@@ -611,13 +625,16 @@ def render_deep_other(buckets, disposition):
                 f"{file_link(f)} | {f.get('claim', '')} |"
             )
     if disposition == "uncertain":
+        review_command = command_name(artifact, "review")
         lines.append("")
-        lines.append("Phase 4 couldn't confirm decisively. Re-run `/matthewsreview:review` if you suspect this deserves")
+        lines.append(
+            f"Phase 4 couldn't confirm decisively. Re-run `{review_command}` if you suspect this deserves"
+        )
         lines.append("further investigation with fresh context.")
     return "\n".join(lines)
 
 
-def render_light_lane(buckets):
+def render_light_lane(buckets, artifact):
     rows = []
     # `uncertain` included — see render_summary comment. The light-lane table
     # already carries a Disposition column, so mixed dispositions fit the
@@ -638,11 +655,14 @@ def render_light_lane(buckets):
         return ""
     lines = ["## Light lane — ux, policy, architecture", ""]
     if any(f.get("disposition") in ("confirmed_mechanical", "confirmed_manual") for f in rows):
+        fix_command = command_name(artifact, "fix")
+        walkthrough_command = command_name(artifact, "walkthrough")
+        promote_command = command_name(artifact, "promote")
         lines.append(
             "_Light-lane findings — including rows labeled auto-fixable — aren't applied by "
-            "`/matthewsreview:fix` directly. Findings with an auto-recommendation get "
-            "batch-confirmed at `:fix`'s Phase 7.5 preflight (or `:walkthrough` Step 4.5); "
-            "use `/matthewsreview:promote <finding_id>` for a single-finding manual override._"
+            f"`{fix_command}` directly. Findings with an auto-recommendation get "
+            f"batch-confirmed at the fix command's Phase 7.5 preflight (or `{walkthrough_command}` "
+            f"Step 4.5); use `{promote_command} <finding_id>` for a single-finding manual override._"
         )
         lines.append("")
     lines.append("| # | Score | Impact | File | Finding | Disposition |")
@@ -666,7 +686,7 @@ def render_light_lane(buckets):
     return "\n".join(lines)
 
 
-def render_polish_clusters(buckets):
+def render_polish_clusters(buckets, phase3_gate=45):
     """Surface clustered below_gate findings in a dedicated section.
 
     Phase 3 parks nits under `below_gate` so they don't flood the report,
@@ -692,7 +712,7 @@ def render_polish_clusters(buckets):
     total = sum(len(v) for v in clustered_by_file.values())
     lines = [f"## Polish — below threshold, clustered ({total})", ""]
     lines.append(
-        "Below-gate findings (score < 45) that cluster in the same area — "
+        f"Below-gate findings (score < {phase3_gate}) that cluster in the same area — "
         "not worth surfacing individually, but dense enough that a human pass "
         "may catch something the pipeline filtered out."
     )
@@ -818,8 +838,7 @@ def render_fix_runs(artifact):
 
 
 def render_footer(artifact):
-    return "🤖 Generated with the [matthewsreview](https://github.com/mwksl/matthewsreview) Claude Code Review Plugin"
-
+    return "Generated by [matthewsreview](https://github.com/mwksl/matthewsreview), a multi-harness code review pipeline"
 
 # ----- Dispositions export ----------------------------------------------
 
@@ -827,9 +846,9 @@ def _effective_score(f):
     return f.get("score_phase4") if f.get("score_phase4") is not None else f.get("score_phase3")
 
 
-def _suggested_action(f):
+def _suggested_action(f, fix_threshold=60):
     disp = f.get("disposition") or ""
-    if disp == "resolved":
+    if f.get("current_state") == "resolved" or disp == "resolved":
         return "done"
     if disp == "pre_existing_report":
         return "issue"
@@ -837,15 +856,18 @@ def _suggested_action(f):
         return "judge"
     if disp in ("disproven", "below_gate"):
         return "skip"
-    if disp in ("partial", "regression"):
-        return "fix"
-    if disp == "confirmed_mechanical":
-        # auto-eligible = deep lane + auto_fixable, or human-promoted
-        if f.get("human_confirmation") is not None or (
-            f.get("validation_lane") == "deep" and f.get("auto_fixable") is True
-        ):
-            return "fix"
-        return "walkthrough"
+    if disp in ("confirmed_mechanical", "partial", "regression"):
+        score = f.get("score_phase4")
+        auto_eligible = (
+            f.get("human_confirmation") is not None
+            or (
+                f.get("impact_type") in ("correctness", "security")
+                and isinstance(score, (int, float))
+                and not isinstance(score, bool)
+                and score >= fix_threshold
+            )
+        )
+        return "fix" if auto_eligible else "walkthrough"
     if disp in ("confirmed_manual", "confirmed_report"):
         return "walkthrough"
     return "judge"
@@ -855,6 +877,7 @@ def render_dispositions(artifact):
     """Flat ENGAGE/SKIP work-queue table — the machine-readable replacement
     for hand-built disposition sweeps (GSD quick-task style)."""
     findings = artifact.get("findings", [])
+    fix_threshold = (artifact.get("gates") or {}).get("fix_threshold", 60)
     lines = [
         f"# Dispositions — {artifact.get('review_id', '?')} ({artifact.get('head_branch', '?')})",
         "",
@@ -863,9 +886,11 @@ def render_dispositions(artifact):
     ]
     engage = skip = 0
     for f in findings:
-        action = _suggested_action(f)
+        action = _suggested_action(f, fix_threshold)
         disp = f.get("disposition") or ""
-        if disp.startswith("confirmed_") or disp in ("uncertain", "partial", "regression"):
+        if action != "done" and (
+            disp.startswith("confirmed_") or disp in ("uncertain", "partial", "regression")
+        ):
             engage += 1
         else:
             skip += 1
@@ -885,11 +910,13 @@ def render_dispositions(artifact):
                 action=action,
             )
         )
+    fix_command = command_name(artifact, "fix")
+    walkthrough_command = command_name(artifact, "walkthrough")
     lines += [
         "",
         f"**{engage} engage / {skip} skip** "
         "(engage = confirmed_* + uncertain + retry-eligible partial/regression; "
-        "actions: fix → `/matthewsreview:fix`, walkthrough → `/matthewsreview:walkthrough`, "
+        f"actions: fix → `{fix_command}`, walkthrough → `{walkthrough_command}`, "
         "issue → pre-existing, judge/skip → no action)",
         "",
     ]
@@ -899,41 +926,48 @@ def render_dispositions(artifact):
 # ----- Assembly ---------------------------------------------------------
 
 def render_degraded_banner(artifact):
-    """Prominent top-of-report warning when Phase 6.4b marked the run
-    degraded — without it a partial-coverage artifact reads as clean."""
+    """Prominent top-of-report warning for any recorded coverage failure."""
     degraded = artifact.get("degraded") or {}
-    n = degraded.get("lens_dispatch_failures") or 0
-    if not n:
+    lens_failures = degraded.get("lens_dispatch_failures") or 0
+    candidate_failures = degraded.get("candidate_drop_failures") or 0
+    finalization_failures = degraded.get("finalization_failures") or 0
+    failures = []
+    if lens_failures:
+        failures.append(f"{lens_failures} lens dispatch(es) failed")
+    if candidate_failures:
+        failures.append(f"{candidate_failures} candidate output(s) dropped")
+    if finalization_failures:
+        failures.append(f"{finalization_failures} finalization operation(s) failed")
+    if not failures:
         return ""
     return (
-        f"> ⚠ **REVIEW DEGRADED — {n} lens dispatch(es) failed** (see `trace.md`). "
-        "Findings below reflect partial coverage, NOT a clean review. "
-        "Re-run after resolving the dispatch failures (model/auth availability "
-        "is the usual cause — check the Model plan against what your harness "
-        "can serve).\n"
+        f"> **REVIEW DEGRADED — {', '.join(failures)}** (see `trace.md`). "
+        "Findings below reflect partial coverage or incomplete finalization, "
+        "NOT a clean review. Resolve the recorded failures and re-run.\n"
     )
 
 
 def render(artifact):
     buckets = findings_by_disposition(artifact)
     cross_cutting = artifact.get("cross_cutting_groups") or []
+    phase3_gate = (artifact.get("gates") or {}).get("phase3_gate", 45)
 
     sections = [
         MARKER,
         render_degraded_banner(artifact),
         render_header(artifact),
-        render_summary(buckets),
+        render_summary(buckets, phase3_gate),
         "---",
         "## Deep lane — correctness & security" if any(
             f.get("validation_lane") == "deep" for f in artifact.get("findings", [])
         ) else "",
         render_deep_auto(buckets, cross_cutting),
-        render_auto_recommendations(buckets),
-        render_deep_other(buckets, "confirmed_manual"),
-        render_deep_other(buckets, "uncertain"),
-        render_deep_other(buckets, "confirmed_report"),
-        render_light_lane(buckets),
-        render_polish_clusters(buckets),
+        render_auto_recommendations(buckets, artifact),
+        render_deep_other(buckets, "confirmed_manual", artifact),
+        render_deep_other(buckets, "uncertain", artifact),
+        render_deep_other(buckets, "confirmed_report", artifact),
+        render_light_lane(buckets, artifact),
+        render_polish_clusters(buckets, phase3_gate),
         render_pre_existing(buckets),
         render_fix_runs(artifact),
         "---",

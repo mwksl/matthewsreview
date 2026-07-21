@@ -1,6 +1,6 @@
 {
   "name": "matthewsreview",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Multi-lens code review pipeline for Claude Code, Codex, and Oh My Pi: deep review (Claude, Codex, or omp engines), per-stage model selection, automated fix loop, interactive walkthrough, manual promote, external-finding injection.",
   "author": { "name": "Matthew \"mwksl\" Stingel" },
   "license": "MIT",

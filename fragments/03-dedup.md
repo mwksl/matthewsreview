@@ -1,6 +1,6 @@
 ## Phase 2 — Dedup (LLM-only)
 
-A single Sonnet sub-agent groups near-duplicate candidates so one
+A single sub-agent using the resolved `dedup` role groups near-duplicate candidates so one
 underlying issue doesn't surface as multiple findings downstream.
 No structural fingerprinting — one LLM pass, pennies of cost.
 

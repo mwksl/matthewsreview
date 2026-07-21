@@ -112,10 +112,17 @@ On helper non-zero exit, fall back to `[]`.
 
 ### 1.2c. Build the Codex prompt files
 
-For each lens that runs (per step 1.1's selection), the orchestrator
-assembles a prompt file at `/tmp/matthews-review-codex-<review_id>-L<N>.md`.
-Codex's `task --background --prompt-file <path>` reads the file at
-launch time, so it must be on disk before §1.3.
+Create an ordered **dispatch-slot list** before launch. Non-sharded
+lenses use slots `L2` through `L7`; an unsharded L1 uses `L1`; sharded
+L1 uses `L1-s1` through `L1-sM`. Every slot gets its own prompt path,
+job id, retry count, terminal state, output, and token record. The
+source template for every `L1-sN` slot remains
+`fragments/lens-prompts/L1.md`.
+
+For each dispatch slot, the orchestrator assembles a prompt file at
+`/tmp/matthews-review-codex-<review_id>-<slot>.md`. Codex's
+`task --background --prompt-file <path>` reads the file at launch
+time, so it must be on disk before §1.3.
 
 The lens-prompt source files (`fragments/lens-prompts/L<N>.md`,
 `fragments/lens-prompts/_shared-invariants.md`) live in the plugin's
@@ -149,14 +156,18 @@ Per lens that runs, the orchestrator does:
    - **L3, L5 only**: `$claude_md_paths` → newline-joined list from
      Phase 0 step 0.7.
    - L1, L4, L6, L7: no per-lens placeholders.
-
    **L1 sharding (large diffs).** When Phase 0's `lines_changed >
-   4000`, dispatch L1 as ⌈lines_changed/4000⌉ balanced shards (never
-   more than 3), each with its own per-shard diff (`git diff
-   $comparison_ref -- <shard files>`) and the suffix "You are
-   reviewing shard N of M — only the files in the diff below." Same
-   rationale as the `:review` L1 shard rule (30-minute hangs on
-   multi-thousand-line PRs); shard outputs merge at the normalizer.
+   4000`, split `reviewed_files_all` into
+   `M = ceil(lines_changed/4000)` balanced file shards, targeting
+   **≤4,000 changed lines per shard** where file boundaries allow.
+   **Do not cap `M`**: a hard three-shard cap recreates oversized
+   prompts above 12,000 changed lines. Bound concurrency instead:
+   launch at most three `L1-sN` slots at once, and launch the next
+   shard wave only after every slot in the current wave is terminal.
+   Each shard prompt includes its own
+   `git diff $comparison_ref -- <shard files>` plus "You are reviewing
+   shard N of M — only the files in the diff below." Shard outputs
+   merge at the normalizer.
 
    The orchestrator can perform these substitutions in-context (string
    replace) before writing — no shell needed. If you DO want a shell
@@ -174,14 +185,14 @@ Per lens that runs, the orchestrator does:
    the placeholder in the file is the literal four characters `$comparison_ref`.
 
 4. **Write** the assembled prompt to
-   `/tmp/matthews-review-codex-${review_id}-L<N>.md`. Use the bash
-   `printf` pattern (the Write tool is NOT in
-   `commands/codex-review.md`'s `allowed-tools` grant — recommending
-   it would trip the runtime's tool-permission check before any Codex
-   job launches):
+   `/tmp/matthews-review-codex-${review_id}-${slot}.md`, where `slot`
+   is the dispatch-slot id above. Use the bash `printf` pattern (the
+   Write tool is NOT in `commands/codex-review.md`'s `allowed-tools`
+   grant — recommending it would trip the runtime's tool-permission
+   check before any Codex job launches):
 
    ```bash
-   prompt_file="/tmp/matthews-review-codex-${review_id}-L${N}.md"
+   prompt_file="/tmp/matthews-review-codex-${review_id}-${slot}.md"
    { printf '%s\n\n' "$shared_invariants_body"; \
      printf '%s\n'   "$lens_body"; } > "$prompt_file"
    ```
@@ -191,12 +202,13 @@ Per lens that runs, the orchestrator does:
    `xpg_echo`, mangling JSON escape sequences embedded in the prompt
    (CLAUDE.md operational rule 12).
 
-### 1.3. Dispatch the Codex jobs (one orchestrator turn)
+### 1.3. Dispatch the Codex jobs (one turn per launch wave)
 
-> **One turn for all lens launches — not one turn per lens.** Issue
-> every running lens's mode-aware launch block in one orchestrator turn.
-> Phase 1 wall-clock latency is `max(codex_durations)`, not
-> `sum(codex_durations)`.
+> **One turn per launch wave — not one turn per slot.** Issue every
+> non-L1 lens plus the first (at most three-slot) L1 shard wave in one
+> orchestrator turn. Subsequent L1 shard waves launch only when the
+> preceding shard wave is terminal. Within each wave, wall-clock
+> latency is `max(codex_durations)`, not `sum(codex_durations)`.
 
 First materialize the resolved Codex role and scratch location:
 
@@ -214,22 +226,24 @@ else
     codex_detect_model="$codex_detect_spec"
     codex_detect_effort=""
 fi
-[[ -n "$codex_detect_effort" ]] || codex_detect_effort="${effort:-high}"
-codex_dispatch_scratch="${scratch_dir:-/tmp/matthews-review-codex-$review_id/jobs}"
+codex_dispatch_scratch="${scratch_dir:-/tmp/matthews-review-$review_id}/jobs"
 mkdir -p "$codex_dispatch_scratch"
 [[ -z "${codex_readiness_note:-}" ]] || \
     printf 'Phase 1 readiness: %s\n' "$codex_readiness_note" >> "$trace_log_path"
 ```
 
-For each running lens, launch with the selected transport. Issue all
-of these blocks in one turn:
+For each slot in the current launch wave, launch with the selected
+transport. Issue all blocks for that wave in one turn:
 
 ```bash
-prompt_file="/tmp/matthews-review-codex-${review_id}-L${N}.md"
+prompt_file="/tmp/matthews-review-codex-${review_id}-${slot}.md"
 set +e
 if [[ "$codex_launch_mode" == "companion" ]]; then
-    launch_json=$(node "$CODEX_COMPANION" task --background \
-        --effort "$codex_detect_effort" --prompt-file "$prompt_file" --json)
+    companion_args=(node "$CODEX_COMPANION" task --background \
+        --prompt-file "$prompt_file" --json)
+    [[ -n "$codex_detect_model" ]] && companion_args+=(--model "$codex_detect_model")
+    [[ -n "$codex_detect_effort" ]] && companion_args+=(--effort "$codex_detect_effort")
+    launch_json=$("${companion_args[@]}")
     launch_rc=$?
     codex_job_id=$(printf '%s' "$launch_json" | jq -r '.jobId // empty')
 else
@@ -245,12 +259,12 @@ set -e
 ```
 
 A non-zero `launch_rc` or empty `codex_job_id` is a synthetic launch
-failure: log `phase_1_codex_launch_failed:L<N> mode=<mode>` and route
-that lens through §1.4's retry policy. Successful ids join the
-working-context `codex_job_ids` map keyed by lens slot. Skipped lenses
-are absent. Preserve the mode alongside each id if different transports
-could be selected during recovery; normally the whole run uses one
-`codex_launch_mode`.
+failure: log `phase_1_codex_launch_failed:<slot> mode=<mode>` and route
+that slot through §1.4's retry policy. Successful ids join the
+working-context `codex_job_ids` map keyed by the exact dispatch slot
+(`L1-sN` included). Skipped lenses are absent. Preserve the mode
+alongside each id if different transports could be selected during
+recovery; normally the whole run uses one `codex_launch_mode`.
 
 ### 1.4. Poll the Codex jobs (subsequent orchestrator turns)
 
@@ -307,17 +321,36 @@ else
         >/dev/null 2>&1 || true
 fi
 elapsed_for_log=$(printf '%s' "$poll" | jq -r '.elapsed_sec // "null"')
-printf 'phase_1_codex_watchdog: lens=L<N> mode=%s verdict=%s job=%s elapsed=%s\n' \
-    "$codex_launch_mode" "$verdict" "$job_id" "$elapsed_for_log" \
+printf 'phase_1_codex_watchdog: lens=%s mode=%s verdict=%s job=%s elapsed=%s\n' \
+    "$slot" "$codex_launch_mode" "$verdict" "$job_id" "$elapsed_for_log" \
     >> "$trace_log_path"
 ```
 
 On `completed`, both helpers place the freeform response in
-`raw_output`; standalone mode also reports parsed Codex usage:
+`raw_output`; standalone mode also reports parsed Codex usage. Store
+both in JSON working-context maps keyed by the exact slot rather than
+in dynamic shell variable names (`codex_outputs` and
+`codex_tokens_by_slot` initialize to `{}`):
 
 ```bash
-codex_output_L<N>=$(printf '%s' "$poll" | jq -r '.raw_output // ""')
-codex_tokens_L<N>=$(printf '%s' "$poll" | jq -r '.tokens // "null"')
+slot_output=$(printf '%s' "$poll" | jq -r '.raw_output // ""')
+slot_tokens=$(printf '%s' "$poll" | jq -c '.tokens // null')
+codex_outputs=$(printf '%s' "$codex_outputs" |
+    jq -c --arg slot "$slot" --arg output "$slot_output" \
+      '. + {($slot): $output}')
+codex_tokens_by_slot=$(printf '%s' "$codex_tokens_by_slot" |
+    jq -c --arg slot "$slot" --argjson tokens "$slot_tokens" \
+      '. + {($slot): $tokens}')
+```
+
+Record one telemetry row per completed slot:
+
+```bash
+log-tokens.sh \
+  --review-dir "$review_dir" --phase phase_1 \
+  --agent-role codex_lens --agent-id "$job_id" \
+  --model "$role_codex_detect" --tokens "$slot_tokens" \
+  --lens "$slot"
 ```
 
 Capture the output and token count in working context. Empty output
@@ -334,47 +367,51 @@ completed response is empty/malformed, inspect the failure context:
    map's job id with the new `.jobId` (companion) or `.job_id`
    (agent-dispatch), then resume the matching poll branch.
 2. **Persistent or fundamental**: after 3 retries with the same failure
-   mode, log `phase_1_codex_dropped:L<N> reason=<short cause>`.
+   mode, log `phase_1_codex_dropped:<slot> reason=<short cause>`.
 
-When any lens is dropped, ASK ONCE for the whole
-phase (don't ask per-lens — that's ~7 prompts):
+When any slots are dropped, ASK ONCE for the whole phase (don't ask
+per-slot):
 
 ```
-"<N> Codex lenses failed after retry: [L<N>, L<M>, ...]. Continue
-with the remaining lenses (degraded coverage), or abort the run?"
+"<N> Codex dispatch slots failed after retry: [L1-s2, L4, ...].
+Continue with the remaining slots (degraded coverage), or abort?"
 Options:
 - Continue — proceed to Phase 2 with surviving lenses
 - Abort — exit cleanly; preserve the seeded artifact for inspection
 ```
 
-If 0 lenses survive, abort automatically (no point asking). On Continue,
-log `phase_1_codex_user_continued: surviving=L1,L3,L4` and proceed.
+If 0 slots survive, abort automatically (no point asking). On Continue,
+log the exact surviving slot ids and proceed.
 
-**Tracking finalize (end of §1.4)**: after all jobs have either
-resolved successfully or been dropped, set:
+**Tracking finalize (end of §1.4)**: after all jobs and all deferred L1
+shard waves have either resolved successfully or been dropped, set:
 
-- `lenses_run` = comma-separated lens IDs whose Codex output was
-  successfully fetched (e.g. `L1,L3,L4,L5,L6,L7`).
-- `lenses_dropped` = comma-separated lens IDs that hit the unrecoverable
-  retry path (e.g. `L2`). Empty string if none.
+- `lenses_run` = comma-separated dispatch-slot IDs whose Codex output
+  was fetched (for example `L1-s1,L1-s2,L2,L3,L4,L5,L6,L7`).
+- `lenses_dropped` = comma-separated dispatch-slot IDs that hit the
+  unrecoverable retry path. Empty string if none.
 
 These feed §1.6's summary line.
 
-### 1.5. Normalize Codex outputs (single Sonnet sub-agent)
+### 1.5. Normalize Codex outputs (single `normalizer` sub-agent)
 
-Once all Codex jobs are terminal (and any drops handled), dispatch ONE
-Sonnet `Agent` to consolidate the outputs into the standard candidate
-schema. Mirrors the Phase 1.5 ensemble adapter pattern at
+Once every dispatch slot is terminal (and any drops handled), dispatch
+ONE sub-agent with the resolved `normalizer` role to consolidate the outputs
+into the standard
 `fragments/02-ensemble-adapter.md` §1.5.5.
 
-Concatenate all surviving lens outputs with lens-id headers:
+Concatenate all surviving outputs in dispatch-slot order with exact
+slot headers:
 
 ```
-=== L1 (diff-local) ===
-<contents of codex_output_L1>
+=== L1-s1 (diff-local shard 1) ===
+<value from codex_outputs["L1-s1"]>
+
+=== L1-s2 (diff-local shard 2) ===
+<value from codex_outputs["L1-s2"]>
 
 === L2 (structural) ===
-<contents of codex_output_L2>
+<value from codex_outputs["L2"]>
 
 ...
 ```
@@ -383,19 +420,20 @@ Dispatch with role `normalizer` (default claude:sonnet),
 `subagent_type: general-purpose`.
 Prompt essence:
 
-> You are normalizing 7 (or fewer if any were skipped/dropped) Codex
-> lens outputs into the matthewsreview candidate schema. Each output is
-> freeform Markdown/text describing findings; your job is to extract
-> concrete candidates and tag them with the lens that produced them.
+> You are normalizing all surviving Codex dispatch-slot outputs into
+> the matthewsreview candidate schema. Each output is freeform
+> Markdown/text describing findings; your job is to extract concrete
+> candidates and tag them with the logical lens that produced them.
 >
-> Inputs (concatenated with `=== L<N> (<name>) ===` headers):
+> Inputs (concatenated with exact `=== <slot> (<name>) ===` headers):
 >
 > ```
 > <concatenated codex outputs>
 > ```
 >
 > Per-lens routing:
-> - L1 → `source_family: "diff-family"`, `impact_type: "correctness"` (default).
+> - L1 or L1-sN → `source_family: "diff-family"`,
+>   `impact_type: "correctness"` (default).
 > - L2 → `source_family: "structural-family"`, `impact_type: "correctness"`.
 > - L3 → `source_family: "policy-family"`. `impact_type` per L3's rule
 >   (correctness if rule is runtime-impactful, else policy).
@@ -429,7 +467,7 @@ Prompt essence:
 >   "origin": "introduced_by_pr" | "pre_existing" | "unknown",
 >   "origin_confidence": "high" | "medium" | "low",
 >   "source_family": "<per the routing table above>",
->   "sources": ["L<N>-<lens-name>"]
+>   "sources": ["<canonical logical lens id, never the shard slot>"]
 > }
 > ```
 >
@@ -480,8 +518,8 @@ else
             >> "$trace_log_path"
         internal_candidates="[]"
     else
-        # Schema-guard repair for missing location info — schema requires
-        # file non-null and line_range as [int,int] with items >= 1.
+        # Schema-guard location shape: file remains non-null; line_range is
+        # nullable when the normalizer cannot establish a trustworthy line.
         # Drop non-object array elements first: a normalizer that returned
         # `["no findings"]` or `[{...}, "extra prose"]` would otherwise
         # reach the `. + {file: ...}` projection and crash jq with "string
@@ -493,7 +531,7 @@ else
             | select(type == "object")
             | . + {
                 file:       (.file // "(unknown)"),
-                line_range: (.line_range // [1,1])
+                line_range: (.line_range // null)
               }
           ]
         ')
@@ -507,8 +545,9 @@ else
 fi
 ```
 
-Log a one-line `trace.md` note per repaired candidate (file/line_range
-sentinel applied) so the user knows where the ambiguity came from.
+Preserving `line_range: null` is intentional: validators can relocate
+the claim from its file and the renderer omits a line citation. Never
+replace unknown location data with `[1,1]`.
 
 ### 1.5.2. Join + assign IDs + post-processing + batched add-findings
 
@@ -531,7 +570,7 @@ Refer to `fragments/01-detection.md` §1.5 for the exact jq/source-family
 canonicalization scaffolding — codex-review uses the same helpers and
 the same join step. The only difference is the candidate origin: instead
 of being pooled from per-lens `Agent` outputs, they come from the
-single combined Sonnet normalizer above. The post-processing chain is
+single combined `normalizer`-role output above. The post-processing chain is
 identical.
 
 **Capture `candidate_count`** after `--add-findings` returns so §1.6's
@@ -550,6 +589,7 @@ collisions — are excluded.)
 ### 1.5.3. Clean up Codex prompt files
 
 ```bash
+rm -rf -- "$codex_dispatch_scratch"
 rm -f "/tmp/matthews-review-codex-${review_id}-L"*.md \
       "/tmp/matthews-review-codex-${review_id}-L"*.out.json
 ```
@@ -567,18 +607,27 @@ phase_1_elapsed=$(( $(date +%s) - phase_1_start_epoch ))
 # (parseable but wrong-shape) shows up in the rendered phase summary
 # rather than only in trace.md. Zero on a healthy run.
 normalizer_non_object_dropped=$(grep -c '^phase_1_codex_normalizer_non_object_dropped:' "$trace_log_path" 2>/dev/null || true)
+lens_dispatch_failures=$(jq -nr --arg dropped "$lenses_dropped" \
+  '$dropped | split(",") | map(select(length > 0)) | length')
 
 log-phase.sh \
   --review-dir "$review_dir" --phase 1 --name codex-detection \
   --elapsed "$phase_1_elapsed" \
-  --summary "lenses_run=$lenses_run; lenses_dropped=$lenses_dropped; candidates=$candidate_count; normalizer_non_object_dropped=$normalizer_non_object_dropped"
+  --summary "lenses_run=$lenses_run; lenses_dropped=$lenses_dropped; candidates=$candidate_count; normalizer_non_object_dropped=$normalizer_non_object_dropped; lens_dispatch_failures=$lens_dispatch_failures"
 
 log-phase.sh \
   --review-dir "$review_dir" --phase 1 --record "$(jq -nc \
     --arg name codex-detection \
     --argjson elapsed "$phase_1_elapsed" \
     --argjson added "$candidate_count" \
-    '{name:$name, elapsed_sec:$elapsed, counts_by_state:{open:$added}, counts_by_disposition:{pending_validation:$added}, delta:"+\($added) codex"}')"
+    --argjson lens_failures "$lens_dispatch_failures" \
+    --argjson candidate_failures "$normalizer_non_object_dropped" \
+    '{name:$name, elapsed_sec:$elapsed,
+      counts_by_state:{open:$added},
+      counts_by_disposition:{pending_validation:$added},
+      lens_dispatch_failures:$lens_failures,
+      candidate_drop_failures:$candidate_failures,
+      delta:"+\($added) codex"}')"
 ```
 
 `$lenses_run` is the comma-separated list of surviving lens IDs (e.g.

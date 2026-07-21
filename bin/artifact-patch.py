@@ -1001,6 +1001,21 @@ def cmd_set_scores(args):
         )
         return c.EXIT_USAGE
 
+    if len(tuples) != args.expected:
+        received_ids = [
+            (t.get("id") if isinstance(t, dict) and t.get("id") else f"<#{i}>")
+            for i, t in enumerate(tuples)
+        ]
+        c.err_prompt(
+            f"--set-scores expected {args.expected} tuple(s) but received {len(tuples)}",
+            context=(
+                f"received tuple ids: {received_ids}"
+                if received_ids else "received empty tuple array"
+            ),
+            action="re-dispatch scoring for the missing ids before writing any scores."
+        )
+        return c.EXIT_EXPECTED_MISMATCH
+
     artifact = _load_or_fail(args.path)
     seen = set()
     for idx, tup in enumerate(tuples):
@@ -1170,13 +1185,10 @@ def cmd_apply_decisions(args):
         if tup.get("actionability") is not None:
             set_pairs.append(("actionability", tup["actionability"]))
 
-        # confirmed_strength: tuple override beats derived. `null` from the
-        # tuple counts as an explicit override (e.g., downgrading from a
-        # prior-phase classification); use a sentinel check.
-        if "confirmed_strength" in tup:
-            set_pairs.append(("confirmed_strength", tup["confirmed_strength"]))
-        else:
-            set_pairs.append(("confirmed_strength", derived["confirmed_strength"]))
+        # confirmed_strength is always derived from this artifact's resolved
+        # phase4_bands. Validator-normalizer hints may reflect default bands
+        # and must never override the gate-authoritative value.
+        set_pairs.append(("confirmed_strength", derived["confirmed_strength"]))
 
         # reason: if the tuple provides one use it, else fill a disposition-
         # appropriate default. Matches the prose in 05-validation step 4.4.
@@ -2256,11 +2268,18 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    # --expected is meaningful only in --apply-decisions and
-    # --apply-auto-rec-promotions modes. Reject early if it's set without
-    # one of those so a typo doesn't silently become a no-op.
-    if args.expected and args.apply_decisions is None and args.apply_auto_rec_promotions is None:
-        parser.error("--expected is only valid with --apply-decisions or --apply-auto-rec-promotions")
+    # --expected is meaningful only for guarded batch modes. Reject early
+    # elsewhere so a typo cannot silently become a no-op.
+    expected_mode = (
+        args.apply_decisions is not None
+        or args.apply_auto_rec_promotions is not None
+        or args.set_scores is not None
+    )
+    if args.expected and not expected_mode:
+        parser.error(
+            "--expected is only valid with --apply-decisions, "
+            "--apply-auto-rec-promotions, or --set-scores"
+        )
     if args.expected < 0:
         parser.error("--expected must be >= 0")
 
@@ -2341,6 +2360,8 @@ def main():
                 return c.EXIT_USAGE
             return cmd_apply_auto_fix_hints(args)
         if args.set_scores is not None:
+            if args.expected <= 0:
+                parser.error("--set-scores requires --expected N with N > 0")
             if args.set or args.set_json or args.append_fix_attempt or args.finding_id:
                 parser.error("--set-scores cannot combine with --set / --set-json / --append-fix-attempt / --finding-id (tuples carry their own finding ids)")
             if args.dry_run:

@@ -29,7 +29,7 @@ Phase 1.5 pulls additional candidates from two external channels:
    posts before we fetch. Only runs when `mode == pr`. Local mode can't
    scrape a PR that doesn't exist.
 
-Both feed a single Sonnet normalizer sub-agent that emits standard
+Both feed one sub-agent using the resolved `normalizer` role, which emits standard
 candidates. The normalizer's output pools into the orchestrator-context
 `external_candidates` variable; the join step at 01-detection.md 1.5
 assigns ids and commits to `artifact.findings[]` with
@@ -37,7 +37,7 @@ assigns ids and commits to `artifact.findings[]` with
 
 **Token accounting.** Codex CLI spend is NOT logged to
 `tokens.jsonl` (it's billed by the provider externally). Only the
-Sonnet normalizer is logged, under `phase_1_5`.
+resolved `normalizer` sub-agent is logged, under `phase_1_5`.
 
 ### 1.5.1. Readiness
 
@@ -64,11 +64,43 @@ under option (b) `used_remote_ref`).
 The prompt file was already written in 01-detection.md step 1.2a (the
 readiness gate). Invoke per `codex_launch_mode`:
 
+Materialize the configured role before selecting either transport:
+
+```bash
+[[ "$role_ensemble_detect" == codex:* ]] || {
+  echo "ERROR: ensemble_detect must resolve to codex:<model>[:<effort>]." >&2
+  exit 1
+}
+ensemble_detect_spec="${role_ensemble_detect#codex:}"
+if [[ "$ensemble_detect_spec" == *:* ]]; then
+  role_ensemble_detect_model="${ensemble_detect_spec%%:*}"
+  role_ensemble_detect_effort="${ensemble_detect_spec#*:}"
+else
+  role_ensemble_detect_model="$ensemble_detect_spec"
+  role_ensemble_detect_effort=""
+fi
+```
+
+Materialize the shared size-scaled deadline **before either transport
+can poll**:
+
+```bash
+ensemble_ceiling_sec=$(( 600 + 60 * lines_changed / 1000 ))
+[[ "$ensemble_ceiling_sec" -gt 1200 ]] && ensemble_ceiling_sec=1200
+```
+
+(Default 600s + 60s per 1,000 changed lines, cap 2×.)
+
 *`codex_launch_mode == "companion"` (default on Claude Code):*
 
 ```bash
-node "$CODEX_COMPANION" task --prompt-file "/tmp/matthews-review-codex-$review_id.md" \
-  > "$scratch_dir/codex.out" 2> "$scratch_dir/codex.err"
+companion_args=(node "$CODEX_COMPANION" task \
+  --prompt-file "/tmp/matthews-review-codex-$review_id.md")
+[[ -n "${role_ensemble_detect_model:-}" ]] && \
+  companion_args+=(--model "$role_ensemble_detect_model")
+[[ -n "${role_ensemble_detect_effort:-}" ]] && \
+  companion_args+=(--effort "$role_ensemble_detect_effort")
+"${companion_args[@]}" > "$scratch_dir/codex.out" 2> "$scratch_dir/codex.err"
 ```
 
 Launch with the Bash tool using `run_in_background: true`. Capture the
@@ -78,10 +110,14 @@ returned shell id as `codex_shell_id`.
 companion absent):*
 
 ```bash
-"${MRB}agent-dispatch.sh" start --engine codex \
-  --model "${role_ensemble_detect_model:-}" --effort "${role_ensemble_detect_effort:-high}" \
+dispatch_args=("${MRB}agent-dispatch.sh" start --engine codex \
   --prompt-file "/tmp/matthews-review-codex-$review_id.md" \
-  --scratch-dir "$scratch_dir"
+  --scratch-dir "$scratch_dir")
+[[ -n "${role_ensemble_detect_model:-}" ]] && \
+  dispatch_args+=(--model "$role_ensemble_detect_model")
+[[ -n "${role_ensemble_detect_effort:-}" ]] && \
+  dispatch_args+=(--effort "$role_ensemble_detect_effort")
+"${dispatch_args[@]}"
 ```
 
 (`role_ensemble_detect_model`/`role_ensemble_detect_effort` come from
@@ -122,17 +158,9 @@ run completes and the final structured report is flushed. A zero-byte
 `codex.out` mid-run is normal, not a failure signal — do not
 short-circuit polling based on it.
 
-Deadline: size-scaled, not flat — observed manual extension on a
-10.7k-line PR:
-
-```bash
-ensemble_ceiling_sec=$(( 600 + 60 * lines_changed / 1000 ))
-[[ "$ensemble_ceiling_sec" -gt 1200 ]] && ensemble_ceiling_sec=1200
-```
-
-(default 600s + 60s per 1,000 changed lines, cap 2×.) On timeout,
-capture whatever output exists, mark the reviewer as `timed_out`, and
-continue.
+The deadline is the `ensemble_ceiling_sec` value materialized before
+launch in §1.5.2. On timeout, capture whatever output exists, mark the
+reviewer as `timed_out`, and continue.
 
 Capture these variables as the background shell resolves — the status
 computation below reads each one by name, so every branch must set
@@ -260,7 +288,7 @@ fi
 If at least one input has content, dispatch the normalizer in §1.5.5
 below.
 
-### 1.5.5. Normalize all external inputs (single Sonnet sub-agent)
+### 1.5.5. Normalize all external inputs (single `normalizer` sub-agent)
 
 Skip this section entirely if §1.5.4b set `external_candidates="[]"`
 on the no-input early-skip path.
@@ -320,7 +348,7 @@ Dispatch with role `normalizer` (default claude:sonnet). Prompt essence:
 > `origin_confidence` is ALWAYS `"low"` for external candidates —
 > internal corroboration in Phase 4 decides whether they surface.
 
-**After the normalizer returns**, repair missing location info and
+**After the normalizer returns**, preserve missing location uncertainty and
 emit the result to `external_candidates` for the join step at
 01-detection.md step 1.5. Do NOT call `--add-finding` / `--add-findings` here.
 
@@ -343,24 +371,24 @@ fi
 ```
 
 **Schema guard for missing location info.** Schema requires `file`
-non-null and `line_range` as `[int,int]` with items `>=1`. Repair the
-normalizer's `null` fields before pooling by defaulting to a sentinel:
+non-null but accepts `line_range: null` when no trustworthy line was
+provided. Preserve null; never turn it into the real citation `[1,1]`:
 
 ```bash
 if [[ -n "$normalizer_clean" ]]; then
     external_candidates=$(printf '%s' "$normalizer_clean" | jq -c '
       [ .[] | . + {
           file:       (.file // "(unknown)"),
-          line_range: (.line_range // [1,1])
+          line_range: (.line_range // null)
         } ]
     ')
     external_candidate_count=$(jq 'length' <<<"$external_candidates")
 fi
 ```
 
-Leave a one-line `trace.md` note per repaired candidate so the user
-knows where the ambiguity came from (iterate with `jq -r` to produce
-the notes before the merge).
+The renderer omits a line suffix for null ranges, and Phase 4 validators
+relocate the claim from the file and claim text. No synthetic trace note
+or line citation is needed.
 
 ### 1.5.6. Log normalizer tokens
 
@@ -386,18 +414,29 @@ dir for post-mortem inspection.
 
 ```bash
 phase_1_5_elapsed=$(( $(date +%s) - phase_1_5_start_epoch ))
+ensemble_lens_failures=0
+[[ "$codex_status" == "success" ]] || ensemble_lens_failures=1
+ensemble_candidate_drop_failures=$(grep -c \
+  '^phase_1_5_normalizer_unparseable:' "$trace_log_path" 2>/dev/null || true)
 
 log-phase.sh \
   --review-dir "$review_dir" --phase 1_5 --name ensemble-adapter \
   --elapsed "$phase_1_5_elapsed" \
-  --summary "codex=$codex_status; scrape_bots=$scrape_bot_count; normalized=$external_candidate_count"
+  --summary "codex=$codex_status; scrape_bots=$scrape_bot_count; normalized=$external_candidate_count; lens_dispatch_failures=$ensemble_lens_failures; candidate_drop_failures=$ensemble_candidate_drop_failures"
 
 log-phase.sh \
   --review-dir "$review_dir" --phase 1_5 --record "$(jq -nc \
     --arg name ensemble-adapter \
     --argjson elapsed "$phase_1_5_elapsed" \
     --argjson added "$external_candidate_count" \
-    '{name:$name, elapsed_sec:$elapsed, counts_by_state:{open:$added}, counts_by_disposition:{pending_validation:$added}, delta:"+\($added) external"}')"
+    --argjson lens_failures "$ensemble_lens_failures" \
+    --argjson candidate_failures "$ensemble_candidate_drop_failures" \
+    '{name:$name, elapsed_sec:$elapsed,
+      counts_by_state:{open:$added},
+      counts_by_disposition:{pending_validation:$added},
+      delta:"+\($added) external",
+      lens_dispatch_failures:$lens_failures,
+      candidate_drop_failures:$candidate_failures}')"
 ```
 
 Where `codex_status` is one of `success|failed|skipped|timed_out`.

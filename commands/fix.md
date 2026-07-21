@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(doctor.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(claude-md-paths.sh:*), Bash(staleness.sh:*), Bash(external-scrape.sh:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(origin-crosscheck.sh:*), Bash(assign-finding-ids.sh:*), Bash(group-fixes.py:*), Bash(repo-slug.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(timeout:*), Bash(sleep:*), Bash(kill:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(mktemp:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(node:*), Bash(find:*), AskUserQuestion, Agent, Read, Edit, Write, BashOutput, KillShell
+allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(review-root.sh:*), Bash(doctor.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(claude-md-paths.sh:*), Bash(staleness.sh:*), Bash(external-scrape.sh:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(origin-crosscheck.sh:*), Bash(assign-finding-ids.sh:*), Bash(group-fixes.py:*), Bash(repo-slug.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(timeout:*), Bash(sleep:*), Bash(kill:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(mktemp:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(node:*), Bash(find:*), AskUserQuestion, Agent, Read, Edit, Write, BashOutput, KillShell
 argument-hint: "[threshold] [--granular-commits] [--profile <name>] [--models \"<csv>\"]"
 description: Apply auto-fixable code review findings. Dispatches fix-group agents, post-fix-reviews the working tree, commits survivors, reverts regressions, updates the artifact.
 disable-model-invocation: false
@@ -94,11 +94,11 @@ Parse `$ARGUMENTS` (whitespace-split):
 - `--models "<csv>"` → `models_csv=<csv>` (else unset).
 - Any other token → stop and ask the user to clarify.
 
-If no integer was provided, leave `threshold` unset — step 7.2b sets it
+If no integer was provided, leave `threshold` unset — step 7.2c sets it
 from the resolved `gates.fix_threshold` (default 60).
 
 Capture all four in your working context before executing Phase 7.
-`profile` and `models_csv` are consumed by Phase 7 step 7.2b (model
+`profile` and `models_csv` are consumed by Phase 7 step 7.2c (model
 plan resolution) — a `:fix` weeks after the review resolves against
 the config of the day, not the review-time plan.
 

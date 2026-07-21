@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(doctor.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(repo-slug.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(cat:*), Bash(printf:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(tr:*), Bash(mktemp:*), Read, AskUserQuestion
+allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(review-root.sh:*), Bash(doctor.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(repo-slug.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(cat:*), Bash(printf:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(tr:*), Bash(mktemp:*), Read, AskUserQuestion
 argument-hint: "<finding_id> [--reason \"...\"] [--fix-hint \"...\"] [--force] [--defer-publish] [--profile <name>] [--models \"<csv>\"]"
 description: Promote a finding to auto-fixable via human override. Patches artifact, re-renders, re-publishes to PR.
 disable-model-invocation: false
@@ -91,7 +91,7 @@ canned options, use the option text as `reason`. Capture the final
 ### 2. Locate the artifact
 
 ```bash
-reviews_root="${MATTHEWS_REVIEW_REVIEWS_ROOT:-$HOME/.matthews-reviews}"
+reviews_root=$(review-root.sh)
 head_branch=$(git rev-parse --abbrev-ref HEAD)
 repo_root=$(git rev-parse --show-toplevel)
 repo_slug=$(repo-slug.sh --repo-root "$repo_root")
@@ -113,28 +113,12 @@ artifact_path="$review_dir/artifact.json"
 trace_log_path="$review_dir/trace.md"
 ```
 
-### 2b. Resolve the model plan (silent)
+### 2b. Preserve review-time configuration provenance
 
-Resolve fresh for this invocation and store it — keep the artifact's
-`model_plan` current for the `:fix` that follows. No table render:
-`:promote` dispatches no sub-agents and is often looped with
-`--defer-publish`, so the table would be per-call noise.
-
-```bash
-plan_args=(--repo-root "$repo_root" --orchestrator "$harness_id")
-[[ -n "${profile:-}" ]] && plan_args+=(--profile "$profile")
-[[ -n "${models_csv:-}" ]] && plan_args+=(--models "$models_csv")
-model_plan_json=$(review-config.sh "${plan_args[@]}") || exit $?
-plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX)
-printf '%s' "$model_plan_json" > "$plan_tmp"
-artifact-patch.py --path "$artifact_path" \
-  --set-json model_plan=@"$plan_tmp" \
-  --set-json "gates=$(printf '%s' "$model_plan_json" | jq -c '.gates')"
-rm -f "$plan_tmp"
-```
-
-On non-zero from `review-config.sh`: surface stderr verbatim, stop.
-`$harness_id` is the Dispatch Protocol identity.
+`:promote` changes finding metadata only. Do not resolve or overwrite
+`model_plan` or `gates`: those fields record the configuration that produced
+the existing scores and dispositions. The subsequent `:fix` command resolves
+and stores its own current plan before dispatching any agents.
 
 Capture paths. Schema-validate as a safety rail:
 

@@ -39,10 +39,10 @@ Get every finding that still needs a `score_phase3` (i.e., not pre-existing-
 overridden):
 
 ```bash
-artifact-read.sh \
+scoring_ids=$(artifact-read.sh \
   --path "$artifact_path" \
-  --filter '[.findings[] | select(.disposition != "pre_existing_report") | .id]'
-```
+  --filter '[.findings[] | select(.disposition != "pre_existing_report") | .id]')
+scoring_count=$(printf '%s' "$scoring_ids" | jq 'length')
 
 Capture as `scoring_ids`.
 
@@ -59,12 +59,13 @@ be all-gate skip too).
 
 Split `scoring_ids` into chunks of **at most 25 candidates per chunk**,
 balanced as evenly as feasible (e.g. 22 → one chunk of 22; 50 → 25/25;
-60 → 20/20/20). For each chunk, launch ONE Sonnet sub-agent. Fire all
-chunk-agents from a single orchestrator turn so they run concurrently —
-same parallel fan-out pattern as Phase 1 lenses, but at chunk granularity.
+60 → 20/20/20). For each chunk, DISPATCH one sub-agent with role
+`scoring` (default `claude:sonnet`). Fire all chunk-agents from a single
+orchestrator turn so they run concurrently — same parallel fan-out
+pattern as Phase 1 lenses, but at chunk granularity.
 
 **Why chunked, not per-finding.** Chunk into batches of at most 25
-candidates per Sonnet sub-agent. Unbounded batches collapse score
+candidates per scoring sub-agent. Unbounded batches collapse score
 resolution onto the rubric anchors (every score landing on
 0/25/50/75/100) and stop using parallelism on large reviews — the
 25-cap restores both. The Phase-3 gate is a sharp cutoff at the resolved
@@ -167,7 +168,8 @@ For each chunk-agent's result:
     printf '%s' "$all_chunk_tuples_json" > "$scores_tmp"
     artifact-patch.py \
       --path "$artifact_path" \
-      --set-scores @"$scores_tmp"
+      --set-scores @"$scores_tmp" \
+      --expected "$scoring_count"
     rm -f "$scores_tmp"
     ```
 

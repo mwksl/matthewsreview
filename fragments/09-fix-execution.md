@@ -124,14 +124,15 @@ on disk.
 
 ### 8.5. Dispatch parallel fix-group agents (one turn)
 
-> **One turn for all fix-group `Agent` dispatches — not one turn per
+> **One turn for all fix-group DISPATCH calls — not one turn per
 > group.** Phase 8 wall-clock latency is `max(group_durations)`, not
 > `sum(group_durations)`. Serializing turns the fix run into a per-group
 > timer; each group's edits are independent.
 
-Fan out one sub-agent per group, all in a single batch (Prelude §3.4).
-Each agent uses `subagent_type: general-purpose`, role `fix` (default
-claude:opus), and receives the full §19.8 input per-group.
+Fan out one `DISPATCH(fix, prompt, group_id)` per group, all in a single
+batch (Prelude §3.4). Role `fix` (default `claude:opus`) is the only
+write lane; subprocess dispatch MUST append `--write`. Each sub-agent
+receives the full §19.8 input per group.
 
 **Prompt body per fix-group agent** (inline for each group):
 
