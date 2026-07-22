@@ -142,7 +142,6 @@ def _semantic_gates_errors(gates, prefix):
             isinstance(value, (int, float)) and not isinstance(value, bool)
             for value in bands
         )
-        and len(set(bands)) == 3
         and not bands[0] < bands[1] < bands[2]
     ):
         return [

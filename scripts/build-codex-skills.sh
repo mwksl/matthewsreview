@@ -81,16 +81,6 @@ for cmd_file in "$REPO"/commands/*.md; do
     skill_dir="$TMP/matthewsreview-$cmd"
     mkdir -p "$skill_dir"
 
-    # Strip only the validated first frontmatter pair from the body.
-    body=$(awk -v frontmatter_end="$frontmatter_end" \
-        'NR > frontmatter_end { print }' "$cmd_file")
-    # A generated skill runs from the repository being reviewed. Bake every
-    # phase/lens fragment path so Codex never resolves it against that cwd.
-    # Protect ./fragments first; a direct replacement would leave ./<abs>.
-    fragment_prefix="$REPO/fragments/"
-    body="${body//.\/fragments\//__MREVIEW_FRAGMENT_ROOT__/}"
-    body="${body//fragments\//__MREVIEW_FRAGMENT_ROOT__/}"
-    body="${body//__MREVIEW_FRAGMENT_ROOT__\//$fragment_prefix}"
 
     {
         printf -- '---\n'
@@ -120,7 +110,24 @@ for cmd_file in "$REPO"/commands/*.md; do
 > ---
 
 PREAMBLE
-        printf '%s\n' "$body"
+        MREVIEW_FRAGMENT_PREFIX="$REPO/fragments/" awk \
+            -v frontmatter_end="$frontmatter_end" '
+            function replace_all(value, needle, replacement, pos, out) {
+                out = ""
+                while ((pos = index(value, needle)) > 0) {
+                    out = out substr(value, 1, pos - 1) replacement
+                    value = substr(value, pos + length(needle))
+                }
+                return out value
+            }
+            NR > frontmatter_end {
+                marker = "__MREVIEW_FRAGMENT_ROOT__/"
+                line = replace_all($0, "./fragments/", marker)
+                line = replace_all(line, "fragments/", marker)
+                line = replace_all(line, marker, ENVIRON["MREVIEW_FRAGMENT_PREFIX"])
+                print line
+            }
+        ' "$cmd_file"
     } > "$skill_dir/SKILL.md"
 
     printf 'built %s\n' "$OUT/matthewsreview-$cmd/SKILL.md"

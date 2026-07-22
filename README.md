@@ -182,4 +182,4 @@ matthewsreview/
 
 ## Status
 
-Current release: **v1.0.3** — CodeRabbit/dogfood hardening, comprehensive lifecycle/finalization/dispatch regressions, exact-session Claude orchestrator telemetry, rebrand + multi-harness (Claude Code / Codex / Oh My Pi), per-stage model selection, and telemetry-informed efficiency tuning. Fork of adamsreview v0.4.3 by Adam Miller.
+Current release: **v1.0.4** — Bash 3.2 Codex-skill generation no longer stalls macOS CI; CodeRabbit/dogfood hardening, lifecycle/finalization/dispatch regressions, exact-session Claude orchestrator telemetry, rebrand + multi-harness (Claude Code / Codex / Oh My Pi), per-stage model selection, and telemetry-informed efficiency tuning. Fork of adamsreview v0.4.3 by Adam Miller.
