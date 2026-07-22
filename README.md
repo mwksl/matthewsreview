@@ -141,7 +141,7 @@ field remains absent; their dispatched-agent usage still appears under
 ## Maintenance
 
 - **Version bumps**: patch for fixes, minor for new commands or breaking output-shape changes — bump `.claude-plugin/plugin.json` or `/plugin marketplace update` / `omp plugin upgrade` won't pick up changes.
-- **CI**: `.github/workflows/smoke.yml` runs `test/smoke.sh` (493 assertions) on ubuntu + macOS, plus shellcheck and a bash-3.2 portability gate. Run `test/smoke.sh` locally before pushing.
+- **CI**: `.github/workflows/smoke.yml` runs `test/smoke.sh` (495 assertions) on ubuntu + macOS, plus shellcheck and a bash-3.2 portability gate. Run `test/smoke.sh` locally before pushing.
 - **Upgrading**: Claude Code `/plugin marketplace update matthewsreview && /plugin update`; omp `omp plugin upgrade matthewsreview@matthewsreview`; Codex `git pull && ./install.sh --codex`.
 - **Working on the pipeline itself**: read `AGENTS.md` first. `docs/state-and-gates.md` (state model, gates, lanes) is the normative spec; `docs/pipeline.md` has phase trees; `docs/helpers.md` the helper inventory.
 
@@ -182,4 +182,4 @@ matthewsreview/
 
 ## Status
 
-Current release: **v1.0.5** — temp-file/signal hygiene and jq entry guards for `freshness-gate.sh` and `codex-poll.sh`, plus behavioral coverage for the dispatch engine's rapid-completion, malformed-output, malformed-terminal, watchdog-verdict, and parallel-isolation paths (smoke 483 → 493). Previously (v1.0.4): Bash 3.2 Codex-skill generation no longer stalls macOS CI; CodeRabbit/dogfood hardening, lifecycle/finalization/dispatch regressions, exact-session Claude orchestrator telemetry, rebrand + multi-harness (Claude Code / Codex / Oh My Pi), per-stage model selection, and telemetry-informed efficiency tuning. Fork of adamsreview v0.4.3 by Adam Miller.
+Current release: **v1.0.6** — backlog close-out: `comment-freshness.sh` missing-dep exits now honor the exit-5 contract, signals re-raise as true signal deaths (WIFSIGNALED) after cleanup, behavioral coverage for codex-poll's stalled-vs-desynced fork, timing-independent dispatch assertions, and `head -60` contract reads with every helper's exit docs inside the window (smoke 493 → 495). Previously (v1.0.5): temp-file/signal hygiene and jq entry guards for `freshness-gate.sh` and `codex-poll.sh`, plus behavioral coverage for the dispatch engine's rapid-completion, malformed-output, malformed-terminal, watchdog-verdict, and parallel-isolation paths; (v1.0.4): Bash 3.2 Codex-skill generation no longer stalls macOS CI, rebrand + multi-harness (Claude Code / Codex / Oh My Pi), per-stage model selection, telemetry-informed efficiency tuning. Fork of adamsreview v0.4.3 by Adam Miller.
