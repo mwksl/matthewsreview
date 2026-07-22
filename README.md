@@ -141,7 +141,7 @@ field remains absent; their dispatched-agent usage still appears under
 ## Maintenance
 
 - **Version bumps**: patch for fixes, minor for new commands or breaking output-shape changes — bump `.claude-plugin/plugin.json` or `/plugin marketplace update` / `omp plugin upgrade` won't pick up changes.
-- **CI**: `.github/workflows/smoke.yml` runs `test/smoke.sh` (416 assertions) on ubuntu + macOS, plus shellcheck and a bash-3.2 portability gate. Run `test/smoke.sh` locally before pushing.
+- **CI**: `.github/workflows/smoke.yml` runs `test/smoke.sh` (483 assertions) on ubuntu + macOS, plus shellcheck and a bash-3.2 portability gate. Run `test/smoke.sh` locally before pushing.
 - **Upgrading**: Claude Code `/plugin marketplace update matthewsreview && /plugin update`; omp `omp plugin upgrade matthewsreview@matthewsreview`; Codex `git pull && ./install.sh --codex`.
 - **Working on the pipeline itself**: read `AGENTS.md` first. `docs/state-and-gates.md` (state model, gates, lanes) is the normative spec; `docs/pipeline.md` has phase trees; `docs/helpers.md` the helper inventory.
 
@@ -182,4 +182,4 @@ matthewsreview/
 
 ## Status
 
-Current release: **v1.0.2** — exact-session Claude orchestrator telemetry, rebrand + multi-harness (Claude Code / Codex / Oh My Pi), per-stage model selection, telemetry-informed efficiency tuning, and hardened cross-harness dispatch/install contracts. Fork of adamsreview v0.4.3 by Adam Miller.
+Current release: **v1.0.3** — CodeRabbit/dogfood hardening, comprehensive lifecycle/finalization/dispatch regressions, exact-session Claude orchestrator telemetry, rebrand + multi-harness (Claude Code / Codex / Oh My Pi), per-stage model selection, and telemetry-informed efficiency tuning. Fork of adamsreview v0.4.3 by Adam Miller.

@@ -1,6 +1,6 @@
 ---
-allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(review-root.sh:*), Bash(doctor.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(repo-slug.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(cat:*), Bash(printf:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(tr:*), Bash(mktemp:*), Read, AskUserQuestion
-argument-hint: "<finding_id> [--reason \"...\"] [--fix-hint \"...\"] [--force] [--defer-publish] [--profile <name>] [--models \"<csv>\"]"
+allowed-tools: Bash(artifact-read.sh:*), Bash(review-root.sh:*), Bash(doctor.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(cat:*), Bash(printf:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(tr:*), Bash(mktemp:*), Read, AskUserQuestion
+argument-hint: "<finding_id> [--reason \"...\"] [--fix-hint \"...\"] [--force] [--defer-publish]"
 description: Promote a finding to auto-fixable via human override. Patches artifact, re-renders, re-publishes to PR.
 disable-model-invocation: false
 ---
@@ -34,16 +34,14 @@ helper-script error-as-prompt).**
   at `disposition=disproven` (validator found positive evidence it's
   wrong). Without `--force`, disproven findings reject promotion with
   a user-visible message pointing to the validator's conclusion.
-- `--profile <name>` / `--models "<csv>"` (optional) — model-plan
-  overrides, resolved fresh at step 2b. Rarely needed here (`:promote`
-  dispatches no sub-agents) but keeps the artifact's plan current.
-- `--defer-publish` (optional) — skip steps 7 (re-render), 8
-  (re-publish to PR), and 10 (user-visible summary). The artifact
-  patch and trace entry still land. Useful for scripted promote
-  loops where render+publish should run once at the end rather than
-  per-iteration; `/matthewsreview:walkthrough` (§28) uses this
-  internally. When set, the caller is responsible for running
-  `artifact-render.py` and `artifact-publish.sh` afterward.
+- `--defer-publish` (optional) — patch and trace now, but defer token
+  tallies, render, and publish so a caller can batch multiple promotions.
+  `/matthewsreview:walkthrough` uses this internally. After all deferred
+  promotes land, the caller MUST run exactly one tally pair — first
+  `tally-subagent-tokens.sh`, then `orchestrator-tokens.sh` — immediately
+  before its single final `artifact-render.py` call, and publish afterward.
+  Each tally failure is nonfatal and must be logged before continuing to
+  render.
 
 Does NOT run `/matthewsreview:fix` for you. Run it yourself when you're
 ready to apply promoted findings.
@@ -57,19 +55,28 @@ headings.
 
 ### 1. Parse arguments
 
-Parse `$ARGUMENTS` left-to-right, respecting `"..."` quoted values:
+Tokenize `$ARGUMENTS` left-to-right before asking for a reason, locating an
+artifact, or doing any config/tree work or mutation. Respect `"..."` quoted
+values and retain whether each token was quoted until value validation is
+complete:
 
-- First token matching `^F[0-9]+$` → `finding_id`; a second positional
-  finding id is a usage error.
+- First token matching `^F[0-9]+$` → `finding_id`.
 - `--reason "..."` → `reason` (strip surrounding quotes).
 - `--fix-hint "..."` → `fix_hint` (strip surrounding quotes). Default:
   empty string (treated as "absent" throughout — the jq at step 5
   omits the key entirely when empty).
-- `--profile <name>` → `profile`; `--models "<csv>"` → `models_csv`.
-  Each flag requires a following non-empty value.
+- For either value-taking flag, an unquoted next token beginning with `--`
+  cannot satisfy the value; treat the flag as missing its value and continue
+  classifying that token as an option. A quoted value may begin with `--`.
 - `--force` → `force=true` (else `false`).
 - `--defer-publish` → `defer_publish=true` (else `false`).
-- Any unknown option or unconsumed token → stop with a usage error.
+- A second finding id, a repeated flag, a missing/empty flag value (including
+  an unquoted option-looking value), an unknown option, or any unconsumed token
+  is a usage error.
+
+Complete the entire parse before continuing. On any usage error, print the
+valid invocation and exit with usage code 64; do not look up or mutate an
+artifact.
 
 If no `finding_id` was provided, error-as-prompt:
 
@@ -134,11 +141,39 @@ tool to diagnose it.
 
 Read `fragments/promote-core.md` and execute steps 3, 4, 4.5, 5, 6, 9 inline.
 
+### 6.5. Refresh cumulative token tallies
+
+Reaching this step means the shared promote core patched the artifact
+successfully. When `defer_publish == false`, re-tally immediately before
+render so the report includes cumulative spend:
+
+```bash
+tally-subagent-tokens.sh \
+    --tokens-log "$review_dir/tokens.jsonl" \
+    --artifact   "$artifact_path" \
+    2>>"$trace_log_path" || printf 'promote_tally_failed\n' >> "$trace_log_path"
+
+review_started_at=$(jq -r '.review_started_at // empty' "$artifact_path")
+
+orchestrator-tokens.sh \
+    --artifact "$artifact_path" \
+    --since    "$review_started_at" \
+    2>>"$trace_log_path" || printf 'promote_orchestrator_tally_failed\n' >> "$trace_log_path"
+```
+
+Run the sub-agent tally first and the orchestrator tally second. Either
+failure is nonfatal observability loss: log it and continue to render.
+
+When `defer_publish == true`, do not run either helper here. The caller
+inherits the explicit batch contract from the argument section: after all
+deferred patches, run exactly one pair in the same order immediately before
+the one final render. `/matthewsreview:walkthrough` §6.1 is that pair.
+
 ### 7. Re-render `artifact.md`
 
 Skip this step entirely when `defer_publish == true` — jump to step
-8. The caller is expected to run `artifact-render.py` once after
-all deferred promotes have landed.
+8. The caller runs the required tally pair once after all deferred
+promotes, then calls `artifact-render.py` exactly once.
 
 ```bash
 artifact-render.py \
@@ -194,7 +229,7 @@ caller's own summary (e.g. `/matthewsreview:walkthrough`'s decisions
 log) isn't drowned out:
 
 ```
-Promoted $finding_id (deferred — artifact patched, render/publish skipped).
+Promoted $finding_id (deferred — artifact patched; tallies/render/publish delegated to caller).
 ```
 
 And skip the rest of this step.

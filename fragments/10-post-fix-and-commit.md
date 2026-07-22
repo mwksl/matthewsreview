@@ -1155,10 +1155,26 @@ abort the block. `commit_sha` from 9c distinguishes the two branches.
    ' "$artifact_path")
    ```
 
-   If none: mirror the rendered `artifact.md` to chat (full content, not
-   a summary — matches Phase 6). Then a user-visible summary. On
-   `reconciled_flag == true`, swap the first two lines for a reconcile-
-   specific summary naming the original group count and overlap:
+   If none: select the chat mirror, then emit its full content before the
+   user-visible summary:
+
+   ```bash
+   mirror_path="$review_dir/artifact.md"
+   if [[ "$mode" == "pr" \
+         && "$publish_failed" == "false" \
+         && -f "$review_dir/published.md" ]]; then
+       mirror_path="$review_dir/published.md"
+   fi
+   ```
+
+   `published.md` is the exact body selected by `artifact-publish.sh`; use it
+   after a successful PR publication so overflow compaction is identical in
+   chat and on GitHub. Local mode and failed publication keep the full
+   `artifact.md` mirror. This matches Phase 6.
+
+   Then emit the completion summary. On `reconciled_flag == true`, swap the
+   first two lines for a reconcile-specific summary naming the original group
+   count and overlap:
 
    > `/matthewsreview:fix complete (reconciled).`
    >

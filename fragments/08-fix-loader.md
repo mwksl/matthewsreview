@@ -2,17 +2,36 @@
 
 ### 7.1. Resolve argument flags
 
-Parse `$ARGUMENTS` left-to-right, respecting quoted values:
-- One non-negative integer positional token → `threshold`; a second
-  positional token is a usage error.
+Parse `$ARGUMENTS` left-to-right before any artifact lookup,
+`review-config.sh` call, or git/tree work:
+
+- Accept at most one positional threshold token. Validate the complete
+  original token as a finite JSON number in the inclusive range `[0, 100]`:
+
+  ```bash
+  jq -en --arg token "$token" '
+    ($token | fromjson) as $n
+    | (($n | type) == "number"
+       and (($n - $n) == 0)
+       and $n >= 0
+       and $n <= 100)
+  ' >/dev/null 2>&1
+  ```
+
+  Keep the original token as `threshold`; do not coerce it to an integer or
+  round it, so decimal thresholds retain their value. A second positional
+  token is a duplicate-threshold usage error.
 - `--granular-commits` → `granular_commits=true` (else `false`).
 - `--profile <name>` → `profile`; `--models "<csv>"` → `models_csv`.
   Each value-taking flag requires the next non-empty token.
-- Any unknown option or unconsumed token → stop with a usage error.
+- Reject a repeated flag, an unknown option, an unconsumed token, a
+  non-number, a non-finite number, or a number outside `[0, 100]` with a
+  usage error naming the valid invocation.
 
-If no integer was provided, `threshold` is set by step 7.2c from the
-resolved `gates.fix_threshold` (default 60). Capture `profile`,
-`models_csv`, `threshold`, and `granular_commits` in working context.
+Do not continue past parsing on any error. If no threshold was provided,
+step 7.2c sets it from the freshly resolved operational
+`gates.fix_threshold` (default 60). Capture `profile`, `models_csv`,
+`threshold`, and `granular_commits` in working context.
 
 ### 7.2. Locate the artifact via `latest.txt`
 
@@ -67,26 +86,80 @@ surface the validator error and recovery copy to the user.
 
 ### 7.2c. Resolve the model plan
 
-Resolve fresh for this invocation (a `:fix` days after the review uses
-today's config, not the review-time plan), store it, and print the
-table so the user sees which models the fix agents will run:
+Resolve runtime roles/tiers and operational thresholds fresh for this
+invocation. Read repo configuration from the artifact's trusted comparison
+commit, never from the reviewed worktree. Preserve the classification
+provenance that produced the artifact's existing scores and dispositions:
+`phase3_gate` and `phase4_bands` remain the artifact values (or their
+normative defaults when absent), while `fix_threshold` and
+`walkthrough_threshold` come from the current trusted config.
+
+Persist the merged plan and its exact `.gates` object together so
+`model_plan.gates` and top-level `gates` cannot contradict one another:
 
 ```bash
-plan_args=(--repo-root "$repo_root" --orchestrator "$harness_id")
+if ! comparison_ref=$(
+  artifact-read.sh \
+    --path "$artifact_path" \
+    --filter '.base_context.comparison_ref' |
+  jq -er 'select(type == "string" and length > 0)'
+); then
+    printf '%s\n' \
+      'ERROR: artifact is missing trusted base_context.comparison_ref.' \
+      'Action: run /matthewsreview:review again before using /matthewsreview:fix.' >&2
+    exit 1
+fi
+classification_gates_json=$(artifact-read.sh \
+  --path "$artifact_path" \
+  --filter '{
+    phase3_gate: (.gates.phase3_gate // .model_plan.gates.phase3_gate // 45),
+    phase4_bands: (.gates.phase4_bands // .model_plan.gates.phase4_bands // [45, 60, 75])
+  }') || exit $?
+
+plan_args=(
+  --repo-root "$repo_root"
+  --orchestrator "$harness_id"
+  --repo-config-ref "$comparison_ref"
+)
 [[ -n "${profile:-}" ]] && plan_args+=(--profile "$profile")
 [[ -n "${models_csv:-}" ]] && plan_args+=(--models "$models_csv")
-model_plan_json=$(review-config.sh "${plan_args[@]}") || exit $?
+runtime_model_plan_json=$(review-config.sh "${plan_args[@]}") || exit $?
 if [[ -z "${threshold:-}" ]]; then
-    threshold=$(printf '%s' "$model_plan_json" | jq -er '.gates.fix_threshold')
+    threshold=$(printf '%s\n' "$runtime_model_plan_json" |
+      jq -er '.gates.fix_threshold') || exit $?
 fi
-plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX)
-printf '%s' "$model_plan_json" > "$plan_tmp"
+
+model_plan_json=$(printf '%s\n' "$runtime_model_plan_json" |
+  jq -ce --argjson classification "$classification_gates_json" '
+    .gates.phase3_gate = $classification.phase3_gate
+    | .gates.phase4_bands = $classification.phase4_bands
+  ') || exit $?
+gates_json=$(printf '%s\n' "$model_plan_json" | jq -ce '.gates') || exit $?
+
+plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX) || exit $?
+plan_write_rc=0
+printf '%s\n' "$model_plan_json" > "$plan_tmp" || plan_write_rc=$?
+if [[ "$plan_write_rc" -ne 0 ]]; then
+    rm -f "$plan_tmp" 2>/dev/null || true
+    exit "$plan_write_rc"
+fi
+
+plan_patch_rc=0
 artifact-patch.py --path "$artifact_path" \
   --set-json model_plan=@"$plan_tmp" \
-  --set-json "gates=$(printf '%s' "$model_plan_json" | jq -c '.gates')"
-rm -f "$plan_tmp"
+  --set-json gates="$gates_json" \
+  || plan_patch_rc=$?
 
-printf '%s' "$model_plan_json" | jq -r '
+plan_cleanup_rc=0
+rm -f "$plan_tmp" || plan_cleanup_rc=$?
+if [[ "$plan_patch_rc" -ne 0 ]]; then
+    exit "$plan_patch_rc"
+fi
+if [[ "$plan_cleanup_rc" -ne 0 ]]; then
+    exit "$plan_cleanup_rc"
+fi
+
+printf '%s\n' "$model_plan_json" | jq -r '
   "| Role | Engine | Model | Effort | Source |",
   "|---|---|---|---|---|",
   (.roles | to_entries[]
@@ -94,9 +167,11 @@ printf '%s' "$model_plan_json" | jq -r '
   (.warnings[]? | "warning: \(.)")'
 ```
 
-On non-zero from `review-config.sh`: surface the error-as-prompt
-stderr verbatim and stop. `$harness_id` is the Dispatch Protocol
-identity (`claude-code` / `omp` / `codex`).
+On non-zero from `review-config.sh`: surface the error-as-prompt stderr
+verbatim and stop. `$harness_id` is the Dispatch Protocol identity
+(`claude-code` / `omp` / `codex`). On any temp write, patch, or cleanup
+failure, exit with that operation's status after best-effort temp cleanup;
+never let `rm` mask an `artifact-patch.py` failure.
 
 ### 7.4. Leftover-`attempted` hard abort (§4 Phase 7 step 4)
 
@@ -524,7 +599,19 @@ or skip if you want a closer look.
 | F012 | 80 | confirmed_mechanical (ux) | docs/api.md:200-215 | medium | Tighten the typo + casing in the example… | — |
 ```
 
-Build the rows from `$auto_rec_promotable` via jq. Columns:
+Build the rows from `$auto_rec_promotable` via jq. Define and use this
+location formatter, which branches before either nullable range element is
+indexed:
+
+```jq
+def location:
+  if .file == "(unknown)" then "(unknown)"
+  elif .line_range == null then .file
+  else "\(.file):\(.line_range[0])-\(.line_range[1])"
+  end;
+```
+
+Columns:
 - `id` — finding id.
 - `score` — `score_phase4` (always non-null per filter).
 - `disp` — `disposition` (suffixed with `(<impact_type>)` when
@@ -532,7 +619,9 @@ Build the rows from `$auto_rec_promotable` via jq. Columns:
   `correctness` or `security`, so the user can spot which mechanical
   findings are in the gap-case bucket — e.g. `confirmed_mechanical (ux)`
   for a deep+ux dedup-merge that needs the Phase 7.5 batch bypass).
-- `file:line` — `file` + `line_range[0]-line_range[1]`.
+- `file:line` — `location`: a known file with a null range displays the
+  file only; `(unknown)` stays `(unknown)`. Never render `null-null` or
+  fabricate line numbers.
 - `confidence` — `auto_fix_hint.confidence` (`high` / `medium` / `low`).
 - `hint` — `auto_fix_hint.hint`, truncated to ~80 chars + ellipsis if
   longer (full hint visible in the per-finding loop and the rendered
@@ -676,14 +765,29 @@ per-iteration):
 autorec_batch_payload=()
 ```
 
-Loop over `$auto_rec_promotable` in order. For each entry:
+Loop over `$auto_rec_promotable` in order. For each entry, bind the
+current compact object to `$auto_rec_entry_json`, then derive the display
+location with the same null-safe branch used by the summary table:
+
+```bash
+auto_rec_location=$(printf '%s\n' "$auto_rec_entry_json" | jq -r '
+  if .file == "(unknown)" then "(unknown)"
+  elif .line_range == null then .file
+  else "\(.file):\(.line_range[0])-\(.line_range[1])"
+  end
+')
+```
+
+Do not index the range before the null branch. A known file with no range
+displays only the file; `(unknown)` remains locationless and must not trigger
+a Read request.
 
 1. **Render the brief** (orchestrator emits markdown directly):
 
    ```markdown
    ## $finding_id — <first line of claim>
 
-   **File:** `$file:$line_start-$line_end`
+   **File:** `$auto_rec_location`
    **Score:** $score_phase4 · **Disposition:** $disposition
 
    **Recommended hint** (confidence: $confidence): <auto_fix_hint.hint>

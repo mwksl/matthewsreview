@@ -233,15 +233,16 @@ if [[ "$codex_launch_mode" == "companion" ]]; then
         --job "$job_id" \
         --companion "$CODEX_COMPANION" \
         --stall-threshold-sec 90 \
-        --wall-clock-ceiling-sec "$ceiling")
+        --wall-clock-ceiling-sec "$ceiling") || exit $?
 else
     poll=$("${MRB}agent-dispatch.sh" poll \
         --job "$job_id" \
         --scratch-dir "$codex_dispatch_scratch" \
         --stall-threshold-sec 90 \
-        --wall-clock-ceiling-sec "$ceiling")
+        --wall-clock-ceiling-sec "$ceiling") || exit $?
 fi
-verdict=$(printf '%s' "$poll" | jq -r '.verdict')
+verdict=$(printf '%s\n' "$poll" | jq -er \
+  '.verdict | select(type == "string" and length > 0)') || exit $?
 ```
 
 `alive` and `stalled_suspect` remain in the next poll turn.
@@ -253,23 +254,96 @@ codex_tokens=$(printf '%s' "$poll" | jq -r '.tokens // "null"')
 ```
 
 Empty completed output routes through retry-with-judgment.
-`broker_desynced` (companion only), `wall_clock_exceeded`, and
-`failed_terminal` stop best-effort with the selected transport and
-fall through to §4.2.4 after retries are exhausted:
+`failed_terminal` and terminal `cancelled` route there without another stop.
+Only `broker_desynced` (companion only) or `wall_clock_exceeded` needs
+cancellation before a retry:
 
 ```bash
+stop_verdict=not_requested
 if [[ "$codex_launch_mode" == "companion" ]]; then
     ( node "$CODEX_COMPANION" cancel "$job_id" >/dev/null 2>&1 ) & disown
+    stop_verdict=cancel_requested
 else
-    "${MRB}agent-dispatch.sh" stop \
-        --job "$job_id" --scratch-dir "$codex_dispatch_scratch" \
-        >/dev/null 2>&1 || true
+    set +e
+    stop_result=$("${MRB}agent-dispatch.sh" stop \
+        --job "$job_id" --scratch-dir "$codex_dispatch_scratch")
+    stop_rc=$?
+    set -e
+    stop_verdict=$(printf '%s\n' "$stop_result" | jq -ser \
+      --arg job "$job_id" '
+        select(length == 1)
+        | .[0]
+        | select(
+            type == "object"
+            and .job_id == $job
+            and (
+              (.verdict == "cancelled" and .status == "cancelled")
+              or
+              (.verdict == "already_finished"
+               and .stop_noop == true
+               and (
+                 (.status == "completed" and .terminal_verdict == "completed")
+                 or
+                 (.status == "failed" and .terminal_verdict == "failed_terminal")
+               ))
+              or
+              (.verdict == "stop_failed"
+               and .status == "stop_failed"
+               and (.reason | type == "string" and length > 0)
+               and (.wrapper_alive | type == "boolean")
+               and (.engine_alive | type == "boolean"))
+            ))
+        | .verdict
+      ') || {
+        printf '%s\n' \
+          'ERROR: agent-dispatch.sh stop returned malformed, partial, or mismatched output.' \
+          'Action: inspect the job processes; do not retry as if cancellation succeeded.' >&2
+        exit 1
+    }
+    if [[ ( "$stop_rc" -eq 0 && "$stop_verdict" == "stop_failed" ) \
+          || ( "$stop_rc" -ne 0 && "$stop_verdict" != "stop_failed" ) ]]; then
+        printf 'ERROR: agent-dispatch.sh stop exited %s with verdict %s.\n' \
+          "$stop_rc" "$stop_verdict" >&2
+        exit 1
+    fi
+    case "$stop_verdict" in
+        cancelled)
+            : # terminal cancellation; retry policy may replace this job
+            ;;
+        already_finished)
+            poll=$("${MRB}agent-dispatch.sh" poll \
+                --job "$job_id" \
+                --scratch-dir "$codex_dispatch_scratch" \
+                --stall-threshold-sec 90 \
+                --wall-clock-ceiling-sec "$ceiling") || exit $?
+            verdict=$(printf '%s\n' "$poll" | jq -er \
+              '.verdict | select(. == "completed" or . == "failed_terminal" or . == "cancelled")') \
+              || exit $?
+            codex_output=$(printf '%s' "$poll" | jq -r '.raw_output // ""')
+            codex_tokens=$(printf '%s' "$poll" | jq -r '.tokens // "null"')
+            ;;
+        stop_failed)
+            printf '%s\n' \
+              'ERROR: standalone Codex cancellation could not be verified.' \
+              'Action: inspect the authenticated wrapper/engine; do not launch a retry.' >&2
+            exit 1
+            ;;
+        *)
+            printf 'ERROR: unknown agent-dispatch stop verdict: %s\n' \
+              "$stop_verdict" >&2
+            exit 1
+            ;;
+    esac
 fi
 elapsed_for_log=$(printf '%s' "$poll" | jq -r '.elapsed_sec // "null"')
-printf 'phase_4a_codex_watchdog: finding=%s mode=%s verdict=%s job=%s elapsed=%s\n' \
-    "$finding_id" "$codex_launch_mode" "$verdict" "$job_id" \
+printf 'phase_4a_codex_watchdog: finding=%s mode=%s verdict=%s stop=%s job=%s elapsed=%s\n' \
+    "$finding_id" "$codex_launch_mode" "$verdict" "$stop_verdict" "$job_id" \
     "$elapsed_for_log" >> "$trace_log_path"
 ```
+
+On `already_finished`, route the re-polled terminal verdict through the normal
+completed/failure branch before deciding on a retry. `stop_failed` is non-zero
+and aborts this retry path because the old engine may still be running.
 
 Then dispatch ONE `normalizer`-role shape-fixer per finding. Each shape-fixer
 takes that freeform Codex output and returns a single canonical tuple.
@@ -409,12 +483,12 @@ chunk_json=$(jq -nc --argjson cands "$chunk_candidates" '$cands')
 
 prompt_file="/tmp/matthews-review-codex-${review_id}-LB-chunk${chunk_n}.md"
 
-# Use an UNQUOTED heredoc so $trivial_mode expands to its actual value
-# at write time. (A quoted heredoc would emit the literal text
-# "<true|false>" — Codex would not know which trivial_mode posture to
-# enforce, and could emit `auto_fixable` despite the §13.9 contract.)
-# $trivial_mode and $chunk_n are the only orchestrator-context bash
-# variables this heredoc references; everything else is literal.
+# Use an UNQUOTED heredoc so the runtime posture and resolved routing
+# cutoffs expand at write time. (A quoted heredoc would emit literal
+# variable names — Codex would not know which trivial_mode posture to
+# enforce and could emit `auto_fixable` despite the §13.9 contract.)
+# Expansion inventory for this heredoc: $trivial_mode, $phase4_b1,
+# $phase4_b2, and $phase4_b3. Everything else is literal.
 cat > "$prompt_file" <<PROMPT
 You are a light confirmation validator. You will return one tuple per
 candidate.
@@ -520,15 +594,16 @@ if [[ "$codex_launch_mode" == "companion" ]]; then
         --job "$job_id" \
         --companion "$CODEX_COMPANION" \
         --stall-threshold-sec 90 \
-        --wall-clock-ceiling-sec "$ceiling")
+        --wall-clock-ceiling-sec "$ceiling") || exit $?
 else
     poll=$("${MRB}agent-dispatch.sh" poll \
         --job "$job_id" \
         --scratch-dir "$codex_dispatch_scratch" \
         --stall-threshold-sec 90 \
-        --wall-clock-ceiling-sec "$ceiling")
+        --wall-clock-ceiling-sec "$ceiling") || exit $?
 fi
-verdict=$(printf '%s' "$poll" | jq -r '.verdict')
+verdict=$(printf '%s\n' "$poll" | jq -er \
+  '.verdict | select(type == "string" and length > 0)') || exit $?
 ```
 
 On `completed`, capture normalized output and usage:
@@ -538,24 +613,97 @@ codex_chunk_output=$(printf '%s' "$poll" | jq -r '.raw_output // ""')
 codex_chunk_tokens=$(printf '%s' "$poll" | jq -r '.tokens // "null"')
 ```
 
-Empty output is a retryable failure. On `broker_desynced` (companion
-only), `wall_clock_exceeded`, or `failed_terminal`, stop via the
-selected transport, log the mode, and route the chunk into §4.3.3
-after retries are exhausted:
+Empty output is a retryable failure. `failed_terminal` and terminal
+`cancelled` route to §4.3.3 without another stop. Only
+`broker_desynced` (companion only) or `wall_clock_exceeded` needs
+cancellation before retry:
 
 ```bash
+stop_verdict=not_requested
 if [[ "$codex_launch_mode" == "companion" ]]; then
     ( node "$CODEX_COMPANION" cancel "$job_id" >/dev/null 2>&1 ) & disown
+    stop_verdict=cancel_requested
 else
-    "${MRB}agent-dispatch.sh" stop \
-        --job "$job_id" --scratch-dir "$codex_dispatch_scratch" \
-        >/dev/null 2>&1 || true
+    set +e
+    stop_result=$("${MRB}agent-dispatch.sh" stop \
+        --job "$job_id" --scratch-dir "$codex_dispatch_scratch")
+    stop_rc=$?
+    set -e
+    stop_verdict=$(printf '%s\n' "$stop_result" | jq -ser \
+      --arg job "$job_id" '
+        select(length == 1)
+        | .[0]
+        | select(
+            type == "object"
+            and .job_id == $job
+            and (
+              (.verdict == "cancelled" and .status == "cancelled")
+              or
+              (.verdict == "already_finished"
+               and .stop_noop == true
+               and (
+                 (.status == "completed" and .terminal_verdict == "completed")
+                 or
+                 (.status == "failed" and .terminal_verdict == "failed_terminal")
+               ))
+              or
+              (.verdict == "stop_failed"
+               and .status == "stop_failed"
+               and (.reason | type == "string" and length > 0)
+               and (.wrapper_alive | type == "boolean")
+               and (.engine_alive | type == "boolean"))
+            ))
+        | .verdict
+      ') || {
+        printf '%s\n' \
+          'ERROR: agent-dispatch.sh stop returned malformed, partial, or mismatched output.' \
+          'Action: inspect the job processes; do not retry as if cancellation succeeded.' >&2
+        exit 1
+    }
+    if [[ ( "$stop_rc" -eq 0 && "$stop_verdict" == "stop_failed" ) \
+          || ( "$stop_rc" -ne 0 && "$stop_verdict" != "stop_failed" ) ]]; then
+        printf 'ERROR: agent-dispatch.sh stop exited %s with verdict %s.\n' \
+          "$stop_rc" "$stop_verdict" >&2
+        exit 1
+    fi
+    case "$stop_verdict" in
+        cancelled)
+            : # terminal cancellation; retry policy may replace this job
+            ;;
+        already_finished)
+            poll=$("${MRB}agent-dispatch.sh" poll \
+                --job "$job_id" \
+                --scratch-dir "$codex_dispatch_scratch" \
+                --stall-threshold-sec 90 \
+                --wall-clock-ceiling-sec "$ceiling") || exit $?
+            verdict=$(printf '%s\n' "$poll" | jq -er \
+              '.verdict | select(. == "completed" or . == "failed_terminal" or . == "cancelled")') \
+              || exit $?
+            codex_chunk_output=$(printf '%s' "$poll" | jq -r '.raw_output // ""')
+            codex_chunk_tokens=$(printf '%s' "$poll" | jq -r '.tokens // "null"')
+            ;;
+        stop_failed)
+            printf '%s\n' \
+              'ERROR: standalone Codex cancellation could not be verified.' \
+              'Action: inspect the authenticated wrapper/engine; do not launch a retry.' >&2
+            exit 1
+            ;;
+        *)
+            printf 'ERROR: unknown agent-dispatch stop verdict: %s\n' \
+              "$stop_verdict" >&2
+            exit 1
+            ;;
+    esac
 fi
 elapsed_for_log=$(printf '%s' "$poll" | jq -r '.elapsed_sec // "null"')
-printf 'phase_4b_codex_watchdog: chunk=%s mode=%s verdict=%s job=%s elapsed=%s\n' \
-    "$chunk_n" "$codex_launch_mode" "$verdict" "$job_id" \
+printf 'phase_4b_codex_watchdog: chunk=%s mode=%s verdict=%s stop=%s job=%s elapsed=%s\n' \
+    "$chunk_n" "$codex_launch_mode" "$verdict" "$stop_verdict" "$job_id" \
     "$elapsed_for_log" >> "$trace_log_path"
 ```
+
+On `already_finished`, route the re-polled terminal verdict through the normal
+completed/failure branch before retry decisions. `stop_failed` blocks retry
+because the old engine may still be running.
 
 Dispatch ONE `normalizer`-role shape-fixer per chunk:
 

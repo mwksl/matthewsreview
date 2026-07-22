@@ -93,7 +93,12 @@
     "metrics": { "$ref": "#/$defs/metrics" },
     "base_context": { "$ref": "#/$defs/base_context" },
     "model_plan": { "$ref": "#/$defs/model_plan" },
-    "gates": { "$ref": "#/$defs/gates" },
+    "gates": {
+      "anyOf": [
+        { "$ref": "#/$defs/gates" },
+        { "type": "null" }
+      ]
+    },
     "degraded": { "$ref": "#/$defs/degraded" }
   },
 
@@ -137,7 +142,12 @@
             "codex_crosscut": { "$ref": "#/$defs/model_role" }
           }
         },
-        "gates": { "$ref": "#/$defs/gates" },
+        "gates": {
+          "anyOf": [
+            { "$ref": "#/$defs/gates" },
+            { "type": "null" }
+          ]
+        },
         "warnings": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 }
@@ -248,6 +258,7 @@
           "type": "array",
           "minItems": 3,
           "maxItems": 3,
+          "uniqueItems": true,
           "items": { "type": "number", "minimum": 0, "maximum": 100 }
         },
         "fix_threshold": { "type": "number", "minimum": 0, "maximum": 100 },

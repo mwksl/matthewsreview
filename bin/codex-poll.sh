@@ -78,11 +78,33 @@ plans/codex-watchdog.md for the design.
 USAGE
 }
 
-die_usage() { echo "ERROR: $1" >&2; usage; exit 64; }
+die_usage() {
+    echo "ERROR: $1" >&2
+    usage
+    echo "Action: correct the invocation using the usage above, then retry." >&2
+    exit 64
+}
 die_dep() {
     echo "ERROR: $1" >&2
     [[ -n "${2:-}" ]] && echo "Action: $2" >&2
     exit 5
+}
+
+normalize_nonnegative_integer() { # flag value → NORMALIZED_INTEGER
+    local flag="$1" value="$2" max_value=9223372036854775807
+    if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+        die_usage "$flag must be a non-negative base-10 integer (got '$value')"
+    fi
+    while [[ "${#value}" -gt 1 && "${value:0:1}" == "0" ]]; do
+        value="${value#0}"
+    done
+    [[ -n "$value" ]] || value=0
+    # shellcheck disable=SC2071  # equal-length digit strings compare lexically
+    if [[ "${#value}" -gt "${#max_value}" \
+          || ( "${#value}" -eq "${#max_value}" && "$value" > "$max_value" ) ]]; then
+        die_usage "$flag exceeds the largest arithmetic-safe integer ($max_value)"
+    fi
+    NORMALIZED_INTEGER="$value"
 }
 
 JOB=""
@@ -114,8 +136,10 @@ done
 [[ -n "$STALL"     ]] || die_usage "--stall-threshold-sec is required"
 [[ -n "$CEIL"      ]] || die_usage "--wall-clock-ceiling-sec is required"
 
-case "$STALL" in [0-9]*) ;; *) die_usage "--stall-threshold-sec must be a non-negative integer (got '$STALL')" ;; esac
-case "$CEIL"  in [0-9]*) ;; *) die_usage "--wall-clock-ceiling-sec must be a non-negative integer (got '$CEIL')" ;; esac
+normalize_nonnegative_integer --stall-threshold-sec "$STALL"
+STALL="$NORMALIZED_INTEGER"
+normalize_nonnegative_integer --wall-clock-ceiling-sec "$CEIL"
+CEIL="$NORMALIZED_INTEGER"
 
 if ! command -v node >/dev/null 2>&1; then
     die_dep "node not found on \$PATH" \

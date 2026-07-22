@@ -5,7 +5,7 @@
 #   built-in defaults
 #   $MATTHEWS_REVIEW_REVIEWS_ROOT/config.json
 #     (user config; canonical/legacy home fallback via review-root.sh)
-#   <repo>/.matthewsreview.json          (repo config)
+#   trusted <git-ref>:.matthewsreview.json (or explicit diagnostic worktree)
 #   profiles.<name> (repo config first, then user config)   [--profile]
 #   --models "<k=v,k=v>"                 (CLI; keys = tier name or role name)
 #
@@ -26,13 +26,13 @@
 #
 # Usage:
 #   review-config.sh --repo-root <abs> --orchestrator <claude-code|omp|codex> \
-#                    [--profile <name>] [--models "<k=v,k=v>"]
+#                    [--repo-config-ref <git-ref|worktree>] [--profile <name>] [--models "<k=v,k=v>"]
 #
 # Output (stdout): one JSON object
 #   {orchestrator, roles: {<role>: {engine, model, effort, source}},
 #    gates: {...}, warnings: []}
 #
-# Exit codes (bin/_common.py conventions): 0 OK, 1 validation, 64 usage.
+# Exit codes (bin/_common.py conventions): 0 OK, 1 validation, 5 dependency, 64 usage.
 set -u
 
 PROG=review-config.sh
@@ -43,7 +43,7 @@ err() { # msg
 }
 die_usage() {
     err "$1"
-    echo "Valid input: $PROG --repo-root <abs> --orchestrator <claude-code|omp|codex> [--profile <name>] [--models \"<k=v,k=v>\"]" >&2
+    echo "Valid input: $PROG --repo-root <abs> --orchestrator <claude-code|omp|codex> [--repo-config-ref <git-ref> | --repo-config-worktree] [--profile <name>] [--models \"<k=v,k=v>\"]" >&2
     exit 64
 }
 require_value() {
@@ -54,18 +54,27 @@ die_validation() { # msg action
     [[ -n "${2:-}" ]] && echo "Action: $2" >&2
     exit 1
 }
+die_dependency() { # msg action
+    err "$1"
+    [[ -n "${2:-}" ]] && echo "Action: $2" >&2
+    exit 5
+}
 
 REPO_ROOT=""
+REPO_CONFIG_REF=""
+REPO_CONFIG_WORKTREE=0
 ORCHESTRATOR=""
 PROFILE=""
 MODELS_CSV=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --repo-root)    require_value "$@"; REPO_ROOT="$2"; shift 2 ;;
-        --orchestrator) require_value "$@"; ORCHESTRATOR="$2"; shift 2 ;;
-        --profile)      require_value "$@"; PROFILE="$2"; shift 2 ;;
-        --models)       require_value "$@"; MODELS_CSV="$2"; shift 2 ;;
+        --repo-root)       require_value "$@"; REPO_ROOT="$2"; shift 2 ;;
+        --repo-config-ref) require_value "$@"; REPO_CONFIG_REF="$2"; shift 2 ;;
+        --repo-config-worktree) REPO_CONFIG_WORKTREE=1; shift ;;
+        --orchestrator)    require_value "$@"; ORCHESTRATOR="$2"; shift 2 ;;
+        --profile)         require_value "$@"; PROFILE="$2"; shift 2 ;;
+        --models)          require_value "$@"; MODELS_CSV="$2"; shift 2 ;;
         *) die_usage "unknown argument: $1" ;;
     esac
 done
@@ -75,6 +84,13 @@ case "$ORCHESTRATOR" in
     claude-code|omp|codex) ;;
     *) die_usage "--orchestrator must be one of: claude-code | omp | codex" ;;
 esac
+if [[ "$REPO_CONFIG_WORKTREE" == "1" && -n "$REPO_CONFIG_REF" ]]; then
+    die_usage "--repo-config-ref cannot combine with --repo-config-worktree"
+fi
+
+command -v jq >/dev/null 2>&1 \
+    || die_dependency "required dependency 'jq' is not available" \
+        "install jq, then rerun $PROG"
 
 # ---------------------------------------------------------------- defaults
 # Canonical tier, role, and gate definitions. Validation, error messages,
@@ -96,30 +112,95 @@ GATE_DEFS='{
   "walkthrough_threshold":{"default":60,"kind":"score"}
 }'
 GATES_DEFAULT=$(jq -c 'with_entries(.value = .value.default)' <<<"$GATE_DEFS")
-CODEX_EFFORT_SET=' low medium high xhigh max ultra '
-OMP_THINKING_SET=' off minimal low medium high xhigh max '
 VALID_TIER_KEYS=$(jq -r 'keys | join(" | ")' <<<"$TIERS_DEFAULT")
 VALID_ROLE_KEYS=$(jq -r 'keys | join(" | ")' <<<"$ROLE_DEFS")
 VALID_GATE_KEYS=$(jq -r 'keys | join(" | ")' <<<"$GATE_DEFS")
 
 # ---------------------------------------------------------------- load files
 REVIEWS_ROOT=$("$SCRIPT_DIR/review-root.sh")
+review_root_rc=$?
+if [[ "$review_root_rc" -ne 0 ]]; then
+    exit "$review_root_rc"
+fi
+[[ -n "$REVIEWS_ROOT" ]] \
+    || die_validation "review-root.sh returned an empty reviews root" \
+        "set MATTHEWS_REVIEW_REVIEWS_ROOT to a one-line absolute path"
+
 USER_CFG="$REVIEWS_ROOT/config.json"
-[[ -f "$USER_CFG" ]] || USER_CFG=""
+if [[ -e "$USER_CFG" || -L "$USER_CFG" ]]; then
+    if [[ ! -f "$USER_CFG" || ! -r "$USER_CFG" ]]; then
+        die_validation "config path $USER_CFG is not a readable regular file" \
+            "replace it with a readable JSON configuration file"
+    fi
+else
+    USER_CFG=""
+fi
 if [[ -n "$USER_CFG" && "$REVIEWS_ROOT" == "$HOME/.adams-reviews" ]]; then
     LEGACY_WARN="legacy config path ~/.adams-reviews/config.json in use; run: mv ~/.adams-reviews ~/.matthews-reviews"
 elif [[ -n "${ADAMS_REVIEW_REVIEWS_ROOT:-}" \
      && -z "${MATTHEWS_REVIEW_REVIEWS_ROOT:-}" ]]; then
     LEGACY_WARN="legacy ADAMS_REVIEW_REVIEWS_ROOT is in use; rename it to MATTHEWS_REVIEW_REVIEWS_ROOT"
 fi
-REPO_CFG="$REPO_ROOT/.matthewsreview.json"
-[[ -f "$REPO_CFG" ]] || REPO_CFG=""
 
-for f in "$USER_CFG" "$REPO_CFG"; do
-    if [[ -n "$f" ]] && ! jq empty "$f" 2>/dev/null; then
-        die_validation "config file $f is not valid JSON" "jq . $f   # locate the syntax error"
+WORKTREE_REPO_CFG="$REPO_ROOT/.matthewsreview.json"
+REPO_CFG=""
+REPO_CFG_LABEL="$WORKTREE_REPO_CFG"
+REPO_CFG_ACTION="jq . $WORKTREE_REPO_CFG   # locate the syntax error"
+REPO_CFG_TMP=""
+cleanup_repo_config() {
+    [[ -z "$REPO_CFG_TMP" ]] || rm -f "$REPO_CFG_TMP"
+}
+trap cleanup_repo_config EXIT
+
+if [[ "$REPO_CONFIG_WORKTREE" == "1" ]]; then
+    if [[ -e "$WORKTREE_REPO_CFG" || -L "$WORKTREE_REPO_CFG" ]]; then
+        if [[ ! -f "$WORKTREE_REPO_CFG" || ! -r "$WORKTREE_REPO_CFG" ]]; then
+            die_validation "config path $WORKTREE_REPO_CFG is not a readable regular file" \
+                "replace it with a readable JSON configuration file"
+        fi
+        REPO_CFG="$WORKTREE_REPO_CFG"
     fi
-done
+elif [[ -z "$REPO_CONFIG_REF" ]]; then
+    if [[ -e "$WORKTREE_REPO_CFG" || -L "$WORKTREE_REPO_CFG" ]]; then
+        die_validation "worktree repo config exists but no trusted repo config source was selected" \
+            "pass --repo-config-ref <trusted-git-ref>; use --repo-config-worktree only for doctor diagnostics"
+    fi
+else
+    command -v git >/dev/null 2>&1 \
+        || die_dependency "required dependency 'git' is not available for --repo-config-ref" \
+            "install git, then rerun $PROG"
+    REPO_CONFIG_COMMIT=$(git -C "$REPO_ROOT" rev-parse --verify --end-of-options "${REPO_CONFIG_REF}^{commit}" 2>/dev/null)
+    repo_ref_rc=$?
+    if [[ "$repo_ref_rc" -ne 0 || -z "$REPO_CONFIG_COMMIT" ]]; then
+        die_validation "repo config ref '$REPO_CONFIG_REF' does not resolve to a commit" \
+            "pass the trusted artifact comparison_ref, or use --repo-config-worktree only for doctor diagnostics"
+    fi
+    REPO_CFG_LABEL="$WORKTREE_REPO_CFG at $REPO_CONFIG_COMMIT"
+    REPO_CFG_ACTION="git -C $REPO_ROOT show $REPO_CONFIG_COMMIT:.matthewsreview.json | jq ."
+    repo_tree_entry=$(git -C "$REPO_ROOT" ls-tree "$REPO_CONFIG_COMMIT" -- .matthewsreview.json 2>/dev/null)
+    repo_tree_rc=$?
+    if [[ "$repo_tree_rc" -ne 0 ]]; then
+        die_validation "could not inspect .matthewsreview.json at commit $REPO_CONFIG_COMMIT" \
+            "verify the trusted ref and repository object database, then rerun $PROG"
+    fi
+    if [[ -n "$repo_tree_entry" ]]; then
+        REPO_CFG_TMP=$(mktemp "${TMPDIR:-/tmp}/matthewsreview-repo-config.XXXXXX") \
+            || die_validation "could not create a temporary file for trusted repo config" \
+                "check TMPDIR permissions, then rerun $PROG"
+        if ! git -C "$REPO_ROOT" show "$REPO_CONFIG_COMMIT:.matthewsreview.json" >"$REPO_CFG_TMP" 2>/dev/null; then
+            die_validation "could not read .matthewsreview.json from commit $REPO_CONFIG_COMMIT" \
+                "verify the trusted ref and repository object database, then rerun $PROG"
+        fi
+        REPO_CFG="$REPO_CFG_TMP"
+    fi
+fi
+
+if [[ -n "$USER_CFG" ]] && ! jq empty "$USER_CFG" 2>/dev/null; then
+    die_validation "config file $USER_CFG is not valid JSON" "jq . $USER_CFG   # locate the syntax error"
+fi
+if [[ -n "$REPO_CFG" ]] && ! jq empty "$REPO_CFG" 2>/dev/null; then
+    die_validation "config file $REPO_CFG_LABEL is not valid JSON" "$REPO_CFG_ACTION"
+fi
 
 cfg_get() { # file expr  — empty string when file missing or key absent
     local f="$1" expr="$2"
@@ -160,6 +241,22 @@ get_kv() { # listname key -> "value|source" or empty
     done <<< "$cur"
 }
 
+# Tier and direct-role assignments share one precedence ladder. A later layer
+# wins across namespaces; a direct role is more specific only within a layer.
+SOURCE_RANK=0
+set_source_rank() { # source
+    case "$1" in
+        default) SOURCE_RANK=0 ;;
+        orchestrator-default*) SOURCE_RANK=1 ;;
+        user-config) SOURCE_RANK=2 ;;
+        repo-config) SOURCE_RANK=3 ;;
+        user-profile\(*\)|repo-profile\(*\)) SOURCE_RANK=4 ;;
+        cli) SOURCE_RANK=5 ;;
+        *) die_validation "internal config source '$1' has no precedence rank" \
+            "report this review-config.sh source label" ;;
+    esac
+}
+
 json_object_has() { # json key
     jq -e --arg k "$2" 'has($k)' <<<"$1" >/dev/null
 }
@@ -198,32 +295,117 @@ require_gate_key() { # key source-context
         || die_validation "unknown gate '$key' $context" "Valid gates: $VALID_GATE_KEYS"
 }
 
+validate_role_syntax() { # subject role-key-or-empty value
+    local subject="$1" role="$2" value="$3"
+    local engine rest model effort third_segment=0
+    if ! jq -en --arg value "$value" '
+        $value
+        | (contains("|") | not)
+          and (explode | all(.[]; . >= 32 and (. < 127 or . > 159) and . != 8232 and . != 8233))
+    ' >/dev/null; then
+        die_validation "$subject contains a reserved delimiter or control character" \
+            "use a one-line engine:model[:effort-or-thinking] value without '|'"
+    fi
+    engine="${value%%:*}"
+    rest="${value#*:}"
+    if [[ "$rest" == "$value" || -z "$engine" ]]; then
+        die_validation "$subject value '$value' is not engine:model[:effort-or-thinking]" \
+            "Valid engines: claude | codex | omp"
+    fi
+    case "$engine" in
+        claude|codex|omp) ;;
+        *) die_validation "$subject uses unknown engine '$engine'" "Valid engines: claude | codex | omp" ;;
+    esac
+    if [[ "$rest" == *:* ]]; then
+        third_segment=1
+        model="${rest%%:*}"
+        effort="${rest#*:}"
+    else
+        model="$rest"
+        effort=""
+    fi
+    if [[ "$third_segment" == "1" && -z "$effort" ]]; then
+        die_validation "$subject has an empty third segment in '$value'" \
+            "remove the trailing colon, or provide a valid codex effort / omp thinking level"
+    fi
+    if [[ "$third_segment" == "1" ]]; then
+        case "$engine" in
+            claude)
+                die_validation "$subject: Claude roles do not accept a third segment (got '$value')" \
+                    "use claude:<model>"
+                ;;
+            codex)
+                case "$effort" in
+                    low|medium|high|xhigh|max|ultra) ;;
+                    *) die_validation "$subject: unknown codex effort '$effort'" \
+                        "Valid efforts: low | medium | high | xhigh | max | ultra" ;;
+                esac
+                ;;
+            omp)
+                case "$effort" in
+                    off|minimal|low|medium|high|xhigh|max) ;;
+                    *) die_validation "$subject: unknown omp thinking level '$effort'" \
+                        "Valid levels: off | minimal | low | medium | high | xhigh | max" ;;
+                esac
+                ;;
+        esac
+    fi
+    if [[ -z "$model" && "$engine" != "codex" ]]; then
+        die_validation "$subject: empty model only allowed for codex: (got '$value')" \
+            "specify a model, e.g. $engine:opus"
+    fi
+    case "$role" in
+        ensemble_detect|codex_detect|codex_validate|codex_crosscut)
+            [[ "$engine" == "codex" ]] \
+                || die_validation "$subject must use the codex engine (got '$value')" \
+                    "set $role=codex:<model>:<effort> (empty model is allowed as codex::<effort>)"
+            ;;
+    esac
+    printf '%s|%s|%s' "$engine" "$model" "$effort"
+}
+
 validate_tier_object() { # json source-context
-    local tiers="$1" context="$2" key
+    local tiers="$1" context="$2" key value
     jq -e 'type == "object"' <<<"$tiers" >/dev/null \
         || die_validation "tiers $context must be a JSON object" "Valid tiers: $VALID_TIER_KEYS"
     while IFS= read -r key; do
         [[ -z "$key" ]] && continue
         require_tier_key "$key" "$context"
     done < <(json_object_keys "$tiers")
-    jq -e 'all(to_entries[]; (.value | type) == "string" and (.value | length) > 0)' \
+    jq -e 'all(to_entries[];
+        (.value | type) == "string"
+        and (.value | length) > 0
+        and (.value | explode | all(.[]; . >= 32 and (. < 127 or . > 159) and . != 8232 and . != 8233)))' \
         <<<"$tiers" >/dev/null \
-        || die_validation "tier values $context must be non-empty role strings" \
+        || die_validation "tier values $context must be non-empty role strings without control characters" \
             "use engine:model[:effort-or-thinking] for every tier"
+    while IFS= read -r key; do
+        [[ -z "$key" ]] && continue
+        value=$(jq -r --arg k "$key" '.[$k]' <<<"$tiers")
+        validate_role_syntax "tier '$key' $context" "" "$value" >/dev/null
+    done < <(json_object_keys "$tiers")
 }
 
 validate_role_object() { # json source-context
-    local roles="$1" context="$2" key
+    local roles="$1" context="$2" key value
     jq -e 'type == "object"' <<<"$roles" >/dev/null \
         || die_validation "roles $context must be a JSON object" "Valid roles: $VALID_ROLE_KEYS"
     while IFS= read -r key; do
         [[ -z "$key" ]] && continue
         require_role_key "$key" "$context"
     done < <(json_object_keys "$roles")
-    jq -e 'all(to_entries[]; (.value | type) == "string" and (.value | length) > 0)' \
+    jq -e 'all(to_entries[];
+        (.value | type) == "string"
+        and (.value | length) > 0
+        and (.value | explode | all(.[]; . >= 32 and (. < 127 or . > 159) and . != 8232 and . != 8233)))' \
         <<<"$roles" >/dev/null \
-        || die_validation "role values $context must be non-empty role strings" \
+        || die_validation "role values $context must be non-empty role strings without control characters" \
             "use engine:model[:effort-or-thinking] for every role"
+    while IFS= read -r key; do
+        [[ -z "$key" ]] && continue
+        value=$(jq -r --arg k "$key" '.[$k]' <<<"$roles")
+        validate_role_syntax "role '$key' $context" "$key" "$value" >/dev/null
+    done < <(json_object_keys "$roles")
 }
 
 validate_gates_object() { # json source-context
@@ -279,67 +461,77 @@ validate_profile_object() { # json profile-name source-file
     fi
 }
 
-validate_config_file() { # file user|repo
-    local file="$1" kind="$2" key section profile_name profile_json orch
+validate_config_file() { # file user|repo [display-label]
+    local file="$1" kind="$2" file_label="${3:-$1}"
+    local key section profile_name profile_json orch
     jq -e 'type == "object"' "$file" >/dev/null \
-        || die_validation "config file $file must contain a top-level JSON object" \
+        || die_validation "config file $file_label must contain a top-level JSON object" \
             "replace the top-level value with an object"
+    jq -e '
+        def safe_internal:
+            (contains("|") | not)
+            and (explode | all(.[]; . >= 32 and (. < 127 or . > 159) and . != 8232 and . != 8233));
+        all(.. | strings; safe_internal)
+        and all(.. | objects | keys[]; safe_internal)
+    ' "$file" >/dev/null \
+        || die_validation "config file $file_label contains a reserved delimiter or control character" \
+            "use one-line keys and engine:model[:effort-or-thinking] values without '|'"
     while IFS= read -r key; do
         case "$key" in
             tiers|roles|gates|profiles) ;;
             orchestrator_defaults)
                 [[ "$kind" == "user" ]] \
-                    || die_validation "orchestrator_defaults is only valid in the user config, not $file" \
+                    || die_validation "orchestrator_defaults is only valid in the user config, not $file_label" \
                         "move it to ~/.matthews-reviews/config.json"
                 ;;
-            *) die_validation "unknown top-level config key '$key' in $file" \
+            *) die_validation "unknown top-level config key '$key' in $file_label" \
                 "Valid keys: tiers | roles | gates | profiles$([[ "$kind" == "user" ]] && printf ' | orchestrator_defaults')" ;;
         esac
     done < <(jq -r 'keys[]' "$file")
 
     if jq -e 'has("tiers")' "$file" >/dev/null; then
-        validate_tier_object "$(jq -c '.tiers' "$file")" "in $file"
+        validate_tier_object "$(jq -c '.tiers' "$file")" "in $file_label"
     fi
     if jq -e 'has("roles")' "$file" >/dev/null; then
-        validate_role_object "$(jq -c '.roles' "$file")" "in $file"
+        validate_role_object "$(jq -c '.roles' "$file")" "in $file_label"
     fi
     if jq -e 'has("gates")' "$file" >/dev/null; then
-        validate_gates_object "$(jq -c '.gates' "$file")" "in $file"
+        validate_gates_object "$(jq -c '.gates' "$file")" "in $file_label"
     fi
     if jq -e 'has("profiles")' "$file" >/dev/null; then
         section=$(jq -c '.profiles' "$file")
         jq -e 'type == "object"' <<<"$section" >/dev/null \
-            || die_validation "profiles in $file must be a JSON object" \
+            || die_validation "profiles in $file_label must be a JSON object" \
                 "map each profile name to an object containing tiers and/or roles"
         while IFS= read -r profile_name; do
             profile_json=$(jq -c --arg p "$profile_name" '.[$p]' <<<"$section")
-            validate_profile_object "$profile_json" "$profile_name" "$file"
+            validate_profile_object "$profile_json" "$profile_name" "$file_label"
         done < <(json_object_keys "$section")
     fi
     if jq -e 'has("orchestrator_defaults")' "$file" >/dev/null; then
         section=$(jq -c '.orchestrator_defaults' "$file")
         jq -e 'type == "object"' <<<"$section" >/dev/null \
-            || die_validation "orchestrator_defaults in $file must be a JSON object" \
+            || die_validation "orchestrator_defaults in $file_label must be a JSON object" \
                 "map orchestrator names to objects containing tiers"
         while IFS= read -r orch; do
             case "$orch" in
                 claude-code|omp|codex) ;;
-                *) die_validation "unknown orchestrator_defaults key '$orch' in $file" \
+                *) die_validation "unknown orchestrator_defaults key '$orch' in $file_label" \
                     "Valid orchestrators: claude-code | omp | codex" ;;
             esac
             profile_json=$(jq -c --arg o "$orch" '.[$o]' <<<"$section")
             jq -e 'type == "object" and (keys - ["tiers"] | length == 0) and has("tiers")' \
                 <<<"$profile_json" >/dev/null \
-                || die_validation "orchestrator_defaults.$orch in $file must contain only a tiers object" \
+                || die_validation "orchestrator_defaults.$orch in $file_label must contain only a tiers object" \
                     "use {\"tiers\":{\"deep\":\"engine:model\"}}"
             validate_tier_object "$(jq -c '.tiers' <<<"$profile_json")" \
-                "in orchestrator_defaults.$orch in $file"
+                "in orchestrator_defaults.$orch in $file_label"
         done < <(json_object_keys "$section")
     fi
 }
 
-[[ -n "$USER_CFG" ]] && validate_config_file "$USER_CFG" user
-[[ -n "$REPO_CFG" ]] && validate_config_file "$REPO_CFG" repo
+[[ -n "$USER_CFG" ]] && validate_config_file "$USER_CFG" user "$USER_CFG"
+[[ -n "$REPO_CFG" ]] && validate_config_file "$REPO_CFG" repo "$REPO_CFG_LABEL"
 
 # Built-in model choices are harness-invariant. Users who want a
 # self-contained Codex run opt in through config, profiles, or --models.
@@ -348,13 +540,13 @@ while IFS= read -r t; do
     set_kv TIER_LIST "$t" "$(jq -r --arg k "$t" '.[$k]' <<<"$TIERS_SEED")" "default"
 done < <(json_object_keys "$TIERS_DEFAULT")
 
-apply_file() { # file source
-    local f="$1" source="$2"
+apply_file() { # file source [display-label]
+    local f="$1" source="$2" file_label="${3:-$1}"
     [[ -n "$f" ]] || return 0
     local tiers roles gates k v rkeys rk
     tiers=$(jq -c '.tiers // empty' "$f")
     if [[ -n "$tiers" ]]; then
-        validate_tier_object "$tiers" "in $f"
+        validate_tier_object "$tiers" "in $file_label"
         while IFS= read -r k; do
             [[ -z "$k" ]] && continue
             v=$(jq -r --arg k "$k" '.[$k] // empty' <<<"$tiers")
@@ -363,49 +555,56 @@ apply_file() { # file source
     fi
     roles=$(jq -c '.roles // empty' "$f")
     if [[ -n "$roles" ]]; then
-        validate_role_object "$roles" "in $f"
+        validate_role_object "$roles" "in $file_label"
         rkeys=$(jq -r 'keys[]' <<<"$roles")
         while IFS= read -r rk; do
             [[ -z "$rk" ]] && continue
-            require_role_key "$rk" "in $f"
+            require_role_key "$rk" "in $file_label"
             set_kv ROLE_LIST "$rk" "$(jq -r --arg k "$rk" '.[$k]' <<<"$roles")" "$source"
         done <<< "$rkeys"
     fi
     gates=$(jq -c '.gates // empty' "$f")
     if [[ -n "$gates" ]]; then
-        validate_gates_object "$gates" "in $f"
+        validate_gates_object "$gates" "in $file_label"
         GATES_JSON=$(jq -c -n --argjson base "$GATES_JSON" --argjson over "$gates" '$base * $over')
     fi
 }
 
-apply_profile() { # file source — returns 10 when profile absent
-    local f="$1" source="$2"
+apply_profile() { # file source [display-label] — returns 10 when profile absent
+    local f="$1" source="$2" file_label="${3:-$1}"
     [[ -n "$f" ]] || return 10
     local prof tiers roles k v rkeys rk
     prof=$(jq -c --arg p "$PROFILE" '.profiles[$p] // empty' "$f")
     [[ -n "$prof" ]] || return 10
     jq -e 'type == "object"' <<<"$prof" >/dev/null \
-        || die_validation "profile '$PROFILE' in $f must be a JSON object" "define tiers and/or roles under profiles.$PROFILE"
+        || die_validation "profile '$PROFILE' in $file_label must be a JSON object" \
+            "define tiers and/or roles under profiles.$PROFILE"
     tiers=$(jq -c '.tiers // empty' <<<"$prof")
     if [[ -n "$tiers" ]]; then
-        validate_tier_object "$tiers" "in profile '$PROFILE'"
+        validate_tier_object "$tiers" "in profile '$PROFILE' in $file_label"
         while IFS= read -r k; do
             [[ -z "$k" ]] && continue
             v=$(jq -r --arg k "$k" '.[$k] // empty' <<<"$tiers")
-            [[ -n "$v" ]] && set_kv TIER_LIST "$k" "$v" "profile($PROFILE)"
+            [[ -n "$v" ]] && set_kv TIER_LIST "$k" "$v" "$source"
         done < <(json_object_keys "$TIERS_DEFAULT")
     fi
     roles=$(jq -c '.roles // empty' <<<"$prof")
     if [[ -n "$roles" ]]; then
-        validate_role_object "$roles" "in profile '$PROFILE'"
+        validate_role_object "$roles" "in profile '$PROFILE' in $file_label"
         rkeys=$(jq -r 'keys[]' <<<"$roles")
         while IFS= read -r rk; do
             [[ -z "$rk" ]] && continue
-            require_role_key "$rk" "in profile '$PROFILE'"
-            set_kv ROLE_LIST "$rk" "$(jq -r --arg k "$rk" '.[$k]' <<<"$roles")" "profile($PROFILE)"
+            require_role_key "$rk" "in profile '$PROFILE' in $file_label"
+            set_kv ROLE_LIST "$rk" "$(jq -r --arg k "$rk" '.[$k]' <<<"$roles")" "$source"
         done <<< "$rkeys"
     fi
     return 0
+}
+
+profile_exists() { # file
+    local f="$1"
+    [[ -n "$f" ]] || return 1
+    jq -e --arg p "$PROFILE" '.profiles | type == "object" and has($p)' "$f" >/dev/null
 }
 
 # Per-orchestrator tier defaults (user config only — machine-specific model
@@ -425,19 +624,24 @@ if [[ -n "$od_tiers" && "$od_tiers" != "null" ]]; then
     done < <(json_object_keys "$TIERS_DEFAULT")
 fi
 
-apply_file "$USER_CFG" "user-config"
-apply_file "$REPO_CFG" "repo-config"
-
+SELECTED_PROFILE_SOURCE=""
 if [[ -n "$PROFILE" ]]; then
-    apply_profile "$REPO_CFG" "repo-profile"
-    rc=$?
-    if [[ $rc -eq 10 ]]; then
-        apply_profile "$USER_CFG" "user-profile"
-        rc=$?
+    if profile_exists "$REPO_CFG"; then
+        SELECTED_PROFILE_SOURCE="repo"
+    elif profile_exists "$USER_CFG"; then
+        SELECTED_PROFILE_SOURCE="user"
+    else
+        die_validation "profile '$PROFILE' not found in repo or user config" \
+            "define it under profiles.$PROFILE in the trusted repo config or ~/.matthews-reviews/config.json"
     fi
-    if [[ $rc -ne 0 ]]; then
-        die_validation "profile '$PROFILE' not found in repo or user config" "define it under profiles.$PROFILE in $REPO_ROOT/.matthewsreview.json or ~/.matthews-reviews/config.json"
-    fi
+fi
+
+apply_file "$USER_CFG" "user-config"
+apply_file "$REPO_CFG" "repo-config" "$REPO_CFG_LABEL"
+if [[ "$SELECTED_PROFILE_SOURCE" == "user" ]]; then
+    apply_profile "$USER_CFG" "user-profile($PROFILE)" "$USER_CFG"
+elif [[ "$SELECTED_PROFILE_SOURCE" == "repo" ]]; then
+    apply_profile "$REPO_CFG" "repo-profile($PROFILE)" "$REPO_CFG_LABEL"
 fi
 
 if [[ -n "$MODELS_CSV" ]]; then
@@ -450,8 +654,10 @@ if [[ -n "$MODELS_CSV" ]]; then
             die_validation "--models entry '$pair' is not key=value" "Valid input: --models \"deep=claude:opus,light=codex::medium\""
         fi
         if is_valid_tier_key "$key"; then
+            validate_role_syntax "--models tier '$key'" "" "$val" >/dev/null
             set_kv TIER_LIST "$key" "$val" "cli"
         elif is_valid_role_key "$key"; then
+            validate_role_syntax "--models role '$key'" "$key" "$val" >/dev/null
             set_kv ROLE_LIST "$key" "$val" "cli"
         else
             die_validation "unknown --models key '$key'" "Valid keys: $VALID_TIER_KEYS | $VALID_ROLE_KEYS"
@@ -462,77 +668,76 @@ if [[ -n "$MODELS_CSV" ]]; then
 fi
 
 # ---------------------------------------------------------------- validate + emit
-validate_role_string() { # role value
-    local role="$1" value="$2"
-    local engine rest model effort
-    engine="${value%%:*}"; rest="${value#*:}"
-    if [[ "$rest" == "$value" || -z "$engine" ]]; then
-        die_validation "role '$role' value '$value' is not engine:model[:effort-or-thinking]" "Valid engines: claude | codex | omp"
-    fi
-    case "$engine" in
-        claude|codex|omp) ;;
-        *) die_validation "role '$role' uses unknown engine '$engine'" "Valid engines: claude | codex | omp" ;;
-    esac
-    if [[ "$rest" == *:* ]]; then
-        model="${rest%%:*}"; effort="${rest#*:}"
-    else
-        model="$rest"; effort=""
-    fi
-    if [[ -n "$effort" ]]; then
-        case "$engine" in
-            claude)
-                die_validation "role '$role': effort is only valid for codex: engines or omp: model thinking (got '$value')" "drop the :$effort segment"
-                ;;
-            codex)
-                if [[ "${CODEX_EFFORT_SET#* $effort }" == "$CODEX_EFFORT_SET" ]]; then
-                    die_validation "role '$role': unknown codex effort '$effort'" "Valid efforts: low | medium | high | xhigh | max | ultra"
-                fi
-                ;;
-            omp)
-                if [[ "${OMP_THINKING_SET#* $effort }" == "$OMP_THINKING_SET" ]]; then
-                    die_validation "role '$role': unknown omp thinking level '$effort'" "Valid levels: off | minimal | low | medium | high | xhigh | max"
-                fi
-                ;;
-        esac
-    fi
-    if [[ -z "$model" && "$engine" != "codex" ]]; then
-        die_validation "role '$role': empty model only allowed for codex: (got '$value')" "specify a model, e.g. $engine:opus"
-    fi
-    case "$role" in
-        ensemble_detect|codex_detect|codex_validate|codex_crosscut)
-            [[ "$engine" == "codex" ]] \
-                || die_validation "role '$role' must use the codex engine (got '$value')" \
-                    "set $role=codex:<model>:<effort> (empty model is allowed as codex::<effort>)"
-            ;;
-    esac
-    # orchestrator matrix
+validate_effective_role() { # role value
+    local role="$1" value="$2" parts engine
+    parts=$(validate_role_syntax "role '$role'" "$role" "$value") || exit 1
+    engine="${parts%%|*}"
+
+    # Harness/engine availability is an effective-plan constraint, not
+    # persisted-source grammar. Dormant valid profiles remain portable.
     if [[ "$engine" == "omp" ]]; then
         case "$ORCHESTRATOR" in
-            claude-code) die_validation "role '$role' wants omp:... but the orchestrator is Claude Code" "run from omp, or choose claude:/codex: for this role" ;;
-            codex) command -v omp >/dev/null 2>&1 || die_validation "role '$role' wants omp:... but no omp CLI is on PATH" "install omp, or choose claude:/codex: for this role" ;;
+            claude-code)
+                die_validation "role '$role' wants omp:... but the orchestrator is Claude Code" \
+                    "run from omp, or choose claude:/codex: for this role"
+                ;;
+            codex)
+                command -v omp >/dev/null 2>&1 \
+                    || die_validation "role '$role' wants omp:... but no omp CLI is on PATH" \
+                        "install omp, or choose claude:/codex: for this role"
+                ;;
         esac
     fi
-    printf '%s|%s|%s' "$engine" "$model" "$effort"
+    printf '%s' "$parts"
 }
 
 ROLES_JSON="{}"
 emit_role() { # role tier|EXPLICIT
     local role="$1" tier="$2"
-    local rv value source
-    rv=$(get_kv ROLE_LIST "$role")
-    if [[ -n "$rv" ]]; then
-        value="${rv%%|*}"; source="${rv#*|}"
-    elif [[ "$tier" == "EXPLICIT" ]]; then
-        value=$(jq -r --arg k "$role" '.[$k].default' <<<"$ROLE_DEFS"); source="default"
+    local role_rv tier_rv role_value role_source tier_value tier_source
+    local role_rank tier_rank value source
+    role_rv=$(get_kv ROLE_LIST "$role")
+    if [[ "$tier" == "EXPLICIT" ]]; then
+        if [[ -n "$role_rv" ]]; then
+            value="${role_rv%%|*}"
+            source="${role_rv#*|}"
+        else
+            value=$(jq -r --arg k "$role" '.[$k].default' <<<"$ROLE_DEFS")
+            source="default"
+        fi
     else
-        rv=$(get_kv TIER_LIST "$tier")
-        value="${rv%%|*}"; source="${rv#*|} (tier:$tier)"
+        tier_rv=$(get_kv TIER_LIST "$tier")
+        tier_value="${tier_rv%%|*}"
+        tier_source="${tier_rv#*|}"
+        if [[ -n "$role_rv" ]]; then
+            role_value="${role_rv%%|*}"
+            role_source="${role_rv#*|}"
+            set_source_rank "$role_source"
+            role_rank="$SOURCE_RANK"
+            set_source_rank "$tier_source"
+            tier_rank="$SOURCE_RANK"
+            if [[ "$role_rank" -ge "$tier_rank" ]]; then
+                value="$role_value"
+                source="$role_source"
+            else
+                value="$tier_value"
+                source="$tier_source (tier:$tier)"
+            fi
+        else
+            value="$tier_value"
+            source="$tier_source (tier:$tier)"
+        fi
     fi
     local parts
-    parts=$(validate_role_string "$role" "$value") || exit 1
+    parts=$(validate_effective_role "$role" "$value") || exit 1
     local engine model effort
     engine="${parts%%|*}"; parts="${parts#*|}"
     model="${parts%%|*}"; effort="${parts#*|}"
+    case "$source" in
+        user-profile\(*|repo-profile\(*)
+            source="profile${source#*-profile}"
+            ;;
+    esac
     ROLES_JSON=$(jq -c --arg r "$role" --arg e "$engine" --arg m "$model" --arg f "$effort" --arg s "$source" \
         '.[$r] = {engine:$e, model:$m, effort:(if $f=="" then null else $f end), source:$s}' <<<"$ROLES_JSON")
 }

@@ -8,6 +8,19 @@ Capture `phase_3_start_epoch=$(date +%s)` as the first action of this
 phase — §13.5 observability requires an elapsed time on the phases.jsonl
 record and step 3.5 below references this variable.
 
+Materialize the resolved Phase-3 gate before any scoring or Wave-2 consumer.
+Read failures and non-numeric values are fatal; a missing/null gate uses the
+documented default:
+
+```bash
+phase3_gate=$(artifact-read.sh \
+  --path "$artifact_path" \
+  --filter '(.gates.phase3_gate // 45)') || exit $?
+phase3_gate=$(printf '%s\n' "$phase3_gate" | jq -er '
+  if type == "number" then . else error("phase3_gate must be numeric") end
+') || exit $?
+```
+
 ### 3.1. Pre-existing override (highest priority — §13.1)
 
 Before scoring runs, sweep the findings list for pre-existing candidates
@@ -41,8 +54,14 @@ overridden):
 ```bash
 scoring_ids=$(artifact-read.sh \
   --path "$artifact_path" \
-  --filter '[.findings[] | select(.disposition != "pre_existing_report") | .id]')
-scoring_count=$(printf '%s' "$scoring_ids" | jq 'length')
+  --filter '[.findings[] | select(.disposition != "pre_existing_report") | .id]') \
+  || exit $?
+scoring_count=$(printf '%s\n' "$scoring_ids" | jq -er '
+  if type == "array" then length
+  else error("scoring candidate enumeration must be an array")
+  end
+') || exit $?
+```
 
 Capture as `scoring_ids`.
 
@@ -162,15 +181,13 @@ For each chunk-agent's result:
     mutations, one atomic write:
 
     ```bash
-    scores_tmp=$(mktemp -t matthews-scores.XXXXXX)
     # Compose ONE JSON array across all chunks:
     # [{"id":"F001","score_phase3":72,"reason":"<rationale>"}, ...]
-    printf '%s' "$all_chunk_tuples_json" > "$scores_tmp"
-    artifact-patch.py \
-      --path "$artifact_path" \
-      --set-scores @"$scores_tmp" \
-      --expected "$scoring_count"
-    rm -f "$scores_tmp"
+    printf '%s\n' "$all_chunk_tuples_json" \
+      | artifact-patch.py \
+          --path "$artifact_path" \
+          --set-scores - \
+          --expected "$scoring_count"
     ```
 
     (`reason` at this phase holds the scoring rationale; Phase 4's gate
@@ -182,17 +199,35 @@ For each chunk-agent's result:
 For every finding still at the Phase-1 parking disposition:
 
 ```bash
-artifact-read.sh \
+gate_entries_json=$(artifact-read.sh \
   --path "$artifact_path" \
   --filter '[.findings[]
     | select(.disposition == "pending_validation")
-    | {id, score: .score_phase3, families: .source_families}]'
+    | {id, score: .score_phase3, families: .source_families}]') \
+  || exit $?
 ```
 
-For each returned entry, compute:
+For each returned `entry_json`, compute the routing value with jq rather than
+Bash integer operators, so fractional gates remain exact and a null score is
+explicitly false:
+
+```bash
+id=$(printf '%s\n' "$entry_json" | jq -er '.id') || exit $?
+score=$(printf '%s\n' "$entry_json" | jq -r '.score') || exit $?
+advances_to_phase_4=$(printf '%s\n' "$entry_json" | jq -r \
+  --argjson gate "$phase3_gate" '
+    (if (.score | type) == "number"
+     then .score >= $gate
+     else false
+     end)
+    or (((.families // []) | unique | length) >= 2)
+  ') || exit $?
+```
+
+Use this exact predicate for Wave 2's Phase-3 gate as well.
 
 - `advances_to_phase_4 = (score >= $phase3_gate) OR (count(distinct source_families) >= 2)`
-  (where `$phase3_gate` is the resolved `gates.phase3_gate`, default 45)
+  (where `$phase3_gate` is the materialized `gates.phase3_gate`, default 45)
 
 **When `score` is null** (§3.3 set it that way after a chunk parse
 failure or a missing-id response): treat `(score >= $phase3_gate)` as false. The

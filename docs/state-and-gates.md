@@ -16,8 +16,13 @@ absence is valid for artifacts created before v1.0:
   afresh, so the field reflects the most recent invocation.
 - `gates` — `phase3_gate`, the three strictly ascending `phase4_bands`,
   `fix_threshold`, and `walkthrough_threshold`.
-- `degraded` — present only when review coverage is incomplete; currently
-  `{ "lens_dispatch_failures": N }` with `N >= 1`.
+- `degraded` — present when review coverage or finalization is incomplete. It
+  may contain `lens_dispatch_failures`, `candidate_drop_failures`, and
+  `finalization_failures`, each a nonnegative integer.
+  All degraded counters are optional for compatibility; at least one present counter must be positive.
+  Lens-dispatch failures and candidate drops denote incomplete review coverage;
+  finalization failures denote incomplete finalization even when detection and
+  validation coverage was otherwise complete.
 
 ## Finding state model
 

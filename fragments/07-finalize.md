@@ -32,17 +32,31 @@ comment reflects cumulative sub-agent spend.
 review_started_at=$(artifact-read.sh \
   --path "$artifact_path" --filter '.review_started_at // empty' | jq -r '.')
 
-orchestrator-tokens.sh \
+finalization_record_failed=false
+orchestrator_tally_failed=false
+if ! orchestrator-tokens.sh \
   --artifact "$artifact_path" \
-  --since    "$review_started_at"
+  --since    "$review_started_at" \
+  2>>"$trace_log_path"; then
+    orchestrator_tally_failed=true
+    printf 'orchestrator_tally_failed\n' >> "$trace_log_path"
+    if ! log-phase.sh \
+      --review-dir "$review_dir" --phase 6 \
+      --record '{"name":"orchestrator-tally","finalization_failures":1}'; then
+        finalization_record_failed=true
+        printf 'finalization_failure_record_failed: orchestrator-tally\n' \
+          >> "$trace_log_path"
+    fi
+fi
 ```
 
-Companion to the sub-agent tally; the two are non-overlapping. Don't
-override `--cwd` — passing `$repo_root` mis-points in worktrees where
-the session was started from the worktree path. Safe to call when
-the transcript directory is absent (zero rollup, no error). Same
-cumulative-across-lifecycle-terminus pattern as the sub-agent tally:
-each lifecycle command re-invokes it before its final render.
+Companion to the sub-agent tally; the two are non-overlapping. Missing or
+incomplete hook metadata skips without mutation. A scoped empty session
+removes only that session's prior row and retains all sibling session totals.
+Malformed or unreadable transcript JSONL fails with structured stderr and
+leaves the artifact byte-for-byte unchanged. That failure is non-fatal
+telemetry: record it as one finalization failure, retain any prior tally
+instead of fabricating a zero, and surface it in step 6.10.
 
 The helper is **opt-in** via `MATTHEWS_REVIEW_TALLY_ORCHESTRATOR=1`
 (default skip). When opted out it exits 0 with one
@@ -168,46 +182,119 @@ log-phase.sh \
     '{name:"finalize", elapsed_sec:0, counts_by_state:$by_state, counts_by_disposition:$by_disp}')"
 ```
 
-### 6.4b. Mark degraded runs (BEFORE render)
+### 6.4b. Synchronize degraded runs (BEFORE render and AFTER failures)
 
 A zero-finding report is indistinguishable from a clean review unless
 failures are surfaced — detection failures live in
 `phases.jsonl`/`trace.md`, not in the finding list, and the published
-`artifact.md`/PR comment persists long after any chat-only warning
-scrolls away. Compute and store:
+`artifact.md`/PR comment persists long after any chat-only warning scrolls
+away. Reconcile the three existing counters through the atomic helper:
 
 ```bash
-degraded_json=$(jq -s '
-  {
-    lens_dispatch_failures:
-      ([.[].lens_dispatch_failures // 0] | add // 0),
-    candidate_drop_failures:
-      ([.[].candidate_drop_failures // 0] | add // 0),
-    finalization_failures:
-      ([.[].finalization_failures // 0] | add // 0)
-  }
-' "$phases_log_path")
-degraded_count=$(printf '%s' "$degraded_json" | jq \
-  '.lens_dispatch_failures + .candidate_drop_failures + .finalization_failures')
-if [[ "$degraded_count" -gt 0 ]]; then
-    artifact-patch.py --path "$artifact_path" \
-      --set-json "degraded=$degraded_json"
+if ! sync-degraded.py \
+  --artifact "$artifact_path" \
+  --phases-log "$phases_log_path" \
+  2>>"$trace_log_path"; then
+    finalization_record_failed=true
+    printf 'degradation_sync_failed\n' >> "$trace_log_path"
 fi
+
+record_finalization_failure() {
+    local failure_name="$1"
+    log-phase.sh \
+      --review-dir "$review_dir" --phase 6 \
+      --record "$(jq -nc --arg name "$failure_name" \
+        '{name:$name, finalization_failures:1}')" \
+      || return
+    sync-degraded.py \
+      --artifact "$artifact_path" \
+      --phases-log "$phases_log_path" \
+      || return
+}
 ```
 
-The renderer emits a prominent `⚠ REVIEW DEGRADED` block at the top of
-`artifact.md` whenever the field is present and non-zero — covering
-the chat mirror, the published PR comment, and any later re-render.
+`sync-degraded.py` validates every structured phase row, sums
+`lens_dispatch_failures`, `candidate_drop_failures`, and
+`finalization_failures`, validates the full artifact, and commits with one
+atomic write. A positive aggregate replaces `artifact.degraded` with the
+canonical three-counter object; an all-zero aggregate removes the optional
+field. On malformed input or validation/write failure it emits structured
+stderr and leaves the artifact untouched. Stop before render/publish if this
+sync fails.
+
+Every later render or publish failure must call
+`record_finalization_failure` only **after** the failing command returns. The
+immediate resync makes the renderer's prominent `⚠ REVIEW DEGRADED` block
+cover the local/chat report and any later render.
+
+The function is status-preserving: failure to append the phase row returns
+immediately without attempting sync, and sync failure returns nonzero. Call it
+exactly once per observed operation failure. A caller that sees nonzero sets
+`finalization_record_failed=true`, skips recovery render/publication, and
+refuses to mirror a clean-looking stale report.
 
 ### 6.5. Render `artifact.md`
 
+Stage each render beside the destination and rename only after the renderer
+returns zero. A failed renderer therefore cannot leave a truncated report that
+looks publishable:
+
 ```bash
-artifact-render.py \
-  --input "$artifact_path" --output "$review_dir/artifact.md"
+render_local_report() {
+    local staged_path render_rc
+    staged_path=$(mktemp "$review_dir/.artifact.md.tmp.XXXXXX") || return 1
+    if artifact-render.py \
+      --input "$artifact_path" --output "$staged_path" \
+      && mv "$staged_path" "$review_dir/artifact.md"; then
+        return 0
+    else
+        render_rc=$?
+    fi
+    rm -f "$staged_path"
+    return "$render_rc"
+}
+
+render_failed=false
+render_recovery_failed=false
+report_ready=false
+if [[ "$finalization_record_failed" == "true" ]]; then
+    # The degradation state could not be persisted/resynced. Fail closed:
+    # no clean-looking render may proceed to publication or chat.
+    report_ready=false
+elif render_local_report 2>>"$trace_log_path"; then
+    report_ready=true
+else
+    render_failed=true
+    printf 'render_failed\n' >> "$trace_log_path"
+    if record_finalization_failure "render" 2>>"$trace_log_path"; then
+        # One local-only recovery render reflects the newly-synced banner.
+        # A render failure permanently disables publication for this run.
+        if render_local_report 2>>"$trace_log_path"; then
+            report_ready=true
+        else
+            render_recovery_failed=true
+            printf 'render_recovery_failed\n' >> "$trace_log_path"
+            if ! record_finalization_failure \
+              "render-recovery" 2>>"$trace_log_path"; then
+                finalization_record_failed=true
+                printf 'finalization_failure_record_failed: render-recovery\n' \
+                  >> "$trace_log_path"
+            fi
+            report_ready=false
+        fi
+    else
+        finalization_record_failed=true
+        printf 'finalization_failure_record_failed: render\n' \
+          >> "$trace_log_path"
+        report_ready=false
+    fi
+fi
 ```
 
-On non-zero exit: log stderr to `trace.md` and stop — rendering is a
-prerequisite for publish and for mirror-to-chat.
+Never invoke the publisher when `render_failed == true`, even if the local-only
+recovery render succeeds. If both renders fail, do not read an older
+`artifact.md`/`published.md` into chat; surface the render errors from
+`trace.md` instead.
 
 ### 6.6. Re-assert `latest.txt` (atomic)
 
@@ -217,87 +304,147 @@ printf '%s\n' "$review_id" > "$tmp"
 mv "$tmp" "$reviews_root/$repo_slug/$head_branch/latest.txt"
 ```
 
-### 6.7. Publish (PR mode only)
+### 6.7. Publish (only after a successful first render)
 
-Call `artifact-publish.sh` unconditionally — it's designed to be
-called in every mode, with local mode as a no-op.
+On normal paths, call `artifact-publish.sh` in every mode; local/draft mode is
+the helper's no-op path. If the first render in step 6.5 failed, do not invoke
+the publisher at all, even when the local-only recovery render succeeded.
+
+Initialize publication state once:
+
+```bash
+publish_attempted=false
+publish_failed=false
+publish_recovery_render_failed=false
+publish_exit=0
+stdout=""
+```
 
 **PR mode:**
 
-First capture any `comment_id` that was persisted to the artifact
-during this run. On a fresh `/matthewsreview:review` this is normally empty —
-the seed at step 0.15 writes `comment_id: null` unless step 0.14's
-recovery prompt populated `existing_comment_id` (user chose "replace
-prior comment in place"):
+Capture any `comment_id` persisted to the artifact during this run. On a fresh
+`/matthewsreview:review` this is normally empty — the seed at step 0.15 writes
+`comment_id: null` unless step 0.14's recovery prompt populated
+`existing_comment_id`:
 
 ```bash
-comment_id_from_artifact=$(artifact-read.sh \
-  --path "$artifact_path" --filter '.comment_id // empty' 2>/dev/null || true)
-```
+if [[ "$mode" == "pr" \
+      && "$render_failed" == "false" \
+      && "$finalization_record_failed" == "false" ]]; then
+    comment_id_from_artifact=$(artifact-read.sh \
+      --path "$artifact_path" --filter '.comment_id // empty' \
+      2>/dev/null || true)
 
-Empty string means no comment id is known — the publisher will POST a
-new comment (§13.4). Non-empty means PATCH the existing comment in
-place.
+    publish_args=(
+        --mode pr
+        --review-id "$review_id"
+        --pr "$pr_number"
+        --repo-slug "$repo_slug"
+        --branch "$head_branch"
+        --review-dir "$review_dir"
+    )
+    # Prefer artifact-recorded comment_id; fall back to existing_comment_id.
+    # Omitting --comment-id on a fresh review intentionally POSTs.
+    if [[ -n "$comment_id_from_artifact" ]]; then
+        publish_args+=(--comment-id "$comment_id_from_artifact")
+    elif [[ -n "$existing_comment_id" ]]; then
+        publish_args+=(--comment-id "$existing_comment_id")
+    fi
 
-Build the publish invocation:
+    publish_attempted=true
+    stdout=$(artifact-publish.sh "${publish_args[@]}" \
+      2>>"$trace_log_path") || publish_exit=$?
 
-```bash
-publish_args=(
-    --mode pr
-    --review-id "$review_id"
-    --pr "$pr_number"
-    --repo-slug "$repo_slug"
-    --branch "$head_branch"
-    --review-dir "$review_dir"
-)
-# Prefer artifact-recorded comment_id; fall back to existing_comment_id
-# directly. Omitting --comment-id on a fresh /matthewsreview:review is
-# intentional — the publisher will POST a new comment.
-if [[ -n "$comment_id_from_artifact" ]]; then
-    publish_args+=(--comment-id "$comment_id_from_artifact")
-elif [[ -n "$existing_comment_id" ]]; then
-    publish_args+=(--comment-id "$existing_comment_id")
-fi
-
-stdout=$(artifact-publish.sh "${publish_args[@]}") \
-    || publish_exit=$?
-publish_exit=${publish_exit:-0}
-```
-
-Note the unquoted tilde — Bash expands `~/` only when it's not inside
-quotes. The helper script path must be unquoted (or use `$HOME/...`).
-
-On stdout emission `{"comment_id": N}` (post + first-time-located),
-persist to artifact:
-
-```bash
-new_id=$(echo "$stdout" | jq -r '.comment_id // empty')
-if [[ -n "$new_id" ]]; then
-    artifact-patch.py \
-      --path "$artifact_path" --set "comment_id=$new_id"
+    # Persist a newly-minted id only after a successful POST/PATCH fallback.
+    if [[ "$publish_exit" -eq 0 ]]; then
+        new_id=$(printf '%s' "$stdout" | jq -r '.comment_id // empty')
+        if [[ -n "$new_id" ]]; then
+            artifact-patch.py \
+              --path "$artifact_path" --set "comment_id=$new_id"
+        fi
+    fi
 fi
 ```
 
-On non-zero exit: log stderr to `trace.md` with tag
-`publish_failed`. Surface the failure to the user AFTER the
-mirror-to-chat step (so the user still sees the review in chat
-even though the PR didn't get it).
-
-**Local mode:**
+**Local/draft mode:**
 
 ```bash
-artifact-publish.sh \
-  --mode local --review-id "$review_id" --review-dir "$review_dir"
+if [[ "$mode" != "pr" \
+      && "$render_failed" == "false" \
+      && "$finalization_record_failed" == "false" ]]; then
+    publish_attempted=true
+    artifact-publish.sh \
+      --mode local --review-id "$review_id" --review-dir "$review_dir" \
+      2>>"$trace_log_path" || publish_exit=$?
+fi
 ```
 
-No-op that appends a one-line trace entry. Exit should be 0.
+The local invocation remains a no-op that appends one trace line. Handle a
+failure from either mode once, after the publisher returns:
+
+```bash
+if [[ "$publish_attempted" == "true" && "$publish_exit" -ne 0 ]]; then
+    publish_failed=true
+    printf 'publish_failed\n' >> "$trace_log_path"
+    if record_finalization_failure "publish" 2>>"$trace_log_path"; then
+        # Local recovery only: do not retry publication.
+        if render_local_report 2>>"$trace_log_path"; then
+            report_ready=true
+        else
+            publish_recovery_render_failed=true
+            report_ready=false
+            printf 'publish_recovery_render_failed\n' >> "$trace_log_path"
+            if ! record_finalization_failure \
+              "publish-recovery-render" 2>>"$trace_log_path"; then
+                finalization_record_failed=true
+                printf 'finalization_failure_record_failed: publish-recovery-render\n' \
+                  >> "$trace_log_path"
+            fi
+        fi
+    else
+        finalization_record_failed=true
+        report_ready=false
+        printf 'finalization_failure_record_failed: publish\n' \
+          >> "$trace_log_path"
+    fi
+fi
+```
+
+The resync precedes the recovery render, so `artifact.md` contains the
+degraded banner. Never retry the failed publication in this run. If its local
+recovery render also fails, keep the canonical failure counters but do not
+mirror an older report.
 
 ### 6.8. Mirror the rendered report to chat (all modes)
 
-Read `$review_dir/artifact.md` and output the full content directly to
-the Claude Code chat — NOT a summary, the full sectioned report. This
-lets the user inspect findings without bouncing to GitHub (and is the
-only output in local mode).
+Select the report body first:
+
+```bash
+mirror_path=""
+if [[ "$report_ready" == "true" ]]; then
+    mirror_path="$review_dir/artifact.md"
+    if [[ "$mode" == "pr" \
+          && "$publish_attempted" == "true" \
+          && "$publish_failed" == "false" \
+          && "$publish_exit" -eq 0 \
+          && -f "$review_dir/published.md" ]]; then
+        mirror_path="$review_dir/published.md"
+    fi
+fi
+```
+
+`artifact-publish.sh` writes `published.md` atomically as the exact body
+selected for GitHub. On a successful PR publication, mirror that file so an
+oversized full report shows the same bounded disposition queue in chat and on
+the PR. The success path therefore remains an exact chat mirror of the compact
+or full body actually sent. Local/draft mode, an initial render failure, or a
+publish failure uses the newly rendered full `artifact.md` with its degraded
+banner.
+
+When `$mirror_path` is non-empty, read it and output its full content directly
+to chat — NOT a summary. When it is empty, both the initial/recovery render (or
+the post-publish recovery render) failed; do not read a stale report and
+surface the deferred failures in step 6.10 instead.
 
 Prepend a one-line mode-aware header:
 
@@ -305,8 +452,8 @@ Prepend a one-line mode-aware header:
 - `draft` → `### Code review (draft PR)`
 - `local` → `### Code review (local — \`$head_branch\` vs \`$base_branch\`)`
 
-After the main report body (the contents of `artifact.md`), add a
-**Next steps** block. Do NOT use ASK here.
+After the selected report body, add a **Next steps** block. Do NOT use
+ASK here.
 
 Build the rows from the finalized artifact with the same selectors the
 lifecycle commands use:
@@ -431,9 +578,33 @@ If `stash_taken == false`, skip this step.
 
 ### 6.10. Final status + surface any deferred failures
 
-If any of publish / render / validation failed, surface them as the
-primary user-visible failure now, after the chat mirror. Each failure
-should name the step and the next action the user should take.
+After the chat mirror (when one is available), surface every deferred failure
+that occurred; do not collapse them into a generic warning:
 
-If everything succeeded: nothing more to say — the chat mirror + any
-PR comment is the deliverable.
+- `orchestrator_tally_failed == true` — token telemetry could not be read.
+  State that the artifact was not changed or zero-filled, any prior tally was
+  retained, and the structured error is in `$trace_log_path`.
+- `finalization_record_failed == true` — a finalization failure record/resync
+  could not be persisted. State that render/recovery/publication was disabled
+  fail-closed, no clean-looking report was mirrored, and the structured error
+  is in `$trace_log_path`. Do not re-run the recorder (the phase append may
+  already have succeeded); repair the log/artifact and run
+  `sync-degraded.py` once.
+- `render_failed == true` — the first render failed, publication was skipped,
+  and the report shown (if any) is the local-only recovery render. Name
+  `$trace_log_path` and tell the user to resolve the renderer error before
+  manually publishing.
+- `render_recovery_failed == true` — no current report could be mirrored; the
+  canonical artifact still records both finalization failures.
+- `publish_failed == true` — publication failed and was not retried. When its
+  failure record/resync succeeded, the canonical artifact and local/chat
+  `artifact.md` were rerendered with the degraded banner; tell the user to fix
+  the publisher error and invoke it manually. If record/resync failed, use the
+  fail-closed message above instead.
+- `publish_recovery_render_failed == true` — publication failed and its local
+  recovery render also failed, so no stale report was mirrored.
+- A validation failure remains an immediate stop: name the validator step and
+  recovery action from step 6.1.
+
+If every flag is false and validation succeeded, nothing more is needed — the
+chat mirror plus any PR comment is the deliverable.

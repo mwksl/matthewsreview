@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(review-root.sh:*), Bash(doctor.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(claude-md-paths.sh:*), Bash(staleness.sh:*), Bash(prior-fix-diff.sh:*), Bash(line-range-check.sh:*), Bash(assign-finding-ids.sh:*), Bash(origin-crosscheck.sh:*), Bash(parse-with-repair.py:*), Bash(parse-validator-result.py:*), Bash(source-family-map.py:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(freshness-gate.sh:*), Bash(trivial-check.sh:*), Bash(artifact-seed.sh:*), Bash(codex-poll.sh:*), Bash(agent-dispatch.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(mktemp:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(node:*), Bash(find:*), AskUserQuestion, Agent, Read, BashOutput, KillShell
+allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(review-root.sh:*), Bash(doctor.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(claude-md-paths.sh:*), Bash(staleness.sh:*), Bash(prior-fix-diff.sh:*), Bash(line-range-check.sh:*), Bash(assign-finding-ids.sh:*), Bash(origin-crosscheck.sh:*), Bash(parse-with-repair.py:*), Bash(parse-validator-result.py:*), Bash(source-family-map.py:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(freshness-gate.sh:*), Bash(trivial-check.sh:*), Bash(artifact-seed.sh:*), Bash(codex-poll.sh:*), Bash(agent-dispatch.sh:*), Bash(codex login status), Bash(sync-degraded.py:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(mktemp:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(node:*), Bash(find:*), AskUserQuestion, Agent, Read, BashOutput, KillShell
 argument-hint: "[--effort <low|medium|high|xhigh|max|ultra>] [--full] [--profile <name>] [--models \"<csv>\"]"
 description: Codex-driven deep code review producing the same artifact.json shape as :review (drop-in for /matthewsreview:fix, :add, :walkthrough, :promote).
 disable-model-invocation: false
@@ -7,8 +7,9 @@ disable-model-invocation: false
 
 Flags (optional):
 - `--effort <level>` controls Codex reasoning depth (`low`, `medium`,
-  `high`, `xhigh`). Default `high`. Higher = deeper analysis but
+  `high`, `xhigh`, `max`, `ultra`). Default `high`. Higher = deeper analysis but
   longer wall-clock and higher cost.
+  `max` and `ultra` require the authenticated standalone Codex transport.
 - `--full` forces `trivial_mode=false` for this run (overrides the
   doc/config-PR early-exit). Same semantics as `:review --full`.
 
@@ -83,9 +84,12 @@ effort-derived ceiling, and returns normalized `raw_output`.
 **Standalone mode** (`codex_launch_mode=agent-dispatch`) launches
 `agent-dispatch.sh start --engine codex`, polls with
 `agent-dispatch.sh poll`, and cancels with `agent-dispatch.sh stop`.
-Its verdict vocabulary matches `codex-poll.sh`, so the same retry and
-drop policy applies. The model and effort come from the resolved
-`codex_detect`, `codex_validate`, or `codex_crosscut` role.
+Poll adds terminal `cancelled`. Stop itself returns exactly one of
+`cancelled` (verified gone), `already_finished` (completion won; re-poll the
+same job), or non-zero `stop_failed` (do not retry because the old engine may
+still be running). Never parse malformed/partial stop output and never issue a
+redundant stop after polled cancellation. The model and effort come from the
+resolved `codex_detect`, `codex_validate`, or `codex_crosscut` role.
 
 Launch ALL jobs in a phase within one orchestrator turn so they run
 concurrently; poll all in-flight jobs together on subsequent turns.
@@ -169,12 +173,17 @@ if [[ -n "$CODEX_COMPANION" ]]; then
     fi
 fi
 
+codex_cli_ready=false
 if [[ -z "$codex_launch_mode" ]] \
    && command -v codex >/dev/null 2>&1 \
+   && codex login status >/dev/null 2>&1; then
+    codex_cli_ready=true
+fi
+if [[ "$codex_cli_ready" == "true" ]] \
    && { [[ -n "${MRB:-}" && -x "${MRB}agent-dispatch.sh" ]] \
         || command -v agent-dispatch.sh >/dev/null 2>&1; }; then
     codex_launch_mode="agent-dispatch"
-    codex_readiness_note="companion unavailable or not ready; using standalone Codex CLI"
+    codex_readiness_note="companion unavailable or not ready; using authenticated standalone Codex CLI"
 fi
 
 if [[ -z "$codex_launch_mode" ]]; then

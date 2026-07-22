@@ -19,9 +19,9 @@ token logging, summary); execution sequencing is orchestrated from
 
 Phase 1.5 pulls additional candidates from two external channels:
 
-1. **Codex CLI** — `node "$CODEX_COMPANION" task --prompt-file <file>`, a
-   local Codex-based review. Runs in background; result awaited before
-   the normalizer dispatch.
+1. **Codex CLI** — either the ready `codex-companion` task transport or
+   standalone `codex` via `agent-dispatch.sh`, selected in Phase 1. Runs in
+   background; result awaited before the normalizer dispatch.
 2. **GitHub PR comment scrape** — `external-scrape.sh` pulls bot-authored
    comments on the PR. Fires after the Codex output is collected
    (§1.5.4) so third-party PR-comment bots — Greptile,
@@ -35,9 +35,13 @@ candidates. The normalizer's output pools into the orchestrator-context
 assigns ids and commits to `artifact.findings[]` with
 `source_family: "external-deep-family"` and `origin_confidence: "low"`.
 
-**Token accounting.** Codex CLI spend is NOT logged to
-`tokens.jsonl` (it's billed by the provider externally). Only the
-resolved `normalizer` sub-agent is logged, under `phase_1_5`.
+**Token accounting.** A launched Codex CLI reviewer emits exactly one
+`codex_ensemble_reviewer` telemetry row under `phase_1_5`, regardless of
+transport. Standalone dispatch preserves its reported numeric `tokens`
+(including zero); companion usage is unreported and records `null`. Provider
+billing remains external. The resolved `normalizer` sub-agent emits its own
+independent row under `phase_1_5`; a reviewer that was never launched emits no
+reviewer row.
 
 ### 1.5.1. Readiness
 
@@ -86,10 +90,20 @@ can poll**:
 
 ```bash
 ensemble_ceiling_sec=$(( 600 + 60 * lines_changed / 1000 ))
-[[ "$ensemble_ceiling_sec" -gt 1200 ]] && ensemble_ceiling_sec=1200
+if [[ "$ensemble_ceiling_sec" -gt 1200 ]]; then
+    ensemble_ceiling_sec=1200
+fi
 ```
 
 (Default 600s + 60s per 1,000 changed lines, cap 2×.)
+
+Before issuing the Phase-1 dispatch turn, initialize these values in
+**orchestrator working context** (not inside a Bash subprocess):
+
+- `codex_reviewer_launched=false`
+- `codex_reviewer_agent_id=""`
+- `codex_job_id=""`
+- `codex_poll=""`
 
 *`codex_launch_mode == "companion"` (default on Claude Code):*
 
@@ -106,45 +120,175 @@ companion_args=(node "$CODEX_COMPANION" task \
 Launch with the Bash tool using `run_in_background: true`. Capture the
 returned shell id as `codex_shell_id`.
 
-*`codex_launch_mode == "agent-dispatch"` (omp / Codex orchestrators,
-companion absent):*
+Once the Bash tool accepts the companion launch and returns
+`codex_shell_id`, record these values in orchestrator working context:
+
+- `codex_reviewer_launched=true`
+- `codex_reviewer_agent_id=<codex_shell_id>`
+
+*`codex_launch_mode == "agent-dispatch"` (standalone fallback on any
+orchestrator):*
 
 ```bash
-dispatch_args=("${MRB}agent-dispatch.sh" start --engine codex \
+dispatch_args=("${MRB:-}agent-dispatch.sh" start --engine codex \
   --prompt-file "/tmp/matthews-review-codex-$review_id.md" \
   --scratch-dir "$scratch_dir")
 [[ -n "${role_ensemble_detect_model:-}" ]] && \
   dispatch_args+=(--model "$role_ensemble_detect_model")
 [[ -n "${role_ensemble_detect_effort:-}" ]] && \
   dispatch_args+=(--effort "$role_ensemble_detect_effort")
-"${dispatch_args[@]}"
+codex_launch_result=$("${dispatch_args[@]}") || exit $?
+if ! printf '%s\n' "$codex_launch_result" \
+  | jq -e '.job_id | type == "string" and length > 0' >/dev/null; then
+  printf '%s\n' \
+    'ERROR: agent-dispatch.sh start returned malformed JSON or no job_id.' \
+    'Action: treat the Codex reviewer launch as failed; do not poll.' >&2
+  exit 1
+fi
+printf '%s\n' "$codex_launch_result"
 ```
 
+Issue this as a **foreground** Bash tool-use in the same Phase-1 dispatch
+turn as the lens Agent calls. `agent-dispatch.sh start` detaches the engine
+job and returns immediately; a second background wrapper would only hide its
+result. Capture the returned JSON object as `codex_launch_json`, require a
+non-empty string `.job_id`, and record these values in orchestrator working
+context:
+
+- `codex_job_id=<codex_launch_json.job_id>`
+- `codex_reviewer_launched=true`
+- `codex_reviewer_agent_id=<codex_job_id>`
+
+Malformed start output or a missing `job_id` is a launch failure: log it and
+follow the same degraded-coverage choice as any other Codex launch failure.
+Do not enter §1.5.3 without a captured job id.
+
 (`role_ensemble_detect_model`/`role_ensemble_detect_effort` come from
-the `ensemble_detect` role in the model plan — Prelude §2.) Capture
-the returned `job_id` as `codex_job_id`. Polling happens in §1.5.3.
+the `ensemble_detect` role in the model plan — Prelude §2.)
 
 If `codex_available == false`, skip this launch.
 
 ### 1.5.3. Collect CLI reviewer output
 
-*`codex_launch_mode == "agent-dispatch"`:* poll via the helper's
-shared verdict vocabulary instead of BashOutput:
+*`codex_launch_mode == "agent-dispatch"`:* run one foreground collector
+that owns the polling loop and prints the final verdict JSON to stdout:
 
 ```bash
-"${MRB}agent-dispatch.sh" poll --job "$codex_job_id" --scratch-dir "$scratch_dir" \
-  --stall-threshold-sec 90 --wall-clock-ceiling-sec "$ensemble_ceiling_sec"
+codex_poll_result=""
+while :; do
+    codex_poll_result=$("${MRB:-}agent-dispatch.sh" poll \
+      --job "$codex_job_id" --scratch-dir "$scratch_dir" \
+      --stall-threshold-sec 90 \
+      --wall-clock-ceiling-sec "$ensemble_ceiling_sec") || exit $?
+    codex_verdict=$(printf '%s\n' "$codex_poll_result" | jq -er '.verdict') \
+      || exit $?
+    case "$codex_verdict" in
+        alive|stalled_suspect)
+            sleep 5
+            ;;
+        completed)
+            printf '%s\n' "$codex_poll_result" \
+              | jq -er '.raw_output' > "$scratch_dir/codex.out" || exit $?
+            printf '%s\n' "$codex_poll_result"
+            break
+            ;;
+        wall_clock_exceeded)
+            set +e
+            codex_stop_result=$("${MRB:-}agent-dispatch.sh" stop \
+              --job "$codex_job_id" --scratch-dir "$scratch_dir")
+            codex_stop_rc=$?
+            set -e
+            codex_stop_verdict=$(printf '%s\n' "$codex_stop_result" | jq -ser \
+              --arg job "$codex_job_id" '
+                select(length == 1)
+                | .[0]
+                | select(
+                    type == "object"
+                    and .job_id == $job
+                    and (
+                      (.verdict == "cancelled" and .status == "cancelled")
+                      or
+                      (.verdict == "already_finished"
+                       and .stop_noop == true
+                       and (
+                         (.status == "completed" and .terminal_verdict == "completed")
+                         or
+                         (.status == "failed" and .terminal_verdict == "failed_terminal")
+                       ))
+                      or
+                      (.verdict == "stop_failed"
+                       and .status == "stop_failed"
+                       and (.reason | type == "string" and length > 0)
+                       and (.wrapper_alive | type == "boolean")
+                       and (.engine_alive | type == "boolean"))
+                    ))
+                | .verdict
+              ') || {
+                printf '%s\n' \
+                  'ERROR: agent-dispatch.sh stop returned malformed, partial, or mismatched output.' \
+                  'Action: inspect the job processes; do not retry as if cancellation succeeded.' >&2
+                exit 1
+            }
+            if [[ ( "$codex_stop_rc" -eq 0 && "$codex_stop_verdict" == "stop_failed" ) \
+                  || ( "$codex_stop_rc" -ne 0 && "$codex_stop_verdict" != "stop_failed" ) ]]; then
+                printf 'ERROR: agent-dispatch.sh stop exited %s with verdict %s.\n' \
+                  "$codex_stop_rc" "$codex_stop_verdict" >&2
+                printf '%s\n' \
+                  'Action: inspect the job processes; do not retry as if cancellation succeeded.' >&2
+                exit 1
+            fi
+            case "$codex_stop_verdict" in
+                cancelled)
+                    printf '%s\n' "$codex_poll_result"
+                    break
+                    ;;
+                already_finished)
+                    # Completion won the terminal-state race. Re-poll the
+                    # same immutable record; never launch a retry from the
+                    # stale wall-clock verdict.
+                    continue
+                    ;;
+                stop_failed)
+                    printf '%s\n' \
+                      'ERROR: agent-dispatch.sh could not verify cancellation.' \
+                      'Action: inspect the authenticated wrapper/engine; do not launch a retry.' >&2
+                    exit 1
+                    ;;
+                *)
+                    printf 'ERROR: unknown agent-dispatch stop verdict: %s\n' \
+                      "$codex_stop_verdict" >&2
+                    printf '%s\n' \
+                      'Action: inspect the job processes; do not retry.' >&2
+                    exit 1
+                    ;;
+            esac
+            ;;
+        failed_terminal|cancelled)
+            printf '%s\n' "$codex_poll_result"
+            break
+            ;;
+        *)
+            printf 'ERROR: unknown agent-dispatch verdict: %s\n' \
+              "$codex_verdict" >&2
+            printf 'Action: inspect %s and retry the review.\n' \
+              "$trace_log_path" >&2
+            exit 1
+            ;;
+    esac
+done
 ```
 
-(`$ensemble_ceiling_sec` = the size-scaled deadline from §Deadline
-scaling — default 600 + 60s per 1,000 changed lines, cap 2×.) Loop on
-`alive`/`stalled_suspect`; on `completed` the payload's `raw_output`
-is the reviewer output (write it to `$scratch_dir/codex.out` so the
-normalizer path below is mode-agnostic) and `tokens` logs via
-log-tokens.sh; on `wall_clock_exceeded` run `agent-dispatch.sh stop`,
-set `codex_timed_out=true`; on `failed_terminal` set
-`codex_exit_code` from the payload and continue as with the companion
-failure path.
+Capture this Bash tool's stdout JSON into orchestrator working context as
+`codex_poll`. The collector writes completed `raw_output` to
+`$scratch_dir/codex.out`, so the downstream normalizer remains
+transport-neutral. A non-zero collector exit is a dispatch failure; never
+continue with an empty or partial `codex_poll`.
+The terminal contract is monotonic. A polled `cancelled` verdict is emitted
+directly without a redundant stop. A timed-out stop may return `cancelled`
+(safe terminal cancellation), `already_finished` (completion won, so the
+collector re-polls instead of retrying), or non-zero `stop_failed` (abort;
+the old engine may still be running). Malformed/partial stop output is never
+treated as success.
 
 *`codex_launch_mode == "companion"`:*
 
@@ -162,15 +306,15 @@ The deadline is the `ensemble_ceiling_sec` value materialized before
 launch in §1.5.2. On timeout, capture whatever output exists, mark the
 reviewer as `timed_out`, and continue.
 
-Capture these variables as the background shell resolves — the status
-computation below reads each one by name, so every branch must set
-every variable:
+Before the status computation below, materialize these values in orchestrator
+working context for every branch:
 
-- `codex_exit_code` — integer exit code from the background shell
-  (`BashOutput` exposes it when the shell exits); default `0` for the
-  skipped branch.
-- `codex_timed_out` — `"true"` if the `$ensemble_ceiling_sec` deadline elapsed
-  before the shell exited, else `"false"`.
+- Companion: `codex_exit_code` comes from the completed background Bash tool;
+  `codex_timed_out=true` only if its deadline elapsed.
+- Standalone: derive both from captured `codex_poll`
+  (`wall_clock_exceeded` means timed out; `completed` means exit 0;
+  `failed_terminal`/`cancelled` mean non-zero).
+- Skipped: `codex_exit_code=0`, `codex_timed_out=false`.
 
 After the reviewer resolves, set the status variable that the
 Phase-1.5 summary record at step 1.5.7 will reference:
@@ -185,6 +329,31 @@ elif [[ "${codex_exit_code:-0}" -ne 0 ]] || [[ ! -s "$scratch_dir/codex.out" ]];
     codex_status=failed
 else
     codex_status=success
+fi
+```
+
+### 1.5.3b. Log CLI reviewer tokens
+
+After either transport resolves, emit one transport-neutral reviewer row if
+and only if a launch occurred. Companion does not report usage, so its value
+is `null`; standalone preserves any numeric value, including zero:
+
+```bash
+if [[ "$codex_reviewer_launched" == "true" ]]; then
+    codex_reviewer_tokens=null
+    if [[ "$codex_launch_mode" == "agent-dispatch" \
+          && -n "${codex_poll:-}" ]]; then
+        codex_reviewer_tokens=$(printf '%s\n' "$codex_poll" | jq -r '
+          if (.tokens? | type) == "number" then .tokens else "null" end
+        ') || codex_reviewer_tokens=null
+    fi
+
+    log-tokens.sh \
+      --review-dir "$review_dir" --phase phase_1_5 \
+      --agent-role codex_ensemble_reviewer \
+      --agent-id "$codex_reviewer_agent_id" \
+      --model "$role_ensemble_detect" \
+      --tokens "$codex_reviewer_tokens"
 fi
 ```
 
@@ -265,8 +434,9 @@ scrape succeeding.
 
 If both prompt slots are trivially empty — `codex_status != success`
 AND the PR scrape produced zero bot comments — skip §1.5.5 (normalizer
-dispatch) and §1.5.6 (token log: no sub-agent ran). Proceed directly
-to §1.5.6b (scratch cleanup) and §1.5.7 (summary). This is the path
+dispatch) and §1.5.6 (normalizer token log: no normalizer ran). The
+reviewer row, when it launched, was already recorded in §1.5.3b. Proceed
+directly to §1.5.6b (scratch cleanup) and §1.5.7 (summary). This is the path
 the README documents for local-mode `--ensemble` without Codex
 ("Phase 1.5 has no work to do").
 

@@ -39,7 +39,6 @@ QUIET=0
 [[ "${1:-}" == "--quiet" ]] && QUIET=1
 THIS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-REVIEWS_ROOT=$("$THIS/review-root.sh" 2>/dev/null)
 
 had_fail=0
 
@@ -49,6 +48,16 @@ say() { # level message
     printf '%-4s %s\n' "$level" "$msg"
 }
 fix() { printf '      fix: %s\n' "$1"; }
+
+REVIEWS_ROOT=$("$THIS/review-root.sh" 2>/dev/null)
+review_root_rc=$?
+if [[ "$review_root_rc" -ne 0 || -z "$REVIEWS_ROOT" ]]; then
+    say FAIL "config: could not resolve a non-empty reviews root"
+    fix "set MATTHEWS_REVIEW_REVIEWS_ROOT to a one-line absolute path"
+    echo "ERROR: doctor found a required configuration failure." >&2
+    echo "Action: apply the FAIL/fix guidance above, then rerun doctor.sh." >&2
+    exit 5
+fi
 
 # --- deps -----------------------------------------------------------------
 for tool in uv jq gh git; do
@@ -98,8 +107,14 @@ fi
 # with the live registry rather than treating syntactic validity as
 # availability.
 if command -v omp >/dev/null 2>&1; then
-    plan_json=$("$THIS/review-config.sh" --repo-root "$REPO_ROOT" --orchestrator omp 2>/dev/null || true)
-    if [[ -n "$plan_json" ]]; then
+    plan_rc=0
+    plan_json=$("$THIS/review-config.sh" --repo-root "$REPO_ROOT" --repo-config-worktree --orchestrator omp 2>/dev/null) \
+        || plan_rc=$?
+    if [[ "$plan_rc" -ne 0 ]]; then
+        say FAIL "models: could not resolve the configured model plan"
+        fix "run $THIS/review-config.sh --repo-root \"$REPO_ROOT\" --repo-config-worktree --orchestrator omp"
+        had_fail=1
+    elif [[ -n "$plan_json" ]]; then
         model_warning=0
         plan_warn=$(printf '%s' "$plan_json" | jq -r '.warnings[0] // empty')
         if [[ -n "$plan_warn" ]]; then
@@ -154,9 +169,14 @@ fi
 config_seen=0
 config_syntax_ok=1
 for cfg in "$REVIEWS_ROOT/config.json" "$REPO_ROOT/.matthewsreview.json"; do
-    if [[ -f "$cfg" ]]; then
+    if [[ -e "$cfg" || -L "$cfg" ]]; then
         config_seen=1
-        if jq empty "$cfg" 2>/dev/null; then
+        if [[ ! -f "$cfg" || ! -r "$cfg" ]]; then
+            say FAIL "config: $cfg is not a readable regular file"
+            fix "replace $cfg with a readable JSON configuration file"
+            had_fail=1
+            config_syntax_ok=0
+        elif jq empty "$cfg" 2>/dev/null; then
             say PASS "config: $cfg parses"
         else
             say FAIL "config: $cfg is not valid JSON"
@@ -167,17 +187,16 @@ for cfg in "$REVIEWS_ROOT/config.json" "$REPO_ROOT/.matthewsreview.json"; do
     fi
 done
 if [[ "$config_seen" == "1" && "$config_syntax_ok" == "1" ]]; then
-    set +e
+    config_rc=0
     config_error=$("$THIS/review-config.sh" \
-        --repo-root "$REPO_ROOT" --orchestrator omp 2>&1 >/dev/null)
-    config_rc=$?
-    set -e
+        --repo-root "$REPO_ROOT" --repo-config-worktree --orchestrator omp 2>&1 >/dev/null) \
+        || config_rc=$?
     if [[ "$config_rc" == "0" ]]; then
         say PASS "config: semantic schema valid"
     else
         say FAIL "config: semantic validation failed — $(printf '%s' "$config_error" | head -1)"
         config_action=$(printf '%s\n' "$config_error" | grep '^Action:' | head -1 | sed 's/^Action: //')
-        fix "${config_action:-run $THIS/review-config.sh --repo-root \"$REPO_ROOT\" --orchestrator omp}"
+        fix "${config_action:-run $THIS/review-config.sh --repo-root \"$REPO_ROOT\" --repo-config-worktree --orchestrator omp}"
         had_fail=1
     fi
 fi
@@ -192,18 +211,22 @@ if [[ -n "$legacy_env" ]]; then
     say WARN "stale: pre-rename env var(s) set: $(printf '%s' "$legacy_env" | cut -d= -f1 | tr '\n' ' ')"
     fix "rename ADAMS_REVIEW_* exports to MATTHEWS_REVIEW_* in your shell rc"
 fi
-for settings in "$HOME/.claude/settings.json" ".claude/settings.json"; do
+for settings in "$HOME/.claude/settings.json" "$REPO_ROOT/.claude/settings.json"; do
     if [[ -f "$settings" ]] && grep -q 'adamsreview@adamsreview' "$settings"; then
         say WARN "stale: $settings enables adamsreview@adamsreview"
         fix "replace with matthewsreview@matthewsreview in $settings"
     fi
 done
-for local_settings in "$HOME/.claude/settings.local.json" ".claude/settings.local.json"; do
+for local_settings in "$HOME/.claude/settings.local.json" "$REPO_ROOT/.claude/settings.local.json"; do
     if [[ -f "$local_settings" ]] && grep -q 'plugins/cache/adamsreview' "$local_settings"; then
         say WARN "stale: $local_settings allowlists a versioned adamsreview cache path"
         fix "remove the plugins/cache/adamsreview/.../bin PATH line from $local_settings"
     fi
 done
 
-if [[ "$had_fail" == "1" ]]; then exit 5; fi
+if [[ "$had_fail" == "1" ]]; then
+    echo "ERROR: doctor found one or more required dependency or configuration failures." >&2
+    echo "Action: apply each FAIL/fix item above, then rerun doctor.sh." >&2
+    exit 5
+fi
 exit 0

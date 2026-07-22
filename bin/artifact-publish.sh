@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # artifact-publish.sh — rendered-report publisher (DESIGN §21.6, §13.4, §8.4).
 #
-# PR mode: post or edit the rendered `artifact.md` on a GitHub PR.
+# PR mode: post or edit the rendered `artifact.md` on a GitHub PR. Reports
+# above GitHub's issue-comment limit are replaced with a bounded disposition
+# queue; the full artifact.md remains intact and the exact sent body is saved
+# as `published.md` when --review-dir is available.
 # Local mode: no-op. (Local-mode exists so the orchestrator can call
 # this unconditionally in every mode.)
 #
@@ -17,9 +20,9 @@
 #   3. --repo-slug + --branch  (latest.txt fallback — DESIGN §13.4):
 #        <reviews-root>/<slug>/<branch>/latest.txt → <review_id> →
 #        <reviews-root>/<slug>/<branch>/<review_id>/artifact.md
-#      where <reviews-root> is $MATTHEWS_REVIEW_REVIEWS_ROOT (default
-#      ~/.matthews-reviews). If the resolved review_id disagrees with
-#      --review-id, exit 1 with a staleness note.
+#      where <reviews-root> is normalized by review-root.sh from the current
+#      Matthews/legacy environment and home-directory fallback chain. If the
+#      resolved review_id disagrees with --review-id, exit 1 with a staleness note.
 #
 # Comment discovery (§13.4, in order):
 #   1. --comment-id passed → PATCH. On PATCH failure (comment deleted
@@ -37,6 +40,10 @@
 # orchestrator-side debugging.
 #
 # Exits: 0 success; 1 gh/network/resolution error; 64 usage.
+#
+# GitHub issue comments reject bodies above 65,536 characters. This helper
+# applies the stricter UTF-8 byte limit and targets 65,000 bytes for the
+# compact fallback so multibyte content cannot slip past the API limit.
 
 set -euo pipefail
 
@@ -76,6 +83,13 @@ REVIEW_DIR=""
 REPO_SLUG=""
 BRANCH=""
 DRY_RUN=0
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GITHUB_COMMENT_MAX_BYTES=65536
+PR_COMMENT_TARGET_BYTES=65000
+BODY_MD_PATH=""
+BODY_JSON=""
+TEMP_COMMENT_PATH=""
+PUBLISHED_TMP=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -138,6 +152,81 @@ emit_comment_id() {
     printf '{"comment_id": %s}\n' "$1"
 }
 
+cleanup_publish_temps() {
+    [[ -z "$BODY_JSON" ]] || rm -f "$BODY_JSON"
+    [[ -z "$TEMP_COMMENT_PATH" ]] || rm -f "$TEMP_COMMENT_PATH"
+    [[ -z "$PUBLISHED_TMP" ]] || rm -f "$PUBLISHED_TMP"
+}
+
+file_bytes() {
+    wc -c < "$1" | tr -d '[:space:]'
+}
+
+prepare_comment_body() {
+    local full_bytes artifact_path md_dir compact_bytes
+    full_bytes=$(file_bytes "$MD_PATH")
+    BODY_MD_PATH="$MD_PATH"
+
+    if [[ "$full_bytes" -gt "$GITHUB_COMMENT_MAX_BYTES" ]]; then
+        artifact_path=""
+        if [[ -n "$REVIEW_DIR" && -f "$REVIEW_DIR/artifact.json" ]]; then
+            artifact_path="$REVIEW_DIR/artifact.json"
+        else
+            md_dir="$(cd "$(dirname "$MD_PATH")" && pwd -P)"
+            if [[ -f "$md_dir/artifact.json" ]]; then
+                artifact_path="$md_dir/artifact.json"
+            fi
+        fi
+
+        if [[ -z "$artifact_path" ]]; then
+            echo "ERROR: rendered report is $full_bytes bytes; GitHub accepts at most $GITHUB_COMMENT_MAX_BYTES" >&2
+            echo "Context: compact fallback requires artifact.json beside artifact.md or under --review-dir." >&2
+            echo "Action: pass --review-dir for this review, or restore the sibling artifact.json and retry." >&2
+            return 1
+        fi
+
+        TEMP_COMMENT_PATH=$(mktemp -t matthewsreview-comment.XXXXXX)
+        if ! "$SCRIPT_DIR/artifact-render.py" \
+            --input "$artifact_path" \
+            --format pr-comment \
+            --max-bytes "$PR_COMMENT_TARGET_BYTES" \
+            --output "$TEMP_COMMENT_PATH" >/dev/null; then
+            echo "ERROR: full report is too large and compact comment rendering failed" >&2
+            echo "Context: full report path=$MD_PATH bytes=$full_bytes" >&2
+            echo "Action: run artifact-render.py --input '$artifact_path' --format pr-comment to diagnose." >&2
+            return 1
+        fi
+        compact_bytes=$(file_bytes "$TEMP_COMMENT_PATH")
+        if [[ "$compact_bytes" -gt "$GITHUB_COMMENT_MAX_BYTES" ]]; then
+            echo "ERROR: compact comment is still too large ($compact_bytes bytes)" >&2
+            echo "Context: renderer contract requires at most $GITHUB_COMMENT_MAX_BYTES bytes." >&2
+            echo "Action: inspect artifact-render.py --format pr-comment before retrying publication." >&2
+            return 1
+        fi
+        BODY_MD_PATH="$TEMP_COMMENT_PATH"
+        trace_append "compact_fallback full_bytes=$full_bytes published_bytes=$compact_bytes"
+    fi
+
+    # Persist the exact body selected for GitHub. Lifecycle commands use this
+    # file to mirror what the user can actually see on the PR, while the full
+    # sectioned artifact.md stays available for local inspection.
+    if [[ -n "$REVIEW_DIR" ]]; then
+        mkdir -p "$REVIEW_DIR"
+        PUBLISHED_TMP=$(mktemp "$REVIEW_DIR/.published.md.tmp.XXXXXX")
+        if ! cp "$BODY_MD_PATH" "$PUBLISHED_TMP"; then
+            echo "ERROR: could not stage exact publication body under $REVIEW_DIR" >&2
+            echo "Action: verify the review directory is writable and retry." >&2
+            return 1
+        fi
+        if ! mv "$PUBLISHED_TMP" "$REVIEW_DIR/published.md"; then
+            echo "ERROR: could not atomically write $REVIEW_DIR/published.md" >&2
+            echo "Action: verify the review directory is writable and retry." >&2
+            return 1
+        fi
+        PUBLISHED_TMP=""
+    fi
+}
+
 # resolve_md_path — populates MD_PATH via the 3-tier fallback described in
 # the header. Exits 1 with error-as-prompt if none of the tiers resolves.
 resolve_md_path() {
@@ -152,15 +241,13 @@ resolve_md_path() {
         return 0
     fi
 
-    # Tier 3: latest.txt under <reviews-root>/<slug>/<branch>/.
+    # Tier 3: latest.txt under the canonical reviews root.
     if [[ -n "$REPO_SLUG" && -n "$BRANCH" ]]; then
-        local reviews_root_base="${MATTHEWS_REVIEW_REVIEWS_ROOT:-${ADAMS_REVIEW_REVIEWS_ROOT:-$HOME/.matthews-reviews}}"
-        # Pre-rename state root: honor it (read path only) with a migration nudge.
-        # Only when neither env var was set explicitly — an explicit
-        # MATTHEWS_REVIEW_REVIEWS_ROOT always wins over the legacy dir.
-        if [[ -z "${MATTHEWS_REVIEW_REVIEWS_ROOT:-}${ADAMS_REVIEW_REVIEWS_ROOT:-}" && ! -d "$reviews_root_base" && -d "$HOME/.adams-reviews" ]]; then
-            echo "migrate: mv ~/.adams-reviews ~/.matthews-reviews" >&2
-            reviews_root_base="$HOME/.adams-reviews"
+        local reviews_root_base=""
+        local reviews_root_rc=0
+        reviews_root_base=$("$SCRIPT_DIR/review-root.sh") || reviews_root_rc=$?
+        if [[ "$reviews_root_rc" -ne 0 ]]; then
+            return "$reviews_root_rc"
         fi
         local reviews_root="$reviews_root_base/$REPO_SLUG/$BRANCH"
         local latest_file="$reviews_root/latest.txt"
@@ -232,6 +319,11 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     exit 0
 fi
 
+trap cleanup_publish_temps EXIT
+if ! prepare_comment_body; then
+    exit 1
+fi
+
 OWNER_REPO=$(gh_owner_repo) || {
     echo "ERROR: could not resolve owner/repo via 'gh repo view'" >&2
     echo "Action: run 'gh auth login' and 'gh repo view' in this directory to verify." >&2
@@ -240,8 +332,7 @@ OWNER_REPO=$(gh_owner_repo) || {
 
 # Build the JSON body once (GitHub comment PATCH/POST both take {"body": "..."}).
 BODY_JSON=$(mktemp -t publish-body.XXXXXX)
-trap 'rm -f "$BODY_JSON"' EXIT
-jq -Rs '{body: .}' "$MD_PATH" > "$BODY_JSON"
+jq -Rs '{body: .}' "$BODY_MD_PATH" > "$BODY_JSON"
 
 patch_comment() {
     # $1 = comment id. Returns 0 on success.

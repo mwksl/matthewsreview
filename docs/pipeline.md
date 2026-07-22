@@ -3,7 +3,10 @@
 Detailed phase trees for each lifecycle command, plus the token-tally semantics.
 AGENTS.md keeps a one-paragraph summary per command; this file is the reference.
 
-## `/matthewsreview:review [--ensemble] [--full] [--profile <name>] [--models "<csv>"] [--codex-review-effort low|medium|high|xhigh|max|ultra]`
+## `/matthewsreview:review [--ensemble] [--full] [--profile <name>] [--models "<csv>"]`
+
+To select a Codex effort for ensemble detection, use the supported model-plan
+override `--models 'ensemble_detect=codex::<effort>'`.
 
 ```
 ├── Phase 0 — Pre-flight (branch/PR detect, base-branch freshness,

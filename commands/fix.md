@@ -6,10 +6,10 @@ disable-model-invocation: false
 ---
 
 Arguments (optional):
-- First positional (integer 0–100) → `threshold` (default `60`). The
-  Phase 8 fix gate: `confirmed_mechanical`/`partial`/`regression` findings
-  with `score_phase4 >= threshold` are eligible. `/matthewsreview:fix 80`
-  excludes moderate-strength findings from the run.
+- First positional (finite JSON number in the inclusive range `[0, 100]`)
+  → `threshold` (default: the resolved `gates.fix_threshold`, normally `60`).
+  Decimals are preserved exactly; for example, `/matthewsreview:fix 60.5`
+  selects findings with `score_phase4 >= 60.5`.
 - `--granular-commits` → one commit per surviving fix group. Default is
   one combined commit for all survivors.
 
@@ -87,20 +87,42 @@ single-agent call (one sub-agent reviews the whole working tree).
 
 ## Argument handling
 
-Parse `$ARGUMENTS` (whitespace-split):
-- First token that parses as a non-negative integer → `threshold`.
+Parse `$ARGUMENTS` left-to-right before any artifact lookup,
+`review-config.sh` call, or git/tree work:
+
+- Accept at most one positional threshold token. Validate the complete
+  original token as a finite JSON number in the inclusive range `[0, 100]`
+  (not merely a numeric prefix):
+
+  ```bash
+  jq -en --arg token "$token" '
+    ($token | fromjson) as $n
+    | (($n | type) == "number"
+       and (($n - $n) == 0)
+       and $n >= 0
+       and $n <= 100)
+  ' >/dev/null 2>&1
+  ```
+
+  Keep the original token as `threshold`; do not coerce it to an integer or
+  round it, so decimal thresholds retain their value. A second positional
+  token is a duplicate-threshold usage error.
 - `--granular-commits` → `granular_commits=true` (else `false`).
 - `--profile <name>` → `profile=<name>` (else unset).
 - `--models "<csv>"` → `models_csv=<csv>` (else unset).
-- Any other token → stop and ask the user to clarify.
+- Reject a repeated flag, a missing/empty flag value, an unknown option, a
+  non-number, a non-finite number, or a number outside `[0, 100]` with a
+  usage error naming the valid invocation.
 
-If no integer was provided, leave `threshold` unset — step 7.2c sets it
-from the resolved `gates.fix_threshold` (default 60).
+Do not continue past parsing on any error. If no threshold was provided,
+leave `threshold` unset — step 7.2c sets it from the resolved
+`gates.fix_threshold` (default 60).
 
-Capture all four in your working context before executing Phase 7.
-`profile` and `models_csv` are consumed by Phase 7 step 7.2c (model
-plan resolution) — a `:fix` weeks after the review resolves against
-the config of the day, not the review-time plan.
+Capture all four values in working context before executing Phase 7.
+`profile` and `models_csv` are consumed by Phase 7 step 7.2c (model-plan
+resolution) — a `:fix` weeks after the review resolves runtime roles and
+operational thresholds against the trusted config at the artifact's
+`comparison_ref`, not the reviewed worktree or the review-time plan.
 
 ---
 

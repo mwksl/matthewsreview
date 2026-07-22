@@ -116,24 +116,93 @@ review_dir="$reviews_root/$repo_slug/$head_branch/$review_id"
 artifact_path="$review_dir/artifact.json"
 ```
 
-### 2b. Resolve the model plan
+### 2a. Validate the artifact before config resolution
 
-Resolve fresh for this invocation, store it, print the table (the
-paste normalizer, dedup, and Phase-4 validators all dispatch by role):
+Capture log paths and schema-validate before reading provenance or mutating
+the artifact:
 
 ```bash
-plan_args=(--repo-root "$repo_root" --orchestrator "$harness_id")
+trace_log_path="$review_dir/trace.md"
+phases_log_path="$review_dir/phases.jsonl"
+tokens_log_path="$review_dir/tokens.jsonl"
+
+artifact-validate.sh --path "$artifact_path"
+```
+
+On non-zero: surface the validator stderr and abort. A schema-invalid
+artifact means something upstream broke an invariant; do not resolve config
+or patch around it.
+
+### 2b. Resolve the model plan
+
+Resolve runtime roles/tiers and operational thresholds fresh for this
+invocation. Read repo configuration from the artifact's trusted comparison
+commit, never from the reviewed worktree. Preserve the artifact's
+classification provenance: retain its `phase3_gate` and `phase4_bands` (or
+their normative defaults when absent), while refreshing `fix_threshold` and
+`walkthrough_threshold` from the current trusted config.
+
+Persist the merged model plan and its exact `.gates` object together so the
+plan and top-level gates remain coherent:
+
+```bash
+if ! comparison_ref=$(
+  artifact-read.sh \
+    --path "$artifact_path" \
+    --filter '.base_context.comparison_ref' |
+  jq -er 'select(type == "string" and length > 0)'
+); then
+    printf '%s\n' \
+      'ERROR: artifact is missing trusted base_context.comparison_ref.' \
+      'Action: run /matthewsreview:review again before using /matthewsreview:add.' >&2
+    exit 1
+fi
+classification_gates_json=$(artifact-read.sh \
+  --path "$artifact_path" \
+  --filter '{
+    phase3_gate: (.gates.phase3_gate // .model_plan.gates.phase3_gate // 45),
+    phase4_bands: (.gates.phase4_bands // .model_plan.gates.phase4_bands // [45, 60, 75])
+  }') || exit $?
+
+plan_args=(
+  --repo-root "$repo_root"
+  --orchestrator "$harness_id"
+  --repo-config-ref "$comparison_ref"
+)
 [[ -n "${profile:-}" ]] && plan_args+=(--profile "$profile")
 [[ -n "${models_csv:-}" ]] && plan_args+=(--models "$models_csv")
-model_plan_json=$(review-config.sh "${plan_args[@]}") || exit $?
-plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX)
-printf '%s' "$model_plan_json" > "$plan_tmp"
+runtime_model_plan_json=$(review-config.sh "${plan_args[@]}") || exit $?
+model_plan_json=$(printf '%s\n' "$runtime_model_plan_json" |
+  jq -ce --argjson classification "$classification_gates_json" '
+    .gates.phase3_gate = $classification.phase3_gate
+    | .gates.phase4_bands = $classification.phase4_bands
+  ') || exit $?
+gates_json=$(printf '%s\n' "$model_plan_json" | jq -ce '.gates') || exit $?
+
+plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX) || exit $?
+plan_write_rc=0
+printf '%s\n' "$model_plan_json" > "$plan_tmp" || plan_write_rc=$?
+if [[ "$plan_write_rc" -ne 0 ]]; then
+    rm -f "$plan_tmp" 2>/dev/null || true
+    exit "$plan_write_rc"
+fi
+
+plan_patch_rc=0
 artifact-patch.py --path "$artifact_path" \
   --set-json model_plan=@"$plan_tmp" \
-  --set-json "gates=$(printf '%s' "$model_plan_json" | jq -c '.gates')"
-rm -f "$plan_tmp"
+  --set-json gates="$gates_json" \
+  || plan_patch_rc=$?
 
-printf '%s' "$model_plan_json" | jq -r '
+plan_cleanup_rc=0
+rm -f "$plan_tmp" || plan_cleanup_rc=$?
+if [[ "$plan_patch_rc" -ne 0 ]]; then
+    exit "$plan_patch_rc"
+fi
+if [[ "$plan_cleanup_rc" -ne 0 ]]; then
+    exit "$plan_cleanup_rc"
+fi
+
+printf '%s\n' "$model_plan_json" | jq -r '
   "| Role | Engine | Model | Effort | Source |",
   "|---|---|---|---|---|",
   (.roles | to_entries[]
@@ -141,26 +210,11 @@ printf '%s' "$model_plan_json" | jq -r '
   (.warnings[]? | "warning: \(.)")'
 ```
 
-On non-zero from `review-config.sh`: surface stderr verbatim, stop.
-`$harness_id` is the Dispatch Protocol identity.
+On non-zero from `review-config.sh`: surface stderr verbatim and stop.
+`$harness_id` is the Dispatch Protocol identity. On any temp write, patch,
+or cleanup failure, exit with that operation's status after best-effort temp
+cleanup; never let `rm` mask an `artifact-patch.py` failure.
 
-Capture the log paths:
-
-```bash
-trace_log_path="$review_dir/trace.md"
-phases_log_path="$review_dir/phases.jsonl"
-tokens_log_path="$review_dir/tokens.jsonl"
-```
-
-Schema-validate as a safety rail:
-
-```bash
-artifact-validate.sh --path "$artifact_path"
-```
-
-On non-zero: surface the validator stderr and abort. A schema-invalid
-artifact means something upstream broke an invariant; do not try to
-patch around it.
 
 Capture `add_start_epoch=$(date +%s)`. Append a header to `trace.md`:
 
@@ -1062,7 +1116,11 @@ Build the per-finding lines from `artifact-read.sh`:
 artifact-read.sh \
   --path "$artifact_path" \
   --filter "[.findings[] | select(.id | IN(\"${new_ids//,/\",\"}\"))
-            | \"  \\(.id) \\(.disposition | (. + \"                \")[0:18]) \\(.impact_type | (. + \"          \")[0:11]) \\(.file):\\(.line_range[0]) — \\(.claim | .[0:80])\"]
+            | (if .file == \"(unknown)\" then \"(unknown)\"
+               elif .line_range == null then .file
+               else (.file + \":\" + (.line_range[0] | tostring))
+               end) as \$location
+            | \"  \\(.id) \\(.disposition | (. + \"                \")[0:18]) \\(.impact_type | (. + \"          \")[0:11]) \\(\$location) — \\(.claim | .[0:80])\"]
             | join(\"\n\")"
 ```
 

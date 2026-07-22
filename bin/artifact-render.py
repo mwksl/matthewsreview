@@ -13,11 +13,13 @@ comments regardless of review_id (§13.4).
 
 Usage:
   artifact-render.py --input <artifact.json> [--output <artifact.md>]
+                     [--format markdown|dispositions|pr-comment]
+                     [--max-bytes <n>]
 
-If --output is omitted, Markdown goes to stdout.
+If --output is omitted, Markdown goes to stdout. `--max-bytes` applies
+only to the bounded `pr-comment` overflow format.
 """
 
-import argparse
 import html
 import sys
 from collections import defaultdict
@@ -848,7 +850,12 @@ def _effective_score(f):
 
 def _suggested_action(f, fix_threshold=60):
     disp = f.get("disposition") or ""
-    if f.get("current_state") == "resolved" or disp == "resolved":
+    state = f.get("current_state")
+    if state == "resolved":
+        return "done"
+    if state == "attempted":
+        return "recover"
+    if disp == "resolved":
         return "done"
     if disp == "pre_existing_report":
         return "issue"
@@ -888,7 +895,7 @@ def render_dispositions(artifact):
     for f in findings:
         action = _suggested_action(f, fix_threshold)
         disp = f.get("disposition") or ""
-        if action != "done" and (
+        if action not in ("done", "recover") and (
             disp.startswith("confirmed_") or disp in ("uncertain", "partial", "regression")
         ):
             engage += 1
@@ -917,10 +924,173 @@ def render_dispositions(artifact):
         f"**{engage} engage / {skip} skip** "
         "(engage = confirmed_* + uncertain + retry-eligible partial/regression; "
         f"actions: fix → `{fix_command}`, walkthrough → `{walkthrough_command}`, "
+        "recover → finish or reset the interrupted fix before fix/walkthrough, "
         "issue → pre-existing, judge/skip → no action)",
         "",
     ]
     return "\n".join(lines)
+
+
+def _compact_text(value, max_chars):
+    """One-line, HTML-safe text bounded for the compact PR comment."""
+    text = str(value if value not in (None, "") else "?").replace("\n", " ")
+    if len(text) > max_chars:
+        text = text[: max_chars - 3] + "..."
+    return html.escape(text, quote=False)
+
+
+def _compact_cell(value, max_chars):
+    return _compact_text(value, max_chars).replace("|", "\\|")
+
+
+def _markdown_bytes(text):
+    return len(text.encode("utf-8"))
+
+
+def render_pr_comment(artifact, max_bytes=65000):
+    """Render a bounded fallback for GitHub's issue-comment size limit."""
+    if max_bytes < 512:
+        raise ValueError("pr-comment max_bytes must be at least 512")
+
+    findings = artifact.get("findings", [])
+    buckets = findings_by_disposition(artifact)
+    phase3_gate = (artifact.get("gates") or {}).get("phase3_gate", 45)
+    fix_threshold = (artifact.get("gates") or {}).get("fix_threshold", 60)
+    review_id = _compact_text(artifact.get("review_id"), 100)
+    head_branch = _compact_text(artifact.get("head_branch"), 120)
+    base_branch = _compact_text(artifact.get("base_branch"), 120)
+    degraded = render_degraded_banner(artifact)
+
+    prefix = [
+        MARKER,
+        "",
+        f"# Code review — {review_id}",
+        "",
+        (
+            "> **Publication note:** Full sectioned report exceeded GitHub's "
+            "issue-comment limit. This bounded disposition queue was published "
+            "instead; complete evidence and fix proposals remain in the local "
+            "`artifact.md` and `artifact.json`."
+        ),
+        "",
+        f"**Branch:** `{head_branch}` → `{base_branch}`",
+        "",
+    ]
+    if degraded:
+        prefix.extend([degraded.rstrip(), ""])
+    prefix.extend([
+        render_summary(buckets, phase3_gate),
+        "",
+        "## Disposition queue",
+        "",
+        "| # | File | Finding | Disposition | Score | State | Suggested action |",
+        "|---|---|---|---|---|---|---|",
+    ])
+
+    engage = 0
+    skip = 0
+    ranked_rows = []
+    action_rank = {
+        "recover": 0,
+        "fix": 1,
+        "walkthrough": 2,
+        "issue": 3,
+        "judge": 4,
+        "done": 5,
+        "skip": 6,
+    }
+    for index, finding in enumerate(findings):
+        action = _suggested_action(finding, fix_threshold)
+        disposition = finding.get("disposition") or ""
+        if action not in ("done", "recover") and (
+            disposition.startswith("confirmed_")
+            or disposition in ("uncertain", "partial", "regression")
+        ):
+            engage += 1
+        else:
+            skip += 1
+        location = (
+            f"{finding.get('file') or '?'}"
+            f"{format_line_range(finding.get('line_range'))}"
+        )
+        score = _effective_score(finding)
+        row = (
+            f"| {_compact_cell(finding.get('id'), 20)} "
+            f"| `{_compact_cell(location, 120)}` "
+            f"| {_compact_cell(finding.get('claim'), 140)} "
+            f"| {_compact_cell(disposition, 40)} "
+            f"| {_compact_cell(score if score is not None else '—', 12)} "
+            f"| {_compact_cell(finding.get('current_state'), 20)} "
+            f"| {_compact_cell(action, 20)} |"
+        )
+        ranked_rows.append((action_rank.get(action, 3), index, row))
+    ranked_rows.sort(key=lambda item: (item[0], item[1]))
+    rows = [item[2] for item in ranked_rows]
+
+    fix_command = command_name(artifact, "fix")
+    walkthrough_command = command_name(artifact, "walkthrough")
+
+    def assemble(included_rows, omitted):
+        lines = prefix + included_rows + [""]
+        if omitted:
+            lines.extend([
+                (
+                    f"**{omitted} finding{'s' if omitted != 1 else ''} omitted "
+                    "from this compact comment to stay within GitHub's limit.** "
+                    "Use the local `artifact.md` or `artifact.json` for every "
+                    "finding and its full evidence."
+                ),
+                "",
+            ])
+        lines.extend([
+            (
+                f"**{engage} engage / {skip} skip** "
+                "(actions: "
+                f"fix → `{fix_command}`, "
+                f"walkthrough → `{walkthrough_command}`, "
+                "recover → finish or reset the interrupted fix before fix/walkthrough, "
+                "issue → pre-existing, judge/skip → no action)"
+            ),
+            "",
+            render_footer(artifact),
+            "",
+        ])
+        return "\n".join(lines)
+
+    included = []
+    for row in rows:
+        candidate = assemble(included + [row], len(rows) - len(included) - 1)
+        if _markdown_bytes(candidate) <= max_bytes:
+            included.append(row)
+
+    rendered = assemble(included, len(rows) - len(included))
+    if _markdown_bytes(rendered) <= max_bytes:
+        return rendered
+
+    # Defensive floor: a maliciously long metadata value must not defeat the
+    # publisher's hard size contract even when no table row fits.
+    minimal = "\n".join([
+        MARKER,
+        "",
+        f"# Code review — {_compact_text(artifact.get('review_id'), 60)}",
+        "",
+        (
+            "> **Publication note:** Full sectioned report exceeded GitHub's "
+            "issue-comment limit."
+        ),
+        "",
+        (
+            f"**{len(findings)} findings omitted from this compact comment** "
+            "because even the bounded queue exceeded the configured byte "
+            "budget. Read the local `artifact.md` or `artifact.json`."
+        ),
+        "",
+        render_footer(artifact),
+        "",
+    ])
+    if _markdown_bytes(minimal) > max_bytes:
+        raise ValueError("pr-comment byte budget is too small for the minimal report")
+    return minimal
 
 
 # ----- Assembly ---------------------------------------------------------
@@ -980,15 +1150,36 @@ def render(artifact):
 # ----- CLI --------------------------------------------------------------
 
 def main():
-    p = argparse.ArgumentParser(
+    p = c.PromptArgumentParser(
         prog="artifact-render.py",
         description="Render artifact.json -> artifact.md per DESIGN §7."
     )
     p.add_argument("--input", required=True, help="path to artifact.json")
     p.add_argument("--output", help="path to artifact.md (stdout if omitted)")
-    p.add_argument("--format", choices=["markdown", "dispositions"], default="markdown",
-                   help="markdown = full report (default); dispositions = flat ENGAGE/SKIP work-queue table")
+    p.add_argument(
+        "--format",
+        default="markdown",
+        help=(
+            "markdown = full report (default); dispositions = flat ENGAGE/SKIP "
+            "work queue; pr-comment = bounded overflow fallback"
+        ),
+    )
+    p.add_argument(
+        "--max-bytes",
+        type=int,
+        default=65000,
+        help="maximum UTF-8 bytes for --format pr-comment (default: 65000)",
+    )
     args = p.parse_args()
+    valid_formats = ("markdown", "dispositions", "pr-comment")
+    if args.format not in valid_formats:
+        c.err_prompt(
+            f"invalid --format value '{args.format}'",
+            valid_values=valid_formats,
+            did_you_mean=c.suggest(args.format, valid_formats),
+            action="pass --format markdown, dispositions, or pr-comment.",
+        )
+        return c.EXIT_USAGE
 
     try:
         artifact = c.read_json(args.input)
@@ -1012,6 +1203,15 @@ def main():
 
     if args.format == "dispositions":
         md = render_dispositions(artifact)
+    elif args.format == "pr-comment":
+        try:
+            md = render_pr_comment(artifact, args.max_bytes)
+        except ValueError as exc:
+            c.err_prompt(
+                str(exc),
+                action="pass --max-bytes 512 or greater.",
+            )
+            return c.EXIT_VALIDATION
     else:
         md = render(artifact)
     if args.output:

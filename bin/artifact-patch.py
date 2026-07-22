@@ -140,7 +140,6 @@ goes through atomic tmp+rename. Non-zero exits emit error-as-prompt
 blocks to stderr per DESIGN §8.6.
 """
 
-import argparse
 import copy
 import difflib
 import json
@@ -911,27 +910,22 @@ _ACTIONABILITY_TO_DISPOSITION = {
 }
 
 
-DEFAULT_PHASE4_BANDS = (45, 60, 75)
+DEFAULT_PHASE4_BANDS = c.DEFAULT_PHASE4_BANDS
 
 
 def _phase4_bands(artifact):
-    """Resolved Phase-4 band cutoffs from artifact.gates.phase4_bands.
-
-    Defaults to (45, 60, 75) for pre-v1.0 artifacts (no gates field) or
-    malformed values — gate defaults are normative (docs/state-and-gates.md).
-    """
+    """Resolve Phase-4 cutoffs; only absent/null gates use defaults."""
     try:
-        bands = (artifact or {}).get("gates", {}).get("phase4_bands")
-    except AttributeError:
-        bands = None
-    if (
-        isinstance(bands, list)
-        and len(bands) == 3
-        and all(isinstance(b, (int, float)) and not isinstance(b, bool) for b in bands)
-        and bands[0] < bands[1] < bands[2]
-    ):
-        return tuple(bands)
-    return DEFAULT_PHASE4_BANDS
+        return c.resolve_phase4_bands(artifact)
+    except ValueError as exc:
+        c.err_prompt(
+            str(exc),
+            action=(
+                "repair gates.phase4_bands before applying decisions; malformed "
+                "present gates must not silently fall back to defaults."
+            ),
+        )
+        sys.exit(c.EXIT_VALIDATION)
 
 
 def _derive_phase4_disposition(tup, idx, bands=DEFAULT_PHASE4_BANDS):
@@ -1039,7 +1033,13 @@ def cmd_set_scores(args):
             )
             return c.EXIT_VALIDATION
         seen.add(fid)
-        score = tup.get("score_phase3")
+        if "score_phase3" not in tup:
+            c.err_prompt(
+                f"--set-scores tuple #{idx} ({fid}): 'score_phase3' is required",
+                action="include score_phase3 explicitly as an integer 0-100 or null."
+            )
+            return c.EXIT_VALIDATION
+        score = tup["score_phase3"]
         if score is not None and (not isinstance(score, (int, float)) or isinstance(score, bool)):
             c.err_prompt(
                 f"--set-scores tuple #{idx} ({fid}): score_phase3 must be number or null, got {type(score).__name__}",
@@ -1165,6 +1165,12 @@ def cmd_apply_decisions(args):
             )
             return c.EXIT_VALIDATION
 
+        if "score_phase4" not in tup:
+            c.err_prompt(
+                f"--apply-decisions tuple #{idx} ({fid}): 'score_phase4' is required",
+                action="include score_phase4 explicitly as an integer 0-100 or null."
+            )
+            return c.EXIT_VALIDATION
         derived = _derive_phase4_disposition(tup, idx, bands)
 
         # Load fresh per-tuple so preceding tuples' writes are visible on the
@@ -2146,7 +2152,7 @@ def cmd_set_and_or_append(args):
 # ----- CLI ---------------------------------------------------------------
 
 def build_parser():
-    p = argparse.ArgumentParser(
+    p = c.PromptArgumentParser(
         prog="artifact-patch.py",
         description="Canonical writer for artifact.json (DESIGN §8.2, §21.2)."
     )
@@ -2298,12 +2304,9 @@ def main():
                 parser.error("--add-finding cannot combine with --set / --set-json / --append-fix-attempt")
             return cmd_add_finding(args)
         if args.add_findings is not None:
-            # Mode-conflict + --dry-run paths exit with EXIT_USAGE (64)
-            # directly via sys.exit instead of parser.error(), which would
-            # emit argparse's default exit code (2). The new --add-findings
-            # mode's docstring contract pins these paths to 64; the older
-            # modes' parser.error() calls stay as-is (they already exit 2
-            # today and aren't in scope for this stage).
+            # Keep batched-mode conflict diagnostics explicit here so main()
+            # can return normally. Direct and parser-routed usage failures
+            # both follow the structured error-as-prompt contract with rc64.
             if args.set or args.set_json or args.append_fix_attempt or args.finding_id:
                 c.err_prompt(
                     "--add-findings cannot combine with --set / --set-json / --append-fix-attempt / --finding-id (each finding carries its own id)",

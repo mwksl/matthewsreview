@@ -155,57 +155,82 @@ Check Codex availability:
 
 ```bash
 CODEX_COMPANION="$(find ~/.claude/plugins -type f -name codex-companion.mjs -path '*codex*' 2>/dev/null | head -1)"
-if [[ "${codex_requires_standalone:-false}" == "true" ]]; then
-    if command -v codex >/dev/null 2>&1; then
-        codex_available=true
-        codex_launch_mode="agent-dispatch"
-        printf '%s\n' "Phase 1 readiness: max/ultra effort requires standalone Codex CLI" \
-            >> "$review_dir/trace.md"
-    else
-        codex_available=false
-        codex_reason="resolved max/ultra effort requires standalone Codex CLI, but codex is not on PATH"
-    fi
-elif [[ -z "$CODEX_COMPANION" ]]; then
-    # Non-Claude-Code orchestrators (omp, Codex) have no codex plugin.
-    # Fall back to the standalone CLI via agent-dispatch.sh when present.
-    if command -v codex >/dev/null 2>&1; then
-        codex_available=true
-        codex_launch_mode="agent-dispatch"
-        printf '%s\n' "Phase 1 readiness: companion not found; using codex CLI via agent-dispatch.sh" \
-            >> "$review_dir/trace.md"
-    else
-        codex_available=false
-        codex_reason="companion script not found and no codex CLI on PATH — run /codex:setup or install Codex CLI"
-    fi
-else
-    codex_launch_mode="companion"
+codex_launch_mode=""
+codex_readiness_note=""
+codex_reason=""
+codex_setup_json=""
+
+# max/ultra is standalone-only: do not probe or select the companion.
+if [[ "${codex_requires_standalone:-false}" != "true" \
+      && -n "$CODEX_COMPANION" ]]; then
     # Companion CLI surface: `setup --json` emits {"ready": true|false, ...}.
-    codex_setup_json=$(node "$CODEX_COMPANION" setup --json 2>&1)
+    codex_setup_json=$(node "$CODEX_COMPANION" setup --json 2>&1) || true
     codex_ready=$(jq -r '.ready // false' <<<"$codex_setup_json" 2>/dev/null)
     if [[ "$codex_ready" == "true" ]]; then
-        codex_available=true
+        codex_launch_mode="companion"
     else
         # Shared-mode cold start reports ENOENT until the first task starts.
-        # Accept only that exact available-CLI shape; all others fail below.
+        # Accept only that exact available-CLI shape; all others may fall
+        # through to a complete standalone transport.
         cx_mode=$(jq -r '.sessionRuntime.mode // ""' <<<"$codex_setup_json" 2>/dev/null)
         cx_cli=$(jq -r '.codex.available // false' <<<"$codex_setup_json" 2>/dev/null)
         cx_auth_detail=$(jq -r '.auth.detail // ""' <<<"$codex_setup_json" 2>/dev/null)
         if [[ "$cx_mode" == "shared" && "$cx_cli" == "true" \
               && "$cx_auth_detail" == *"ENOENT"*"broker.sock"* ]]; then
-            codex_available=true
-            printf '%s\n' "Phase 1 readiness: shared-mode cold-start broker ENOENT — bypassed (first lens warms the broker)" \
-                >> "$review_dir/trace.md"
-        else
-            codex_available=false
-            codex_reason="setup --json reported not-ready — run /codex:setup to diagnose"
+            codex_launch_mode="companion"
+            codex_readiness_note="shared-mode cold-start broker ENOENT bypassed (first lens warms the broker)"
         fi
+    fi
+fi
+
+# Companion absent or unusable: standalone requires both a quiet successful
+# auth probe and the dispatcher that owns its lifecycle.
+codex_cli_installed=false
+codex_cli_authenticated=false
+if [[ -z "$codex_launch_mode" ]] && command -v codex >/dev/null 2>&1; then
+    codex_cli_installed=true
+    if codex login status >/dev/null 2>&1; then
+        codex_cli_authenticated=true
+    fi
+fi
+if [[ "$codex_cli_authenticated" == "true" ]] \
+   && { [[ -n "${MRB:-}" && -x "${MRB}agent-dispatch.sh" ]] \
+        || command -v agent-dispatch.sh >/dev/null 2>&1; }; then
+    codex_launch_mode="agent-dispatch"
+    if [[ "${codex_requires_standalone:-false}" == "true" ]]; then
+        codex_readiness_note="max/ultra effort requires authenticated standalone Codex CLI"
+    elif [[ -z "$CODEX_COMPANION" ]]; then
+        codex_readiness_note="companion not found; using authenticated codex CLI via agent-dispatch.sh"
+    else
+        codex_readiness_note="companion not ready; using authenticated codex CLI via agent-dispatch.sh"
+    fi
+fi
+
+if [[ -n "$codex_launch_mode" ]]; then
+    codex_available=true
+    if [[ -n "$codex_readiness_note" ]]; then
+        printf '%s\n' "Phase 1 readiness: $codex_readiness_note" \
+            >> "$review_dir/trace.md"
+    fi
+else
+    codex_available=false
+    if [[ "$codex_cli_installed" == "true" \
+          && "$codex_cli_authenticated" != "true" ]]; then
+        codex_reason="standalone codex CLI is installed but 'codex login status' failed — run 'codex login' before retrying"
+    elif [[ "${codex_requires_standalone:-false}" == "true" ]]; then
+        codex_reason="resolved max/ultra effort requires authenticated standalone Codex CLI and agent-dispatch.sh"
+    elif [[ -z "$CODEX_COMPANION" ]]; then
+        codex_reason="companion script not found and authenticated standalone codex/agent-dispatch transport incomplete — run /codex:setup or install/login to Codex CLI"
+    else
+        codex_reason="companion setup reported not-ready and authenticated standalone codex/agent-dispatch transport incomplete — run /codex:setup to diagnose"
     fi
 fi
 ```
 
-**If Codex is available**, proceed silently (default
-`codex_launch_mode=companion` unless the fallback above set
-`agent-dispatch`). **If Codex is unavailable**, ASK **once** with two
+**If Codex is available**, proceed silently with the negotiated
+`codex_launch_mode`: `companion` only for a ready companion or the exact
+shared-mode cold start, otherwise `agent-dispatch` for the complete
+standalone fallback. **If Codex is unavailable**, ASK **once** with two
 options:
 
 - **Proceed without Codex** — in PR mode, continue with the PR
@@ -487,34 +512,36 @@ in a SINGLE orchestrator turn. The per-lens sub-sections are
 reference data — a parameter sweep, not a turn sweep. Phase 1
 wall-clock latency is `max(lens_durations)`, not `sum(lens_durations)`.
 
-Under `ensemble_mode == true`, the Ensemble fan-out's background
-`Bash` call (next sub-section) launches in this same turn — see the
-"Total tool-use blocks" table below for the exact count by mode.
-
 #### Ensemble fan-out (same turn, when `ensemble_mode == true`)
 
-When `ensemble_mode=true`, the dispatch turn also launches the
-external Codex CLI reviewer. It runs as a tool-use block in the same
-orchestrator turn as the lens `Agent` dispatches above — waiting a
-turn between them serializes what's meant to be parallel. The PR
-comment scrape is NOT in this turn; it's deferred to §1.5.4 in
-`02-ensemble-adapter.md` so third-party PR-comment bots have time
-to land their posts during the CLI window.
+Under `ensemble_mode == true`, the Ensemble fan-out's external-reviewer
+tool-use also launches in this same turn. The transport selected in step 1.2a
+changes how that one block is issued:
+
+- `companion` is a background Bash call; capture its returned shell id.
+- `agent-dispatch` is a short foreground Bash call that starts the detached
+  job and returns JSON immediately. Issue it in the same turn as the lens
+  Agent calls, but do **not** wrap it in another background shell: its
+  `job_id` must be captured into orchestrator working context for Phase 1.5.
+
+Waiting a turn before either launch serializes work that is meant to overlap.
+The PR comment scrape is NOT in this turn; it is deferred to §1.5.4 in
+`02-ensemble-adapter.md` so third-party PR-comment bots have time to land
+their posts during the CLI window.
 
 Total tool-use blocks in the dispatch turn:
 
 | Condition | Blocks |
 |---|---|
 | `ensemble_mode=false` | applicable lenses (6 max — L1..L6; L7 is ensemble-gated) |
-| `ensemble_mode=true`, Codex available | lenses (up to 7, including L7) + 1 background Bash |
+| `ensemble_mode=true`, Codex available | lenses (up to 7, including L7) + 1 Codex launch Bash block |
 | `ensemble_mode=true`, Codex unavailable | lenses (up to 7) |
 
-The ensemble launch spec lives in `02-ensemble-adapter.md`:
-
-- **Codex** (background Bash) — see `02-ensemble-adapter.md` step
-  1.5.2. Skip if `codex_available=false`. The prompt file was already
-  written in step 1.2a; the launch block just invokes `node
-  "$CODEX_COMPANION" task …`. Capture `codex_shell_id`.
+The exact transport launch specs live in `02-ensemble-adapter.md` step 1.5.2.
+After the launch tool result arrives, record its identifiers in orchestrator
+working context as instructed there (`codex_shell_id` for companion or
+`codex_job_id` for standalone). Shell-local assignments do not survive into
+Phase 1.5.
 
 Under `ensemble_mode=false`, this launch doesn't happen; the
 02-ensemble-adapter fragment's top-level skip note fires when

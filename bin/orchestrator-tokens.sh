@@ -27,7 +27,9 @@
 #   - --transcript-file / --session-id override the hook environment for smoke
 #     tests and manual diagnostics.
 #   - Missing hook metadata skips without artifact mutation. A missing explicit
-#     file is an input error. An empty or all-pre-since file writes a zero rollup.
+#     file is an input error. For a scoped retally, an empty selected session
+#     removes/contributes no session row; previously recorded sibling sessions
+#     and their non-zero aggregate totals remain.
 #
 # Opt-in: defaults to skip unless `MATTHEWS_REVIEW_TALLY_ORCHESTRATOR=1`
 # (or true/yes/on) is set. Transcript contents are sensitive and may carry
@@ -162,10 +164,10 @@ combined_stream() {
             _transcript_path: $src,
             message: ($line.message + {usage: $u})
           }
-    ' "$TRANSCRIPT_FILE" 2>/dev/null || true
+    ' "$TRANSCRIPT_FILE"
 }
 
-tally_json=$(combined_stream | jq -cs '
+if ! tally_json=$(combined_stream | jq -cs '
     . as $turns
     | {
         total_input:    (([ $turns[] | .message.usage.input_tokens                // 0 ] | add) // 0),
@@ -190,7 +192,11 @@ tally_json=$(combined_stream | jq -cs '
             | sort_by(.first_seen)
         )
       }
-')
+'); then
+    echo "ERROR: could not read and aggregate Claude transcript: $TRANSCRIPT_FILE" >&2
+    echo "Action: inspect the selected transcript JSONL for malformed lines or read failures, then retry." >&2
+    exit 1
+fi
 
 # Scoped-v2 artifacts retain per-session counters. Merge prior reviewed
 # sessions numerically without reopening their transcript files; replace the

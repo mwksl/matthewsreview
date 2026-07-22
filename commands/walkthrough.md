@@ -25,12 +25,13 @@ helper-script error-as-prompt).**
 
 - `--profile <name>` / `--models "<csv>"` (optional) — model-plan
   overrides, resolved fresh at step 2b. Same semantics as `:review`.
-- `[threshold]` (optional, positional) — non-negative integer score
-  floor. Default: the resolved `gates.walkthrough_threshold` (60 unless
-  configured). Findings with effective score
-  (`COALESCE(score_phase4, score_phase3, -1)`) below this value are
-  dropped from the walk scope so the session isn't padded with
-  low-signal findings. Independent of the `/matthewsreview:fix`
+- `[threshold]` (optional, positional) — finite JSON number score floor
+  in the inclusive range `[0, 100]`. Decimals are preserved without
+  rounding. Default: the resolved operational
+  `gates.walkthrough_threshold` (60 unless configured). Findings with
+  effective score (`COALESCE(score_phase4, score_phase3, -1)`) below
+  this value are dropped from the walk scope so the session is not padded
+  with low-signal findings. Independent of the `/matthewsreview:fix`
   threshold — promoted findings are picked up by `/matthewsreview:fix`
   regardless of the score gate via the `human_confirmation` bypass.
 
@@ -78,19 +79,35 @@ headings.
 
 ### 1. Parse arguments
 
-Parse `$ARGUMENTS` left-to-right, respecting quoted values:
+Parse `$ARGUMENTS` left-to-right before any artifact lookup,
+`review-config.sh` call, or git/tree work:
 
 - `--profile <name>` → `profile`; `--models "<csv>"` → `models_csv`.
-  Each flag consumes the next non-empty token; a missing value is a
-  usage error.
-- One non-negative integer positional token → `threshold`. A second
-  positional token is a usage error.
-- Any unknown `--...` option or other token → stop with a usage error
-  naming the valid invocation.
+  Each flag consumes the next non-empty token.
+- Accept at most one positional threshold token. Validate the complete
+  original token as a finite JSON number in the inclusive range `[0, 100]`:
 
-If no integer was provided, step 2b sets `threshold` from the resolved
-`gates.walkthrough_threshold` (default 60). Capture `profile`,
-`models_csv`, and `threshold` in working context.
+  ```bash
+  jq -en --arg token "$token" '
+    ($token | fromjson) as $n
+    | (($n | type) == "number"
+       and (($n - $n) == 0)
+       and $n >= 0
+       and $n <= 100)
+  ' >/dev/null 2>&1
+  ```
+
+  Keep the original token as `threshold`; do not coerce it to an integer or
+  round it, so decimal thresholds retain their value. A second positional
+  token is a duplicate-threshold usage error.
+- Reject a repeated flag, a missing/empty flag value, an unknown option, an
+  unconsumed token, a non-number, a non-finite number, or a number outside
+  `[0, 100]` with a usage error naming the valid invocation.
+
+Do not continue past parsing on any error. If no threshold was provided,
+step 2b sets it from the freshly resolved operational
+`gates.walkthrough_threshold` (default 60). Capture `profile`, `models_csv`,
+and `threshold` in working context.
 
 ### 2. Locate the artifact
 
@@ -117,32 +134,98 @@ artifact_path="$review_dir/artifact.json"
 trace_log_path="$review_dir/trace.md"
 ```
 
-### 2b. Resolve the model plan
-
-Resolve fresh for this invocation, store it, print the table (the
-briefer and issue-drafter dispatch by role):
+### 2a. Validate the artifact before config resolution
 
 ```bash
-plan_args=(--repo-root "$repo_root" --orchestrator "$harness_id")
+artifact-validate.sh --path "$artifact_path"
+```
+
+On non-zero: surface the validator stderr and abort before reading
+classification provenance, resolving repo config, or mutating the artifact.
+
+### 2b. Resolve the model plan
+
+Resolve runtime roles/tiers and operational thresholds fresh for this
+invocation. Read repo configuration from the artifact's trusted comparison
+commit, never from the reviewed worktree. Preserve the classification
+provenance that produced existing scores and dispositions: retain the
+artifact's `phase3_gate` and `phase4_bands` (or normative defaults when
+absent), while refreshing `fix_threshold` and `walkthrough_threshold` from
+the current trusted config.
+
+Persist the merged model plan and its exact `.gates` object together so the
+plan and top-level gates remain coherent:
+
+```bash
+if ! comparison_ref=$(
+  artifact-read.sh \
+    --path "$artifact_path" \
+    --filter '.base_context.comparison_ref' |
+  jq -er 'select(type == "string" and length > 0)'
+); then
+    printf '%s\n' \
+      'ERROR: artifact is missing trusted base_context.comparison_ref.' \
+      'Action: run /matthewsreview:review again before using /matthewsreview:walkthrough.' >&2
+    exit 1
+fi
+classification_gates_json=$(artifact-read.sh \
+  --path "$artifact_path" \
+  --filter '{
+    phase3_gate: (.gates.phase3_gate // .model_plan.gates.phase3_gate // 45),
+    phase4_bands: (.gates.phase4_bands // .model_plan.gates.phase4_bands // [45, 60, 75])
+  }') || exit $?
+
+plan_args=(
+  --repo-root "$repo_root"
+  --orchestrator "$harness_id"
+  --repo-config-ref "$comparison_ref"
+)
 [[ -n "${profile:-}" ]] && plan_args+=(--profile "$profile")
 [[ -n "${models_csv:-}" ]] && plan_args+=(--models "$models_csv")
-model_plan_json=$(review-config.sh "${plan_args[@]}") || exit $?
+runtime_model_plan_json=$(review-config.sh "${plan_args[@]}") || exit $?
+
 if [[ -z "${threshold:-}" ]]; then
-    threshold=$(printf '%s' "$model_plan_json" | jq -er '.gates.walkthrough_threshold')
+    threshold=$(printf '%s\n' "$runtime_model_plan_json" |
+      jq -er '.gates.walkthrough_threshold') || exit $?
 fi
-fix_threshold=$(printf '%s' "$model_plan_json" | jq -er '.gates.fix_threshold')
-phase3_gate=$(printf '%s' "$model_plan_json" | jq -er '.gates.phase3_gate')
-phase4_b1=$(printf '%s' "$model_plan_json" | jq -er '.gates.phase4_bands[0]')
-phase4_b2=$(printf '%s' "$model_plan_json" | jq -er '.gates.phase4_bands[1]')
-phase4_b3=$(printf '%s' "$model_plan_json" | jq -er '.gates.phase4_bands[2]')
-plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX)
-printf '%s' "$model_plan_json" > "$plan_tmp"
+fix_threshold=$(printf '%s\n' "$runtime_model_plan_json" |
+  jq -er '.gates.fix_threshold') || exit $?
+
+model_plan_json=$(printf '%s\n' "$runtime_model_plan_json" |
+  jq -ce --argjson classification "$classification_gates_json" '
+    .gates.phase3_gate = $classification.phase3_gate
+    | .gates.phase4_bands = $classification.phase4_bands
+  ') || exit $?
+gates_json=$(printf '%s\n' "$model_plan_json" | jq -ce '.gates') || exit $?
+phase3_gate=$(printf '%s\n' "$gates_json" | jq -er '.phase3_gate') || exit $?
+phase4_b1=$(printf '%s\n' "$gates_json" | jq -er '.phase4_bands[0]') || exit $?
+phase4_b2=$(printf '%s\n' "$gates_json" | jq -er '.phase4_bands[1]') || exit $?
+phase4_b3=$(printf '%s\n' "$gates_json" | jq -er '.phase4_bands[2]') || exit $?
+
+plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX) || exit $?
+plan_write_rc=0
+printf '%s\n' "$model_plan_json" > "$plan_tmp" || plan_write_rc=$?
+if [[ "$plan_write_rc" -ne 0 ]]; then
+    rm -f "$plan_tmp" 2>/dev/null || true
+    exit "$plan_write_rc"
+fi
+
+plan_patch_rc=0
 artifact-patch.py --path "$artifact_path" \
   --set-json model_plan=@"$plan_tmp" \
-  --set-json "gates=$(printf '%s' "$model_plan_json" | jq -c '.gates')"
-rm -f "$plan_tmp"
+  --set-json gates="$gates_json" \
+  || plan_patch_rc=$?
 
-printf '%s' "$model_plan_json" | jq -r '
+plan_cleanup_rc=0
+rm -f "$plan_tmp" || plan_cleanup_rc=$?
+if [[ "$plan_patch_rc" -ne 0 ]]; then
+    exit "$plan_patch_rc"
+fi
+if [[ "$plan_cleanup_rc" -ne 0 ]]; then
+    exit "$plan_cleanup_rc"
+fi
+
+printf '%s\n' "$model_plan_json" | jq -r '
   "| Role | Engine | Model | Effort | Source |",
   "|---|---|---|---|---|",
   (.roles | to_entries[]
@@ -150,16 +233,11 @@ printf '%s' "$model_plan_json" | jq -r '
   (.warnings[]? | "warning: \(.)")'
 ```
 
-On non-zero from `review-config.sh`: surface stderr verbatim, stop.
-`$harness_id` is the Dispatch Protocol identity.
+On non-zero from `review-config.sh`: surface stderr verbatim and stop.
+`$harness_id` is the Dispatch Protocol identity. On any temp write, patch,
+or cleanup failure, exit with that operation's status after best-effort temp
+cleanup; never let `rm` mask an `artifact-patch.py` failure.
 
-Capture paths. Schema-validate:
-
-```bash
-artifact-validate.sh --path "$artifact_path"
-```
-
-On non-zero: surface the validator stderr and abort.
 
 Extract `mode` and `pr_number` from the validated artifact now — both
 are needed by §3's mode-aware exit checks, §4's preflight messaging,
@@ -547,12 +625,17 @@ those are the cases the reviewer most needs to inspect:
 
 ```bash
 auto_rec_table=$(jq -r '
+    def location:
+      if .file == "(unknown)" then "(unknown)"
+      elif .line_range == null then .file
+      else (.file + ":" + (.line_range[0] | tostring))
+      end;
     (["F-id", "score", "disp", "file:line", "hint", "confidence", "concerns"] | @tsv),
     (.[] | [
        .id,
        (.score | tostring),
        .disposition,
-       (.file + ":" + (.line_range[0] | tostring)),
+       location,
        (.auto_fix_hint.hint | gsub("\n"; " ") |
          (if length > 120 then (.[0:117] + "...") else . end)),
        .auto_fix_hint.confidence,
@@ -803,17 +886,29 @@ finding_json=$(artifact-read.sh \
     --filter ".findings[] | select(.id == \"$finding_id\")")
 ```
 
-Capture the `file` and `line_range` for the briefing agent's file
-snippet request:
+Capture the location for the briefing agent. Branch on `file` and
+`line_range` before indexing either range element:
 
 ```bash
 f_file=$(jq -r '.file' <<<"$finding_json")
-f_line_start=$(jq -r '.line_range[0]' <<<"$finding_json")
-f_line_end=$(jq -r '.line_range[1]' <<<"$finding_json")
+f_line_range_json=$(jq -c '.line_range // null' <<<"$finding_json")
 f_disp=$(jq -r '.disposition' <<<"$finding_json")
 f_score=$(jq -r '.score_phase4 // .score_phase3 // "null"' <<<"$finding_json")
 f_impact=$(jq -r '.impact_type' <<<"$finding_json")
 f_claim=$(jq -r '.claim' <<<"$finding_json")
+
+if [[ "$f_file" == "(unknown)" ]]; then
+    f_location="(unknown)"
+    f_location_context="Source location is unknown. Do not issue a Read request for the (unknown) placeholder. Locate relevant context from the finding claim/evidence with repository search; do not fabricate a file or line number."
+elif [[ "$f_line_range_json" == "null" ]]; then
+    f_location="$f_file"
+    f_location_context="File: $f_file (line range unknown). Locate the relevant context within this file by matching the finding claim/evidence; do not fabricate line numbers."
+else
+    f_line_start=$(jq -r '.[0]' <<<"$f_line_range_json")
+    f_line_end=$(jq -r '.[1]' <<<"$f_line_range_json")
+    f_location="$f_file:$f_line_start-$f_line_end"
+    f_location_context="File: $f_file, lines $f_line_start-$f_line_end, plus ±30 lines of context (use Read)."
+fi
 ```
 
 #### 5.2. Build the briefing (short-circuit when `auto_fix_hint` is present, else dispatch)
@@ -929,14 +1024,15 @@ Budget: ~3-5k tokens. Prompt:
 >      agent. Include negative constraints when over-engineering is a
 >      risk ("do NOT add a new flag"; "do NOT change the code").
 >
-> Context (read the repo via the Read tool for the file snippet):
+> Context:
 >
 >   - Finding JSON: <paste $finding_json verbatim>
->   - File: $f_file (lines $f_line_start-$f_line_end, plus ±30 of
->     context — use Read)
->   - Repo root CLAUDE.md: read once and extract any rules that
->     cite $f_file or the same pattern as $f_claim.
->   - Other findings on the same file: <filter artifact-read by .file == $f_file>
+>   - Display location: $f_location
+>   - Location handling: $f_location_context
+>   - Repo root CLAUDE.md: read once and extract rules matching the claim;
+>     when `$f_file` is known, also match rules that cite that file.
+>   - Other findings on the same file: filter by `.file == $f_file` only
+>     when `$f_file != "(unknown)"`; otherwise skip this same-file lookup.
 >
 > Return strict JSON matching:
 >
@@ -1006,7 +1102,7 @@ glance:
 ```markdown
 ## $finding_id — <first line of claim>
 
-**File:** `$f_file:$f_line_start-$f_line_end`
+**File:** `$f_location`
 **Score:** $f_score · **Impact:** $f_impact · **Disposition:** $f_disp
 
 **What it's about:** <briefing.summary>
@@ -1339,10 +1435,25 @@ finding_json=$(artifact-read.sh \
     --path "$artifact_path" \
     --filter ".findings[] | select(.id == \"$finding_id\")")
 f_file=$(jq -r '.file' <<<"$finding_json")
-f_line_start=$(jq -r '.line_range[0]' <<<"$finding_json")
-f_line_end=$(jq -r '.line_range[1]' <<<"$finding_json")
+f_line_range_json=$(jq -c '.line_range // null' <<<"$finding_json")
 f_claim=$(jq -r '.claim' <<<"$finding_json")
 f_hc=$(jq -c '.human_confirmation // null' <<<"$finding_json")
+
+if [[ "$f_file" == "(unknown)" ]]; then
+    f_location="(unknown)"
+    f_issue_location_rule="In the Location section, state that the exact source location is unknown; do not fabricate a file or line number."
+    f_issue_context="No source location is available. Do not issue a Read request for the (unknown) placeholder. Locate supporting context from the finding claim/evidence with repository search."
+elif [[ "$f_line_range_json" == "null" ]]; then
+    f_location="$f_file"
+    f_issue_location_rule="The Location section must include exactly \`File: $f_file\` with no line suffix."
+    f_issue_context="File: $f_file (line range unknown). Locate relevant context within this file by matching the finding claim/evidence; do not fabricate line numbers."
+else
+    f_line_start=$(jq -r '.[0]' <<<"$f_line_range_json")
+    f_line_end=$(jq -r '.[1]' <<<"$f_line_range_json")
+    f_location="$f_file:$f_line_start-$f_line_end"
+    f_issue_location_rule="The Location section must include \`File: $f_location\`."
+    f_issue_context="Read $f_file at lines $f_line_start-$f_line_end plus ±20 lines of context."
+fi
 ```
 
 **Guard: skip findings already promoted off-menu.** The default flow
@@ -1392,8 +1503,8 @@ Budget: ~2-3k tokens. Prompt:
 >   - Emit ONE JSON object only. No surrounding prose. No outer code
 >     fences on the JSON itself (the `body` string may contain inner
 >     fenced code blocks — those are fine).
->   - Body must include a line like `File: <file>:<line_start>-<line_end>`
->     and a "Discovered during" sentence naming this PR number
+>   - $f_issue_location_rule
+>   - Include a "Discovered during" sentence naming this PR number
 >     (see context).
 >   - Keep the body under 40 lines. Link to the PR once; don't
 >     replicate the finding JSON.
@@ -1402,8 +1513,8 @@ Budget: ~2-3k tokens. Prompt:
 >
 >   - Finding JSON: <paste $finding_json verbatim>
 >   - PR: #$pr_number in $repo_name_with_owner
->   - File: $f_file (lines $f_line_start-$f_line_end, plus ±20 of
->     context via Read)
+>   - Display location: $f_location
+>   - Location handling: $f_issue_context
 
 Parse the returned text as JSON (one retry on parse failure). On
 second failure, log to `trace.md` under tag

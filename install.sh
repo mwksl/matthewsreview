@@ -26,8 +26,6 @@ if [[ $# -ne 1 || "${1:-}" != "--codex" ]]; then
     exit 64
 fi
 
-"$THIS/scripts/build-codex-skills.sh" "$THIS"
-
 link_skill() { # src-dir name target-root
     local src="$1" name="$2" root="$3"
     mkdir -p "$root"
@@ -55,6 +53,16 @@ assert_linkable() { # destination
 ROOTS=("$HOME/.agents/skills")
 [[ -d "$HOME/.codex/skills" ]] && ROOTS+=("$HOME/.codex/skills")
 
+# Derive the complete desired destination set directly from commands/*.md,
+# using the generator's basename-without-.md naming rule. This catches a
+# collision for a newly added command even when no generated directory exists
+# for it in the currently published tree.
+DESIRED_SKILLS=()
+for cmd_file in "$THIS"/commands/*.md; do
+    cmd="$(basename "$cmd_file" .md)"
+    DESIRED_SKILLS+=("matthewsreview-$cmd")
+done
+
 prune_stale_links() { # target-root
     local root="$1" dest target
     for dest in "$root"/matthewsreview-*; do
@@ -69,20 +77,23 @@ prune_stale_links() { # target-root
     done
 }
 
-# Validate every destination before removing or refreshing any live link. A
-# single real-directory collision must leave the previous installation whole.
+# Validate every desired generated destination and the workflow front door
+# before rebuilding dist/codex-skills or refreshing any live link. A single
+# real-directory collision must leave every installed symlink target unchanged.
 for root in "${ROOTS[@]}"; do
     mkdir -p "$root"
-    for skill_dir in "$THIS"/dist/codex-skills/matthewsreview-*; do
-        assert_linkable "$root/$(basename "$skill_dir")"
+    for skill_name in "${DESIRED_SKILLS[@]}"; do
+        assert_linkable "$root/$skill_name"
     done
     assert_linkable "$root/matthewsreview"
 done
 
+"$THIS/scripts/build-codex-skills.sh" "$THIS"
+
 for root in "${ROOTS[@]}"; do
     prune_stale_links "$root"
-    for skill_dir in "$THIS"/dist/codex-skills/matthewsreview-*; do
-        link_skill "$skill_dir" "$(basename "$skill_dir")" "$root"
+    for skill_name in "${DESIRED_SKILLS[@]}"; do
+        link_skill "$THIS/dist/codex-skills/$skill_name" "$skill_name" "$root"
     done
     link_skill "$THIS/skills/matthewsreview" "matthewsreview" "$root"
 done

@@ -42,14 +42,48 @@ rm -rf "$TMP" "$BACKUP"
 mkdir -p "$TMP"
 
 for cmd_file in "$REPO"/commands/*.md; do
+    if [[ ! -f "$cmd_file" || ! -r "$cmd_file" ]]; then
+        printf 'ERROR: invalid command frontmatter: %s: not a readable file\n' \
+            "$cmd_file" >&2
+        exit 65
+    fi
+
+    first_line=$(awk 'NR == 1 { print; exit }' "$cmd_file")
+    if [[ "$first_line" != "---" ]]; then
+        printf 'ERROR: invalid command frontmatter: %s: line 1 must be ---\n' \
+            "$cmd_file" >&2
+        exit 65
+    fi
+
+    frontmatter_end=$(awk 'NR > 1 && $0 == "---" { print NR; exit }' "$cmd_file")
+    if [[ -z "$frontmatter_end" ]]; then
+        printf 'ERROR: invalid command frontmatter: %s: missing closing --- after line 1\n' \
+            "$cmd_file" >&2
+        exit 65
+    fi
+
+    desc=$(awk -v frontmatter_end="$frontmatter_end" '
+        NR <= 1 { next }
+        NR >= frontmatter_end { exit }
+        /^description:/ {
+            sub(/^description:[[:space:]]*/, "")
+            print
+            exit
+        }
+    ' "$cmd_file")
+    if [[ -z "${desc//[[:space:]]/}" ]]; then
+        printf 'ERROR: invalid command frontmatter: %s: description must be present and nonblank inside first frontmatter pair\n' \
+            "$cmd_file" >&2
+        exit 65
+    fi
+
     cmd="$(basename "$cmd_file" .md)"
     skill_dir="$TMP/matthewsreview-$cmd"
     mkdir -p "$skill_dir"
 
-    # Extract description from frontmatter (between first pair of ---)
-    desc=$(awk '/^---$/{n++; next} n==1 && /^description:/{sub(/^description: */,""); print; exit}' "$cmd_file")
-    # Strip frontmatter block from body
-    body=$(awk '/^---$/ && n < 2 {n++; next} n == 2 {print}' "$cmd_file")
+    # Strip only the validated first frontmatter pair from the body.
+    body=$(awk -v frontmatter_end="$frontmatter_end" \
+        'NR > frontmatter_end { print }' "$cmd_file")
     # A generated skill runs from the repository being reviewed. Bake every
     # phase/lens fragment path so Codex never resolves it against that cwd.
     # Protect ./fragments first; a direct replacement would leave ./<abs>.

@@ -315,16 +315,24 @@ printed table is the audit trail and every dispatch reads its role from
 this plan.
 
 ```bash
-plan_args=(--repo-root "$repo_root" --orchestrator "$harness_id")
+plan_args=(--repo-root "$repo_root" --orchestrator "$harness_id" \
+  --repo-config-ref "$comparison_ref")
 [[ -n "${profile:-}" ]] && plan_args+=(--profile "$profile")
 [[ -n "${models_csv:-}" ]] && plan_args+=(--models "$models_csv")
 model_plan_json=$(review-config.sh "${plan_args[@]}") || exit $?
 
-# :codex-review only — an explicitly supplied CLI --effort beats config.
+# :codex-review only — an explicitly supplied CLI --effort beats config
+# for all three Codex roles, and its provenance must travel with the value.
 if [[ "${reviewer_sources_label:-}" == "internal-codex" \
       && "${effort_explicit:-false}" == "true" ]]; then
-    model_plan_json=$(printf '%s' "$model_plan_json" | jq --arg e "$effort" \
-        '.roles.codex_detect.effort=$e | .roles.codex_validate.effort=$e | .roles.codex_crosscut.effort=$e')
+    model_plan_json=$(printf '%s\n' "$model_plan_json" | jq --arg e "$effort" '
+      def apply_cli_effort:
+        .effort = $e
+        | .source = (.source + " + cli(--effort)");
+      .roles.codex_detect |= apply_cli_effort
+      | .roles.codex_validate |= apply_cli_effort
+      | .roles.codex_crosscut |= apply_cli_effort
+    ') || exit $?
 fi
 
 # Materialize every role now; the classifier below is the first consumer.
@@ -358,12 +366,15 @@ fi
 if [[ "${reviewer_sources_label:-}" == "internal-codex" \
       && "$codex_requires_standalone" == "true" \
       && "${codex_launch_mode:-}" == "companion" ]]; then
-    if command -v codex >/dev/null 2>&1; then
+    if command -v codex >/dev/null 2>&1 \
+       && codex login status >/dev/null 2>&1 \
+       && { [[ -n "${MRB:-}" && -x "${MRB}agent-dispatch.sh" ]] \
+            || command -v agent-dispatch.sh >/dev/null 2>&1; }; then
         codex_launch_mode="agent-dispatch"
-        codex_readiness_note="max/ultra effort requires standalone Codex CLI"
+        codex_readiness_note="max/ultra effort requires authenticated standalone Codex CLI"
     else
-        echo "ERROR: resolved max/ultra effort is unsupported by codex-companion and no standalone codex CLI is on PATH." >&2
-        echo "Action: install/authenticate Codex CLI, lower the affected role effort to xhigh, or pass --effort xhigh." >&2
+        echo "ERROR: resolved max/ultra effort is unsupported by codex-companion and no authenticated standalone Codex transport is ready." >&2
+        echo "Action: install agent-dispatch.sh, run 'codex login', lower the affected role effort to xhigh, or pass --effort xhigh." >&2
         exit 1
     fi
 fi
@@ -464,10 +475,15 @@ If `mode=pr` AND step 0.13 found no prior local artifact, run:
 
 ```bash
 gh api --paginate "repos/$(gh repo view --json nameWithOwner -q .nameWithOwner)/issues/$pr_number/comments" \
-  | jq -r --arg user "$(gh api user -q .login)" \
-         --arg marker "<!-- matthews-review-v1 -->" \
-      '[.[] | select(.user.login == $user) | select(.body | contains($marker))]
-       | last // empty | .id'
+  | jq -sr --arg user "$(gh api user -q .login)" \
+          --arg current_marker "<!-- matthews-review-v1 -->" \
+          --arg legacy_marker "<!-- adams-review-v1 -->" '
+      [.[][] | select(.user.login == $user)
+       | select(.body as $body
+                | ($body | contains($current_marker))
+                  or ($body | contains($legacy_marker)))]
+      | (max_by(.id) // empty)
+      | .id'
 ```
 
 If a comment id is returned, run ASK with three choices:
@@ -588,12 +604,28 @@ model plan + gates so fragments and later lifecycle commands read them
 from the artifact rather than re-deriving:
 
 ```bash
-plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX)
-printf '%s' "$model_plan_json" > "$plan_tmp"
+plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX) || exit $?
+plan_write_rc=0
+printf '%s\n' "$model_plan_json" > "$plan_tmp" || plan_write_rc=$?
+if [[ "$plan_write_rc" -ne 0 ]]; then
+    rm -f "$plan_tmp" 2>/dev/null || true
+    exit "$plan_write_rc"
+fi
+
+plan_patch_rc=0
 artifact-patch.py --path "$artifact_path" \
   --set-json model_plan=@"$plan_tmp" \
-  --set-json gates="$gates_json"
-rm -f "$plan_tmp"
+  --set-json gates="$gates_json" \
+  || plan_patch_rc=$?
+
+plan_cleanup_rc=0
+rm -f "$plan_tmp" || plan_cleanup_rc=$?
+if [[ "$plan_patch_rc" -ne 0 ]]; then
+    exit "$plan_patch_rc"
+fi
+if [[ "$plan_cleanup_rc" -ne 0 ]]; then
+    exit "$plan_cleanup_rc"
+fi
 
 ```
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # requires-python = ">=3.10"
+# dependencies = ["jsonschema"]
 # ///
 """calibration-report.py — aggregate review-history telemetry into a
 gate/model calibration report (markdown to stdout).
@@ -20,15 +21,17 @@ Per run directory (<root>/<slug>/<branch>/<rev_*>/):
 
 Exit codes: 0 OK, 1 no runs found / bad root, 64 usage.
 """
+import math
+from fractions import Fraction
 import json
 import os
 import re
 import statistics
+import subprocess
 import sys
 from pathlib import Path
 import _common as c
 
-DEFAULT_PHASE4_BANDS = (45, 60, 75)
 DISPOSITIONS = [
     "below_gate", "pending_validation", "disproven", "uncertain",
     "confirmed_mechanical", "confirmed_manual", "confirmed_report",
@@ -41,15 +44,7 @@ def _fmt_boundary(value):
 
 
 def phase4_thresholds(artifact):
-    raw = (artifact.get("gates") or {}).get("phase4_bands")
-    if (
-        isinstance(raw, list)
-        and len(raw) == 3
-        and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in raw)
-        and 0 <= raw[0] < raw[1] < raw[2] <= 100
-    ):
-        return tuple(raw)
-    return DEFAULT_PHASE4_BANDS
+    return c.resolve_phase4_bands(artifact)
 
 
 def band_specs(thresholds):
@@ -82,6 +77,119 @@ def count_lens_anomalies(trace):
     )
 
 
+def _warn(message):
+    print(f"WARNING: {message}", file=sys.stderr)
+
+
+def _finite_number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    if isinstance(value, int):
+        return True
+    return math.isfinite(value)
+
+
+def _reject_json_constant(value):
+    raise ValueError(f"non-standard numeric constant {value}")
+
+
+def _read_jsonl(path):
+    try:
+        lines = path.read_bytes().splitlines()
+    except OSError as exc:
+        _warn(f"{path}: cannot read telemetry ({exc}); skipping file")
+        return
+    for line_number, raw_line in enumerate(lines, 1):
+        try:
+            line = raw_line.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            _warn(
+                f"{path}:{line_number}: invalid UTF-8 ({exc.reason}); "
+                "skipping row"
+            )
+            continue
+        try:
+            row = json.loads(line, parse_constant=_reject_json_constant)
+        except (json.JSONDecodeError, ValueError) as exc:
+            detail = getattr(exc, "msg", str(exc))
+            _warn(f"{path}:{line_number}: invalid JSON ({detail}); skipping row")
+            continue
+        if not isinstance(row, dict):
+            _warn(
+                f"{path}:{line_number}: expected a JSON object, got "
+                f"{type(row).__name__}; skipping row"
+            )
+            continue
+        yield line_number, row
+
+
+def _last_demote_rate(path):
+    demote = None
+    if not path.exists():
+        return demote
+    for line_number, row in _read_jsonl(path):
+        if "demote_rate" not in row or row["demote_rate"] is None:
+            continue
+        value = row["demote_rate"]
+        if not _finite_number(value) or not 0 <= value <= 1:
+            _warn(
+                f"{path}:{line_number}: demote_rate must be a finite number "
+                "from 0 through 1; skipping row"
+            )
+            continue
+        demote = value
+    return demote
+
+
+def _token_totals(path):
+    totals = {}
+    if not path.exists():
+        return totals
+    for line_number, row in _read_jsonl(path):
+        phase = row.get("phase")
+        if not isinstance(phase, str) or not phase.strip():
+            _warn(
+                f"{path}:{line_number}: phase must be a non-empty string; "
+                "skipping row"
+            )
+            continue
+        if "tokens" not in row:
+            _warn(f"{path}:{line_number}: tokens is required; skipping row")
+            continue
+        tokens = row["tokens"]
+        if tokens is None:
+            continue
+        if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
+            _warn(
+                f"{path}:{line_number}: tokens must be a nonnegative integer "
+                "or null; skipping row"
+            )
+            continue
+        totals[phase] = totals.get(phase, 0) + tokens
+    return totals
+
+
+def _integer_median(values):
+    """Exact median for nonnegative integer telemetry without float overflow."""
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return Fraction(ordered[middle - 1] + ordered[middle], 2)
+
+
+def _format_integer_median(value):
+    if isinstance(value, Fraction):
+        if value.denominator == 1:
+            return f"{value.numerator:,}"
+        whole, remainder = divmod(value.numerator, value.denominator)
+        if value.denominator == 2 and remainder == 1:
+            return f"{whole:,}.5"
+    if isinstance(value, int):
+        return f"{value:,}"
+    return str(value)
+
+
 def load_runs(root: Path):
     # Layout: <slug>/<branch (may contain slashes)>/<rev_*>/artifact.json —
     # depth varies, so anchor on rev_* directory names.
@@ -90,30 +198,34 @@ def load_runs(root: Path):
         if not run_dir.name.startswith("rev_"):
             continue
         try:
-            artifact = json.loads(artifact_path.read_text())
-        except (OSError, json.JSONDecodeError):
+            artifact_text = artifact_path.read_bytes().decode("utf-8")
+            artifact = json.loads(
+                artifact_text,
+                parse_constant=_reject_json_constant,
+            )
+        except OSError as exc:
+            _warn(f"{artifact_path}: cannot read artifact ({exc}); skipping run")
             continue
-        demote = None
-        phases_path = run_dir / "phases.jsonl"
-        if phases_path.exists():
-            for line in phases_path.read_text().splitlines():
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if row.get("demote_rate") is not None:
-                    demote = row["demote_rate"]  # last write wins
-        tokens = {}
-        tokens_path = run_dir / "tokens.jsonl"
-        if tokens_path.exists():
-            for line in tokens_path.read_text().splitlines():
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                t = row.get("tokens")
-                if isinstance(t, (int, float)):
-                    tokens[row.get("phase", "?")] = tokens.get(row.get("phase", "?"), 0) + t
+        except UnicodeDecodeError as exc:
+            _warn(
+                f"{artifact_path}: invalid UTF-8 ({exc.reason}); skipping run"
+            )
+            continue
+        except (json.JSONDecodeError, ValueError) as exc:
+            detail = getattr(exc, "msg", str(exc))
+            _warn(f"{artifact_path}: invalid JSON ({detail}); skipping run")
+            continue
+        errors = c.validate(artifact)
+        if errors:
+            shown = "; ".join(errors[:3])
+            overflow = f"; +{len(errors) - 3} more" if len(errors) > 3 else ""
+            _warn(
+                f"{artifact_path}: invalid artifact; skipping run: "
+                f"{shown}{overflow}"
+            )
+            continue
+        demote = _last_demote_rate(run_dir / "phases.jsonl")
+        tokens = _token_totals(run_dir / "tokens.jsonl")
         anomalies = 0
         trace_path = run_dir / "trace.md"
         if trace_path.exists():
@@ -123,6 +235,44 @@ def load_runs(root: Path):
         yield run_dir, artifact, demote, tokens, anomalies
 
 
+def _resolve_reviews_root(explicit):
+    helper = Path(__file__).with_name("review-root.sh")
+    command = [str(helper)]
+    if explicit is not None:
+        command.extend(["--path", explicit])
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        c.err_prompt(
+            f"could not run canonical reviews-root resolver {helper}: {exc}",
+            action="restore bin/review-root.sh and ensure it is executable, then retry.",
+        )
+        return None, c.EXIT_VALIDATION
+    if result.stderr:
+        sys.stderr.write(result.stderr)
+    if result.returncode != c.EXIT_OK:
+        exit_code = (
+            c.EXIT_USAGE
+            if result.returncode == c.EXIT_USAGE
+            else c.EXIT_VALIDATION
+        )
+        return None, exit_code
+    lines = result.stdout.splitlines()
+    if len(lines) != 1 or not lines[0]:
+        c.err_prompt(
+            "canonical reviews-root resolver did not return exactly one path",
+            context=f"stdout={result.stdout!r}",
+            action="repair bin/review-root.sh before retrying calibration.",
+        )
+        return None, c.EXIT_VALIDATION
+    return Path(lines[0]), c.EXIT_OK
+
+
 def main(argv):
     if len(argv) > 2:
         c.err_prompt(
@@ -130,42 +280,9 @@ def main(argv):
             action="run calibration-report.py [reviews-root].",
         )
         return c.EXIT_USAGE
-    if len(argv) == 2:
-        root = Path(argv[1]).expanduser()
-    else:
-        configured_root = (
-            os.environ.get("MATTHEWS_REVIEW_REVIEWS_ROOT")
-            or os.environ.get("ADAMS_REVIEW_REVIEWS_ROOT")
-        )
-        if configured_root:
-            root = Path(configured_root).expanduser()
-            if not os.environ.get("MATTHEWS_REVIEW_REVIEWS_ROOT"):
-                print(
-                    "WARNING: ADAMS_REVIEW_REVIEWS_ROOT is legacy; rename it to "
-                    "MATTHEWS_REVIEW_REVIEWS_ROOT.",
-                    file=sys.stderr,
-                )
-        else:
-            canonical_root = Path.home() / ".matthews-reviews"
-            legacy_root = Path.home() / ".adams-reviews"
-            if canonical_root.is_dir():
-                root = canonical_root
-                if legacy_root.is_dir():
-                    print(
-                        "WARNING: both ~/.matthews-reviews and ~/.adams-reviews "
-                        "exist; using ~/.matthews-reviews. Migrate or remove the "
-                        "legacy root to avoid split history.",
-                        file=sys.stderr,
-                    )
-            elif legacy_root.is_dir():
-                print(
-                    "WARNING: using legacy ~/.adams-reviews; migrate with: "
-                    "mv ~/.adams-reviews ~/.matthews-reviews",
-                    file=sys.stderr,
-                )
-                root = legacy_root
-            else:
-                root = canonical_root
+    root, root_rc = _resolve_reviews_root(argv[1] if len(argv) == 2 else None)
+    if root is None:
+        return root_rc
     if not root.is_dir():
         c.err_prompt(
             f"reviews root not found: {root}",
@@ -273,9 +390,17 @@ def main(argv):
     # --- per-phase token medians ---------------------------------------
     out += ["## Per-phase token medians (sub-agent)", "",
             "| Phase | Runs | Median | Max |", "|---|---|---|---|"]
-    for phase in sorted(phase_token_series, key=lambda p: -statistics.median(phase_token_series[p])):
-        series = phase_token_series[phase]
-        out.append(f"| {phase} | {len(series)} | {int(statistics.median(series)):,} | {max(series):,} |")
+    token_summaries = [
+        (phase, len(series), _integer_median(series), max(series))
+        for phase, series in phase_token_series.items()
+    ]
+    for phase, count, median, maximum in sorted(
+        token_summaries, key=lambda row: -row[2]
+    ):
+        out.append(
+            f"| {phase} | {count} | "
+            f"{_format_integer_median(median)} | {maximum:,} |"
+        )
     out.append("")
 
     sys.stdout.write("\n".join(out))
