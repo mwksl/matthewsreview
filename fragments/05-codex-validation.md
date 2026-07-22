@@ -8,19 +8,46 @@ batched apply pattern. The differences are concentrated in the
 dispatch shape:
 
 - **Phase 4a deep lane**: one parallel **Codex** job per candidate
-  (instead of one Opus `Agent` per candidate). Each Codex output runs
-  through a per-finding **Sonnet shape-fixer** sub-agent that emits
+  (instead of one `deep_validate` dispatch). Each Codex output runs
+  through a per-finding **`normalizer`-role shape-fixer** sub-agent that emits
   the canonical `validation_result` tuple.
 - **Phase 4b light lane**: chunked-batch **Codex** (≤25 candidates per
-  chunk) instead of chunked-batch Sonnet. Each chunk's freeform output
-  runs through one chunk-level Sonnet shape-fixer that emits the tuple
+  chunk) instead of `light_validate` dispatches. Each chunk's freeform output
+  runs through one chunk-level `normalizer`-role shape-fixer that emits the tuple
   array.
 - **Wave 2 (chain retry) is DISABLED**. Plan §2 — keeps wall-clock
-  bounded for codex-review, mirrors `/adamsreview:add`'s no-Wave-2
+  bounded for codex-review, mirrors `/matthewsreview:add`'s no-Wave-2
   policy.
 
 Capture `phase_4_start_epoch=$(date +%s)` as the first action of this
-phase — step 4.7 logs the elapsed time.
+phase, then materialize the resolved Codex validation role once:
+
+```bash
+phase4_bands=$(artifact-read.sh \
+  --path "$artifact_path" --filter '.gates.phase4_bands')
+phase4_b1=$(printf '%s' "$phase4_bands" | jq -r '.[0]')
+phase4_b2=$(printf '%s' "$phase4_bands" | jq -r '.[1]')
+phase4_b3=$(printf '%s' "$phase4_bands" | jq -r '.[2]')
+```
+
+```bash
+[[ "$role_codex_validate" == codex:* ]] || {
+    echo "ERROR: codex_validate must resolve to codex:<model>:<effort>." >&2
+    exit 1
+}
+codex_validate_spec="${role_codex_validate#codex:}"
+if [[ "$codex_validate_spec" == *:* ]]; then
+    codex_validate_model="${codex_validate_spec%%:*}"
+    codex_validate_effort="${codex_validate_spec#*:}"
+else
+    codex_validate_model="$codex_validate_spec"
+    codex_validate_effort=""
+fi
+codex_dispatch_scratch="${scratch_dir:-/tmp/matthews-review-$review_id}/jobs"
+mkdir -p "$codex_dispatch_scratch"
+```
+
+Step 4.7 logs the elapsed time.
 
 ### 4.1. Partition candidates into lanes
 
@@ -39,14 +66,14 @@ If `trivial_mode == true`: force ALL candidates into the light lane
 ### 4.2. Phase 4a — deep lane (Codex per candidate)
 
 For each deep-lane candidate, build a Codex prompt file at
-`/tmp/adams-review-codex-${review_id}-V-${finding_id}.md` and launch a
+`/tmp/matthews-review-codex-${review_id}-V-${finding_id}.md` and launch a
 Codex job. Dispatch ALL deep-lane Codex jobs in one orchestrator turn
 for concurrency.
 
 #### 4.2.1. Build the per-candidate prompt
 
 ```bash
-prompt_file="/tmp/adams-review-codex-${review_id}-V-${finding_id}.md"
+prompt_file="/tmp/matthews-review-codex-${review_id}-V-${finding_id}.md"
 finding_json=$(artifact-read.sh \
   --path "$artifact_path" --finding-id "$finding_id")
 
@@ -148,82 +175,177 @@ PROMPT
 #### 4.2.2. Launch Codex jobs (one orchestrator turn)
 
 > **One turn for all per-finding launches — not one turn per finding.**
-> Issue every deep-lane finding's `node "$CODEX_COMPANION" task --background`
-> Bash block in a single orchestrator turn. Phase 4a wall-clock latency is
+> Issue every deep-lane finding's mode-aware launch block in a single
+> orchestrator turn. Phase 4a wall-clock latency is
 > `max(codex_durations)`, not `sum(codex_durations)`.
 
-For each deep-lane finding, fire one Bash tool-use:
+For each deep-lane finding:
 
 ```bash
-node "$CODEX_COMPANION" task --background --effort "$effort" \
-    --prompt-file "/tmp/adams-review-codex-${review_id}-V-${finding_id}.md" \
-    --json
+prompt_file="/tmp/matthews-review-codex-${review_id}-V-${finding_id}.md"
+set +e
+if [[ "$codex_launch_mode" == "companion" ]]; then
+    companion_args=(node "$CODEX_COMPANION" task --background \
+        --prompt-file "$prompt_file" --json)
+    [[ -n "$codex_validate_model" ]] && companion_args+=(--model "$codex_validate_model")
+    [[ -n "$codex_validate_effort" ]] && companion_args+=(--effort "$codex_validate_effort")
+    launch_json=$("${companion_args[@]}")
+    launch_rc=$?
+    job_id=$(printf '%s' "$launch_json" | jq -r '.jobId // empty')
+else
+    dispatch_args=("${MRB}agent-dispatch.sh" start --engine codex \
+        --prompt-file "$prompt_file" --scratch-dir "$codex_dispatch_scratch")
+    [[ -n "$codex_validate_model" ]] && dispatch_args+=(--model "$codex_validate_model")
+    [[ -n "$codex_validate_effort" ]] && dispatch_args+=(--effort "$codex_validate_effort")
+    launch_json=$("${dispatch_args[@]}")
+    launch_rc=$?
+    job_id=$(printf '%s' "$launch_json" | jq -r '.job_id // empty')
+fi
+set -e
 ```
 
-Capture each launch payload's `.jobId` into a working-context map
-keyed by `finding_id`:
-
-```bash
-job_id=$(node "$CODEX_COMPANION" task --background --effort "$effort" \
-    --prompt-file "/tmp/adams-review-codex-${review_id}-V-${finding_id}.md" \
-    --json | jq -r '.jobId')
-```
+Capture successful ids in a map keyed by `finding_id`. A non-zero
+`launch_rc` or empty id routes through the same retry-with-judgment
+policy as §1.4; persistent failure falls through to §4.2.4.
 
 #### 4.2.3. Poll, fetch, shape-fix per finding
 
-Poll each deep-lane Codex job via the watchdog helper (same shape
-as §1.4):
+Poll every in-flight deep job in one orchestrator turn:
 
 ```bash
-case "$effort" in
-    low)    ceiling=300 ;;    # 5 min
-    medium) ceiling=480 ;;    # 8 min
-    high)   ceiling=900 ;;    # 15 min
-    xhigh)  ceiling=1500 ;;   # 25 min
+case "$codex_validate_effort" in
+    low)    ceiling=300 ;;
+    medium) ceiling=480 ;;
+    high)   ceiling=900 ;;
+    xhigh)  ceiling=1500 ;;
+    max)    ceiling=2100 ;;
+    ultra)  ceiling=2700 ;;
     *)      ceiling=900 ;;
 esac
+base_ceiling=$ceiling
+size_bonus=$(( 60 * lines_changed / 1000 ))
+ceiling=$(( ceiling + size_bonus ))
+max_ceiling=$(( base_ceiling * 2 ))
+[[ "$ceiling" -gt "$max_ceiling" ]] && ceiling=$max_ceiling
 
-poll=$(codex-poll.sh \
+if [[ "$codex_launch_mode" == "companion" ]]; then
+    poll=$(codex-poll.sh \
         --job "$job_id" \
         --companion "$CODEX_COMPANION" \
         --stall-threshold-sec 90 \
-        --wall-clock-ceiling-sec "$ceiling")
-verdict=$(printf '%s' "$poll" | jq -r '.verdict')
+        --wall-clock-ceiling-sec "$ceiling") || exit $?
+else
+    poll=$("${MRB}agent-dispatch.sh" poll \
+        --job "$job_id" \
+        --scratch-dir "$codex_dispatch_scratch" \
+        --stall-threshold-sec 90 \
+        --wall-clock-ceiling-sec "$ceiling") || exit $?
+fi
+verdict=$(printf '%s\n' "$poll" | jq -er \
+  '.verdict | select(type == "string" and length > 0)') || exit $?
 ```
 
-Verdict-branching matches §1.4's table verbatim — see that section
-for the full list. The behaviors that matter here:
-
-- `alive` / `stalled_suspect` → keep polling next turn.
-- `completed` → `raw_output` is in the verdict; capture as
-  `codex_output` (the helper has already plucked the canonical
-  `.storedJob.result.rawOutput` chain — direct calls to
-  `node "$CODEX_COMPANION" status` are forbidden in this fragment,
-  smoke `CR-13c` enforces).
-- `broker_desynced` / `wall_clock_exceeded` / `failed_terminal` →
-  cancel (best-effort) and route the single finding into §4.2.4's
-  per-finding atomicity (sentinel tuple, `disposition: uncertain`).
+`alive` and `stalled_suspect` remain in the next poll turn.
+`completed` supplies normalized output and optional usage:
 
 ```bash
-( node "$CODEX_COMPANION" cancel "$job_id" >/dev/null 2>&1 ) & disown   # fire-and-forget; `timeout` is GNU coreutils, not on stock macOS
+codex_output=$(printf '%s' "$poll" | jq -r '.raw_output // ""')
+codex_tokens=$(printf '%s' "$poll" | jq -r '.tokens // "null"')
+```
+
+Empty completed output routes through retry-with-judgment.
+`failed_terminal` and terminal `cancelled` route there without another stop.
+Only `broker_desynced` (companion only) or `wall_clock_exceeded` needs
+cancellation before a retry:
+
+```bash
+stop_verdict=not_requested
+if [[ "$codex_launch_mode" == "companion" ]]; then
+    ( node "$CODEX_COMPANION" cancel "$job_id" >/dev/null 2>&1 ) & disown
+    stop_verdict=cancel_requested
+else
+    set +e
+    stop_result=$("${MRB}agent-dispatch.sh" stop \
+        --job "$job_id" --scratch-dir "$codex_dispatch_scratch")
+    stop_rc=$?
+    set -e
+    stop_verdict=$(printf '%s\n' "$stop_result" | jq -ser \
+      --arg job "$job_id" '
+        select(length == 1)
+        | .[0]
+        | select(
+            type == "object"
+            and .job_id == $job
+            and (
+              (.verdict == "cancelled" and .status == "cancelled")
+              or
+              (.verdict == "already_finished"
+               and .stop_noop == true
+               and (
+                 (.status == "completed" and .terminal_verdict == "completed")
+                 or
+                 (.status == "failed" and .terminal_verdict == "failed_terminal")
+               ))
+              or
+              (.verdict == "stop_failed"
+               and .status == "stop_failed"
+               and (.reason | type == "string" and length > 0)
+               and (.wrapper_alive | type == "boolean")
+               and (.engine_alive | type == "boolean"))
+            ))
+        | .verdict
+      ') || {
+        printf '%s\n' \
+          'ERROR: agent-dispatch.sh stop returned malformed, partial, or mismatched output.' \
+          'Action: inspect the job processes; do not retry as if cancellation succeeded.' >&2
+        exit 1
+    }
+    if [[ ( "$stop_rc" -eq 0 && "$stop_verdict" == "stop_failed" ) \
+          || ( "$stop_rc" -ne 0 && "$stop_verdict" != "stop_failed" ) ]]; then
+        printf 'ERROR: agent-dispatch.sh stop exited %s with verdict %s.\n' \
+          "$stop_rc" "$stop_verdict" >&2
+        exit 1
+    fi
+    case "$stop_verdict" in
+        cancelled)
+            : # terminal cancellation; retry policy may replace this job
+            ;;
+        already_finished)
+            poll=$("${MRB}agent-dispatch.sh" poll \
+                --job "$job_id" \
+                --scratch-dir "$codex_dispatch_scratch" \
+                --stall-threshold-sec 90 \
+                --wall-clock-ceiling-sec "$ceiling") || exit $?
+            verdict=$(printf '%s\n' "$poll" | jq -er \
+              '.verdict | select(. == "completed" or . == "failed_terminal" or . == "cancelled")') \
+              || exit $?
+            codex_output=$(printf '%s' "$poll" | jq -r '.raw_output // ""')
+            codex_tokens=$(printf '%s' "$poll" | jq -r '.tokens // "null"')
+            ;;
+        stop_failed)
+            printf '%s\n' \
+              'ERROR: standalone Codex cancellation could not be verified.' \
+              'Action: inspect the authenticated wrapper/engine; do not launch a retry.' >&2
+            exit 1
+            ;;
+        *)
+            printf 'ERROR: unknown agent-dispatch stop verdict: %s\n' \
+              "$stop_verdict" >&2
+            exit 1
+            ;;
+    esac
+fi
 elapsed_for_log=$(printf '%s' "$poll" | jq -r '.elapsed_sec // "null"')
-printf 'phase_4a_codex_watchdog: finding=%s verdict=%s job=%s elapsed=%s\n' \
-    "$finding_id" "$verdict" "$job_id" "$elapsed_for_log" >> "$trace_log_path"
-# fall through to §4.2.4 per-finding atomicity (sentinel uncertain)
+printf 'phase_4a_codex_watchdog: finding=%s mode=%s verdict=%s stop=%s job=%s elapsed=%s\n' \
+    "$finding_id" "$codex_launch_mode" "$verdict" "$stop_verdict" "$job_id" \
+    "$elapsed_for_log" >> "$trace_log_path"
 ```
 
-For the `completed` happy path:
+On `already_finished`, route the re-polled terminal verdict through the normal
+completed/failure branch before deciding on a retry. `stop_failed` is non-zero
+and aborts this retry path because the old engine may still be running.
 
-```bash
-codex_output=$(printf '%s' "$poll" | jq -r '.raw_output')
-```
-
-An empty `raw_output` on `completed` still routes to §4.2.4's
-sentinel-uncertain path — the §3.7 retry-with-judgment loop sits
-above this verdict-branch in the same orchestrator turn structure
-as §1.4.
-
-Then dispatch ONE Sonnet shape-fixer per finding. Each shape-fixer
+Then dispatch ONE `normalizer`-role shape-fixer per finding. Each shape-fixer
 takes that freeform Codex output and returns a single canonical tuple.
 
 > **One turn for all shape-fixer `Agent` dispatches — not one turn per
@@ -236,7 +358,7 @@ Dispatch all shape-fixers in one orchestrator turn for concurrency.
 Shape-fixer prompt essence:
 
 > You are normalizing one Codex deep-validator output into the
-> adamsreview validation tuple schema.
+> matthewsreview validation tuple schema.
 >
 > **Codex output (freeform):**
 >
@@ -287,8 +409,8 @@ Shape-fixer prompt essence:
 > **Use the candidate's id (`<finding_id>`) verbatim in the output.**
 > Do not invent ids; do not omit it.
 
-Dispatch via `Agent` with `model: sonnet`, `subagent_type: general-purpose`.
-Capture each shape-fixer's response.
+Dispatch with role `normalizer` (default claude:sonnet),
+`subagent_type: general-purpose`. Capture each shape-fixer's response.
 
 #### 4.2.4. Per-finding atomicity
 
@@ -314,7 +436,7 @@ each drop to `trace.md` with tag `phase_4a_codex_dropped:<finding_id>
 reason=<short cause>`.
 
 If MORE THAN HALF of deep-lane findings drop, dispatch
-`AskUserQuestion` once for the phase:
+ASK once for the phase:
 
 ```
 "<N> of <M> deep-lane Codex validators failed. Continue with degraded
@@ -326,42 +448,47 @@ Options:
 
 #### 4.2.5. Log tokens
 
-Log each Sonnet shape-fixer's tokens (Codex tokens are NOT logged —
-plan §3.8):
+Log the Codex job's normalized usage (`null` when the selected
+transport does not report it), then the `normalizer`-role shape-fixer:
 
 ```bash
 log-tokens.sh \
   --review-dir "$review_dir" --phase phase_4a \
+  --agent-role codex_validator --finding-id "$finding_id" \
+  --agent-id "$job_id" --model "$role_codex_validate" \
+  --tokens "$codex_tokens"
+log-tokens.sh \
+  --review-dir "$review_dir" --phase phase_4a \
   --agent-role validator_shape_fixer --finding-id "$finding_id" \
-  --agent-id <id> --model sonnet \
+  --agent-id <id> --model "$role_normalizer" \
   --tokens <N or null>
 ```
 
 ### 4.3. Phase 4b — light lane (chunked-batch Codex per chunk)
 
 > **One turn for all chunk launches — not one turn per chunk.** Issue
-> every chunk's `node "$CODEX_COMPANION" task --background` Bash block
-> in a single orchestrator turn. Phase 4b wall-clock latency is
-> `max(chunk_durations)`, not `sum(chunk_durations)`.
+> every chunk's mode-aware launch block in a single orchestrator turn.
+> Phase 4b wall-clock latency is `max(chunk_durations)`, not
+> `sum(chunk_durations)`.
 
 Split light-lane candidates (and every candidate under `trivial_mode`)
 into chunks of **≤25 candidates per chunk**. For each chunk, build
-ONE Codex prompt file and launch ONE Codex job. Dispatch all chunk
-jobs in one orchestrator turn for concurrency.
+ONE prompt file and launch ONE Codex job. Dispatch all chunk jobs in
+one orchestrator turn for concurrency.
 
 #### 4.3.1. Build per-chunk prompt
 
 ```bash
 chunk_json=$(jq -nc --argjson cands "$chunk_candidates" '$cands')
 
-prompt_file="/tmp/adams-review-codex-${review_id}-LB-chunk${chunk_n}.md"
+prompt_file="/tmp/matthews-review-codex-${review_id}-LB-chunk${chunk_n}.md"
 
-# Use an UNQUOTED heredoc so $trivial_mode expands to its actual value
-# at write time. (A quoted heredoc would emit the literal text
-# "<true|false>" — Codex would not know which trivial_mode posture to
-# enforce, and could emit `auto_fixable` despite the §13.9 contract.)
-# $trivial_mode and $chunk_n are the only orchestrator-context bash
-# variables this heredoc references; everything else is literal.
+# Use an UNQUOTED heredoc so the runtime posture and resolved routing
+# cutoffs expand at write time. (A quoted heredoc would emit literal
+# variable names — Codex would not know which trivial_mode posture to
+# enforce and could emit `auto_fixable` despite the §13.9 contract.)
+# Expansion inventory for this heredoc: $trivial_mode, $phase4_b1,
+# $phase4_b2, and $phase4_b3. Everything else is literal.
 cat > "$prompt_file" <<PROMPT
 You are a light confirmation validator. You will return one tuple per
 candidate.
@@ -381,9 +508,10 @@ candidate score accordingly.
 ordering, specific constant naming). Judgment calls → \`manual\`.
 Architecture findings default to \`report_only\`.
 
-**Use the full 0-100 range.** Do not snap to anchors at 45/60/75 —
-emit values like 65 or 70 between anchors when warranted. Compressed
-scores lose the resolution Phase 6 needs.
+**Use the full 0-100 range.** The resolved Phase-4 routing cutoffs are
+$phase4_b1/$phase4_b2/$phase4_b3. Do not snap to those cutoffs — emit
+interior values when warranted. Compressed scores lose the resolution
+Phase 6 needs.
 
 **Candidates (N total):**
 
@@ -418,68 +546,166 @@ Set `trivial_mode` and `claude_md_paths` substitutions before writing.
 
 #### 4.3.2. Launch + poll + shape-fix per chunk
 
-Launch each chunk's Codex job:
+Launch every chunk through the selected transport in one orchestrator
+turn:
 
 ```bash
-node "$CODEX_COMPANION" task --background --effort "$effort" \
-    --prompt-file "/tmp/adams-review-codex-${review_id}-LB-chunk${chunk_n}.md" \
-    --json
+prompt_file="/tmp/matthews-review-codex-${review_id}-LB-chunk${chunk_n}.md"
+set +e
+if [[ "$codex_launch_mode" == "companion" ]]; then
+    companion_args=(node "$CODEX_COMPANION" task --background \
+        --prompt-file "$prompt_file" --json)
+    [[ -n "$codex_validate_model" ]] && companion_args+=(--model "$codex_validate_model")
+    [[ -n "$codex_validate_effort" ]] && companion_args+=(--effort "$codex_validate_effort")
+    launch_json=$("${companion_args[@]}")
+    launch_rc=$?
+    job_id=$(printf '%s' "$launch_json" | jq -r '.jobId // empty')
+else
+    dispatch_args=("${MRB}agent-dispatch.sh" start --engine codex \
+        --prompt-file "$prompt_file" --scratch-dir "$codex_dispatch_scratch")
+    [[ -n "$codex_validate_model" ]] && dispatch_args+=(--model "$codex_validate_model")
+    [[ -n "$codex_validate_effort" ]] && dispatch_args+=(--effort "$codex_validate_effort")
+    launch_json=$("${dispatch_args[@]}")
+    launch_rc=$?
+    job_id=$(printf '%s' "$launch_json" | jq -r '.job_id // empty')
+fi
+set -e
 ```
 
-Capture each launch payload's `.jobId` keyed by chunk number:
+Capture successful ids by chunk number. Launch failures enter the same
+retry-with-judgment path as deep validators, then §4.3.3 atomicity.
+
+Poll every in-flight chunk in one turn. Light-lane reasoning uses
+compressed ceilings:
 
 ```bash
-job_id=$(node "$CODEX_COMPANION" task --background --effort "$effort" \
-    --prompt-file "/tmp/adams-review-codex-${review_id}-LB-chunk${chunk_n}.md" \
-    --json | jq -r '.jobId')
-```
-
-Poll each chunk via the watchdog helper. Light-lane reasoning is
-shorter than the deep lane — same per-effort table but compressed
-ceilings (10 min high / 18 min xhigh; chunked-batch over ≤25
-candidates is shallower than per-finding deep validation):
-
-```bash
-case "$effort" in
-    low)    ceiling=240 ;;    # 4 min
-    medium) ceiling=360 ;;    # 6 min
-    high)   ceiling=600 ;;    # 10 min
-    xhigh)  ceiling=1080 ;;   # 18 min
+case "$codex_validate_effort" in
+    low)    ceiling=240 ;;
+    medium) ceiling=360 ;;
+    high)   ceiling=600 ;;
+    xhigh)  ceiling=1080 ;;
+    max)    ceiling=1440 ;;
+    ultra)  ceiling=1800 ;;
     *)      ceiling=600 ;;
 esac
 
-poll=$(codex-poll.sh \
+if [[ "$codex_launch_mode" == "companion" ]]; then
+    poll=$(codex-poll.sh \
         --job "$job_id" \
         --companion "$CODEX_COMPANION" \
         --stall-threshold-sec 90 \
-        --wall-clock-ceiling-sec "$ceiling")
-verdict=$(printf '%s' "$poll" | jq -r '.verdict')
+        --wall-clock-ceiling-sec "$ceiling") || exit $?
+else
+    poll=$("${MRB}agent-dispatch.sh" poll \
+        --job "$job_id" \
+        --scratch-dir "$codex_dispatch_scratch" \
+        --stall-threshold-sec 90 \
+        --wall-clock-ceiling-sec "$ceiling") || exit $?
+fi
+verdict=$(printf '%s\n' "$poll" | jq -er \
+  '.verdict | select(type == "string" and length > 0)') || exit $?
 ```
 
-Verdict-branching matches §1.4's table. Direct calls to
-`node "$CODEX_COMPANION" status` are forbidden in this fragment
-(smoke `CR-13c` enforces). On `completed`, capture
-`codex_chunk_output_<N>` from the verdict's `raw_output` — the
-helper has already plucked
-`.storedJob.result.rawOutput // .storedJob.payload.rawOutput // .storedJob.rawOutput // ""`:
+On `completed`, capture normalized output and usage:
 
 ```bash
-codex_chunk_output_<N>=$(printf '%s' "$poll" | jq -r '.raw_output')
+codex_chunk_output=$(printf '%s' "$poll" | jq -r '.raw_output // ""')
+codex_chunk_tokens=$(printf '%s' "$poll" | jq -r '.tokens // "null"')
 ```
 
-On `broker_desynced` / `wall_clock_exceeded` / `failed_terminal`,
-cancel best-effort and route the chunk into §4.3.3's per-chunk
-atomicity (sentinel uncertain for every candidate id in the chunk):
+Empty output is a retryable failure. `failed_terminal` and terminal
+`cancelled` route to §4.3.3 without another stop. Only
+`broker_desynced` (companion only) or `wall_clock_exceeded` needs
+cancellation before retry:
 
 ```bash
-( node "$CODEX_COMPANION" cancel "$job_id" >/dev/null 2>&1 ) & disown   # fire-and-forget; `timeout` is GNU coreutils, not on stock macOS
+stop_verdict=not_requested
+if [[ "$codex_launch_mode" == "companion" ]]; then
+    ( node "$CODEX_COMPANION" cancel "$job_id" >/dev/null 2>&1 ) & disown
+    stop_verdict=cancel_requested
+else
+    set +e
+    stop_result=$("${MRB}agent-dispatch.sh" stop \
+        --job "$job_id" --scratch-dir "$codex_dispatch_scratch")
+    stop_rc=$?
+    set -e
+    stop_verdict=$(printf '%s\n' "$stop_result" | jq -ser \
+      --arg job "$job_id" '
+        select(length == 1)
+        | .[0]
+        | select(
+            type == "object"
+            and .job_id == $job
+            and (
+              (.verdict == "cancelled" and .status == "cancelled")
+              or
+              (.verdict == "already_finished"
+               and .stop_noop == true
+               and (
+                 (.status == "completed" and .terminal_verdict == "completed")
+                 or
+                 (.status == "failed" and .terminal_verdict == "failed_terminal")
+               ))
+              or
+              (.verdict == "stop_failed"
+               and .status == "stop_failed"
+               and (.reason | type == "string" and length > 0)
+               and (.wrapper_alive | type == "boolean")
+               and (.engine_alive | type == "boolean"))
+            ))
+        | .verdict
+      ') || {
+        printf '%s\n' \
+          'ERROR: agent-dispatch.sh stop returned malformed, partial, or mismatched output.' \
+          'Action: inspect the job processes; do not retry as if cancellation succeeded.' >&2
+        exit 1
+    }
+    if [[ ( "$stop_rc" -eq 0 && "$stop_verdict" == "stop_failed" ) \
+          || ( "$stop_rc" -ne 0 && "$stop_verdict" != "stop_failed" ) ]]; then
+        printf 'ERROR: agent-dispatch.sh stop exited %s with verdict %s.\n' \
+          "$stop_rc" "$stop_verdict" >&2
+        exit 1
+    fi
+    case "$stop_verdict" in
+        cancelled)
+            : # terminal cancellation; retry policy may replace this job
+            ;;
+        already_finished)
+            poll=$("${MRB}agent-dispatch.sh" poll \
+                --job "$job_id" \
+                --scratch-dir "$codex_dispatch_scratch" \
+                --stall-threshold-sec 90 \
+                --wall-clock-ceiling-sec "$ceiling") || exit $?
+            verdict=$(printf '%s\n' "$poll" | jq -er \
+              '.verdict | select(. == "completed" or . == "failed_terminal" or . == "cancelled")') \
+              || exit $?
+            codex_chunk_output=$(printf '%s' "$poll" | jq -r '.raw_output // ""')
+            codex_chunk_tokens=$(printf '%s' "$poll" | jq -r '.tokens // "null"')
+            ;;
+        stop_failed)
+            printf '%s\n' \
+              'ERROR: standalone Codex cancellation could not be verified.' \
+              'Action: inspect the authenticated wrapper/engine; do not launch a retry.' >&2
+            exit 1
+            ;;
+        *)
+            printf 'ERROR: unknown agent-dispatch stop verdict: %s\n' \
+              "$stop_verdict" >&2
+            exit 1
+            ;;
+    esac
+fi
 elapsed_for_log=$(printf '%s' "$poll" | jq -r '.elapsed_sec // "null"')
-printf 'phase_4b_codex_watchdog: chunk=%s verdict=%s job=%s elapsed=%s\n' \
-    "$chunk_n" "$verdict" "$job_id" "$elapsed_for_log" >> "$trace_log_path"
-# fall through to §4.3.3 per-chunk atomicity
+printf 'phase_4b_codex_watchdog: chunk=%s mode=%s verdict=%s stop=%s job=%s elapsed=%s\n' \
+    "$chunk_n" "$codex_launch_mode" "$verdict" "$stop_verdict" "$job_id" \
+    "$elapsed_for_log" >> "$trace_log_path"
 ```
 
-Dispatch ONE Sonnet shape-fixer per chunk:
+On `already_finished`, route the re-polled terminal verdict through the normal
+completed/failure branch before retry decisions. `stop_failed` blocks retry
+because the old engine may still be running.
+
+Dispatch ONE `normalizer`-role shape-fixer per chunk:
 
 > You are normalizing one Codex light-validator output into a JSON
 > array of validation tuples.
@@ -487,7 +713,7 @@ Dispatch ONE Sonnet shape-fixer per chunk:
 > **Codex output (freeform):**
 >
 > ```
-> $codex_chunk_output_<N>
+> $codex_chunk_output
 > ```
 >
 > **Candidate ids in this chunk:** `<comma-separated finding ids>`
@@ -527,31 +753,36 @@ chunk (`score_phase4: null`, `decision: uncertain`). Log each drop:
 `phase_4b_codex_dropped:<chunk_n> ids=<comma-sep>`.
 
 If more than half of light-lane chunks drop, escalate via
-`AskUserQuestion` per the §4.2.4 pattern.
+the ASK primitive per the §4.2.4 pattern.
 
 #### 4.3.4. Log tokens
+
+Log one Codex usage record and one shape-fixer record per chunk:
 
 ```bash
 log-tokens.sh \
   --review-dir "$review_dir" --phase phase_4b \
+  --agent-role codex_light_validator \
+  --agent-id "$job_id" --model "$role_codex_validate" \
+  --tokens "$codex_chunk_tokens"
+log-tokens.sh \
+  --review-dir "$review_dir" --phase phase_4b \
   --agent-role validator_shape_fixer \
-  --agent-id <id> --model sonnet \
+  --agent-id <id> --model "$role_normalizer" \
   --tokens <N or null>
 ```
 
-(Per-chunk shape-fixer log; no `--finding-id` because each chunk-fixer
-covers multiple findings — mirrors the existing Phase 4b chunk-agent
-pattern in `fragments/05-validation.md`.)
+The records are per chunk, so neither uses `--finding-id`.
 
 ### 4.4. Apply §13.1 Phase-4 decision table (batched)
 
 Identical to `fragments/05-validation.md` §4.4. Concatenate every
 shape-fixer's tuples (deep-lane: one tuple per finding; light-lane:
 chunk shape-fixer arrays flattened) into a single JSON array at
-`/tmp/adams-review-${review_id}/phase4-decisions.json`, then invoke:
+`/tmp/matthews-review-${review_id}/phase4-decisions.json`, then invoke:
 
 ```bash
-scratch="/tmp/adams-review-$review_id"
+scratch="/tmp/matthews-review-$review_id"
 mkdir -p "$scratch"
 # Compose tuple array; write to $scratch/phase4-decisions.json.
 
@@ -593,11 +824,12 @@ through the helper — exit 2 on non-object input).
 
 **Project the canonical object to the allowed tuple keys before adding
 to the batch.** `parse-validator-result.py`'s canonical output includes
-`related_candidates_to_investigate` (deep-lane passthrough), `notes`,
-and `confirmed_strength` at the top level — all three are NOT in
-`artifact-patch.py --apply-decisions`'s `ALLOWED_DECISION_TUPLE_KEYS`,
-and feeding them through unchanged halts the batch with an unknown-key
-error.
+`related_candidates_to_investigate` (deep-lane passthrough) and `notes`
+at the top level; neither is in `artifact-patch.py --apply-decisions`'s
+`ALLOWED_DECISION_TUPLE_KEYS`, so feeding them through unchanged halts
+the batch with an unknown-key error. The normalizer deliberately omits
+`confirmed_strength`; `--apply-decisions` derives it from the artifact's
+resolved Phase-4 bands.
 
 There's also a subtlety with `reason`: `apply-decisions` checks
 `if "reason" in tup` (NOT truthiness) — so `reason: ""` short-circuits
@@ -666,10 +898,9 @@ tuple=$(jq -nc \
 The mapping pattern follows `fragments/05-validation.md` §4.4 ("The
 helper's `notes` field flows into the tuple's `reason` when the
 validator didn't supply one — preserving the scale-inference audit
-trail in the persisted finding"). `confirmed_strength` is dropped
-because `--apply-decisions` derives it from score; passing it through
-would conflict with the helper's derivation.
-`related_candidates_to_investigate` is dropped per Wave 2 being
+trail in the persisted finding"). `confirmed_strength` is absent
+because `--apply-decisions` derives it from the artifact's resolved
+bands. `related_candidates_to_investigate` is dropped per Wave 2 being
 disabled in codex-review (§4.5).
 
 Recovery paths for `--apply-decisions` non-zero exit codes (6 expected-
@@ -747,11 +978,11 @@ Clean up Phase 4's scratch dir AND the per-finding / per-chunk Codex
 prompt + output files:
 
 ```bash
-rm -rf -- "/tmp/adams-review-$review_id"
-rm -f "/tmp/adams-review-codex-${review_id}-V-"*.md \
-      "/tmp/adams-review-codex-${review_id}-V-"*.out.json \
-      "/tmp/adams-review-codex-${review_id}-LB-chunk"*.md \
-      "/tmp/adams-review-codex-${review_id}-LB-chunk"*.out.json
+rm -rf -- "/tmp/matthews-review-$review_id"
+rm -f "/tmp/matthews-review-codex-${review_id}-V-"*.md \
+      "/tmp/matthews-review-codex-${review_id}-V-"*.out.json \
+      "/tmp/matthews-review-codex-${review_id}-LB-chunk"*.md \
+      "/tmp/matthews-review-codex-${review_id}-LB-chunk"*.out.json
 ```
 
 ### 4.7. Log Phase 4 summary

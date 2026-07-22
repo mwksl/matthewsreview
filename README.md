@@ -1,245 +1,185 @@
-# adamsreview
+# matthewsreview
 
-Multi-stage code review for Claude Code — parallel sub-agent detection, validation passes, persistent JSON state, and an automated fix loop that re-reviews and reverts regressions before committing.
+Multi-stage code review for **Claude Code, Codex, and Oh My Pi** — parallel sub-agent detection, validation passes, per-stage model selection, persistent JSON state, and an automated fix loop that re-reviews and reverts regressions before committing.
 
-On my own PRs, it's been catching dramatically more real bugs than Claude Code's built-in `/review`, `/ultrareview`, CodeRabbit, Greptile, and Codex's built-in review — while producing fewer false positives. (Anecdotal, n=me.) Modeled after the built-in `/review` and extended into a six-command pipeline. Runs against your regular Claude Code subscription (Max plan recommended) — unlike `/ultrareview`, which charges against your Extra Usage pool.
-
-```
-/plugin marketplace add adamjgmiller/adamsreview
-/plugin install adamsreview@adamsreview
-```
+Fork of [adamsreview](https://github.com/adamjgmiller/adamsreview) (v0.4.3), expanded: runs from three harnesses instead of one, every pipeline stage's model is configurable, and the pipeline is tuned from ~100 real review runs' telemetry.
 
 The six commands:
 
-- **`/adamsreview:review`** — multi-lens code review of a branch or PR. Up to seven parallel sub-agent lenses (correctness, security, UX, etc.) feed a dedup pass, a cheap-then-deep validation gate, and (optionally) a holistic Opus cross-cutting pass. High-confidence auto-fix proposals are pre-computed so `:fix` and `:walkthrough` can batch-accept them in one confirm. `--ensemble` adds a Codex CLI pass and PR bot-comment scrape on top of the internal Claude lenses.
-- **`/adamsreview:codex-review`** — Codex CLI peer to `:review`. Same artifact shape, drop-in for everything downstream (`:fix`, `:add`, `:walkthrough`, `:promote`). Effort tunable via `--effort low|medium|high|xhigh` (default `high`).
-- **`/adamsreview:add`** — inject externally-sourced findings (a Claude Code cloud `/ultrareview` paste, an Opus once-over, a teammate's note) into the most recent review's artifact. Deduped against what's already there, validated by the same gates, re-published to the existing PR comment.
-- **`/adamsreview:walkthrough`** — interactive driver for findings `:fix` would skip. Uses the harness's `AskUserQuestion` UI to walk through uncertain or human-judgment items one by one — promote what you want auto-fixed, skip the rest. Pre-computed auto-fix proposals are batch-accepted up front; the remainder get per-finding briefing + options + recommendation. Posts a decisions log to the PR.
-- **`/adamsreview:fix`** — automated fix loop. Dispatches per-fix-group sub-agents in parallel, then re-reviews the work with Opus, **reverts any regressions, and commits the survivors** (one combined commit by default; `--granular-commits` for one per group).
-- **`/adamsreview:promote`** — human override that promotes a single finding to auto-fixable, bypassing the lane filter and score threshold.
+- **`review`** — multi-lens code review of a branch or PR. Up to seven parallel sub-agent lenses (correctness, security, UX, etc.) feed a dedup pass, a cheap-then-deep validation gate, and a holistic cross-cutting pass. High-confidence auto-fix proposals are pre-computed so `fix` and `walkthrough` can batch-accept them in one confirm. `--ensemble` adds a Codex pass and PR bot-comment scrape on top of the internal lenses; `--full` forces every lens even on small/docs-only diffs.
+- **`codex-review`** — Codex-driven peer to `review`. Same artifact shape, drop-in for everything downstream. Effort tunable via `--effort low|medium|high|xhigh|max|ultra` (default `high`); `--full` forces all detection lenses.
+- **`add`** — inject externally-sourced findings (a cloud `/ultrareview` paste, an Opus once-over, a teammate's note) into the most recent review's artifact. Deduped, validated by the same gates, re-published to the existing PR comment.
+- **`walkthrough`** — interactive driver for findings `fix` would skip. Per-finding briefing + options + recommendation; promote what you want auto-fixed.
+- **`fix`** — automated fix loop. Per-fix-group agents, post-fix review, **reverts regressions, commits survivors** (`--granular-commits` for one commit per group).
+- **`promote`** — human override that promotes a single finding to auto-fixable.
 
-Command files live at bare-stem paths under `commands/`; shared phase fragments and prompt references live under `fragments/`; helper scripts and the artifact schema live under `bin/`. The plugin runtime auto-adds `bin/` to `$PATH` on load — no symlinks, no install script.
+## Install
+
+| Harness | Install | Invoke |
+|---|---|---|
+| Claude Code | `/plugin marketplace add mwksl/matthewsreview` then `/plugin install matthewsreview@matthewsreview` | `/matthewsreview:review` |
+| Oh My Pi | `omp plugin marketplace add mwksl/matthewsreview` then `omp plugin install matthewsreview@matthewsreview` — **or zero-install**: if the plugin is already installed in Claude Code, omp discovers it automatically | `/matthewsreview:review` |
+| Codex | clone, then `./install.sh --codex` (generates `$matthewsreview-*` skills from `commands/*.md` and links them into `~/.agents/skills/`; also `~/.codex/skills/` when present) | `$matthewsreview-review` or select `matthewsreview-review` from `/skills` |
+
+Runtime deps (all harnesses): `uv`, `jq`, `gh`, `git`, bash 3.2+. Run `bin/doctor.sh` after install — it checks deps, harness CLIs, config validity, and stale pre-rename remnants, printing the exact fix for anything off.
+
+Codex generated skills are an install artifact, not another source tree. Re-run `./install.sh --codex` after updates. To uninstall them:
+
+```bash
+for root in ~/.agents/skills ~/.codex/skills; do
+  for skill in "$root"/matthewsreview "$root"/matthewsreview-*; do
+    [ -L "$skill" ] && rm "$skill"
+  done
+done
+```
+
+### Local checkout installs
+
+- **Claude Code**: `/plugin marketplace add /path/to/matthewsreview` then `/plugin install matthewsreview@matthewsreview`; or one-shot `claude --plugin-dir /path/to/matthewsreview`.
+- **Oh My Pi**: `omp plugin marketplace add /path/to/matthewsreview` then `omp plugin install matthewsreview@matthewsreview`.
+- **Codex**: `./install.sh --codex` from the clone. Re-run after moving or updating the clone (generated skills bake an absolute `MREVIEW_ROOT`).
 
 ## Recommended flow
 
-On a non-trivial PR, the commands work best in this order:
+1. **Review.** `/matthewsreview:review --ensemble --full` (the daily-driver combination: full lens coverage + pooled Codex/bot-comment sources). Or `codex-review` for a Codex-driven pass.
+2. **Add** *(optional)* — inject findings from a parallel review.
+3. **Walkthrough** *(optional)* — the review's **Next steps** block tells you exactly how many findings need human judgment.
+4. **Fix** — applies every auto-eligible finding (including walkthrough-promoted ones).
 
-1. **Review.** `/adamsreview:review` — or `/adamsreview:review --ensemble` if you have the Codex CLI installed and want to pool a Codex pass plus a PR bot-comment scrape on top of the internal Claude lenses (higher token cost). **Or** `/adamsreview:codex-review [--effort <level>]` for a Codex-driven peer review (drop-in for everything downstream; effort tunable; no `--ensemble`).
-2. **Add.** *(optional)* `/adamsreview:add <paste...>` — if you ran a parallel review (cloud `/ultrareview`, Opus once-over, manual scan, etc.) that surfaced bugs the original review missed, paste the result here. The findings are validated by Phase 4 and land in the same artifact, deduped against what's already there. Auto-eligible additions feed step 4; non-eligible ones surface in step 3.
-3. **Walkthrough.** *(optional)* `/adamsreview:walkthrough [threshold]` — step through findings the fix command would skip (deep-manual, deep-report, and the entire light lane including light `confirmed_mechanical`), restricted to those scoring at or above `$threshold` (default 60) so low-signal items don't pad the session. Step 4.5 batch-accepts all findings carrying a pre-computed auto-fix proposal in one confirm (the fast path); the rest get per-finding briefing + options + recommendation via the harness's `AskUserQuestion` UI. Promote the ones you want auto-fixed with tailored fix-hints, skip the rest. Posts a decisions log to the PR for audit. Pass a lower threshold (e.g. `/adamsreview:walkthrough 30`) and pick the **Full** tier at the preflight prompt to audit Phase-3-demoted `below_gate` findings too.
-4. **Fix.** `/adamsreview:fix` — applies every auto-eligible finding (including whatever was added in step 2 and promoted in step 3). Phase 7.5 surfaces any remaining auto-fix proposals (light-lane / manual / report findings) for one-confirm batch-accept before Phase 8 dispatch. Default: one combined commit for all surviving fixes; pass `--granular-commits` for one commit per fix group. Per-group Phase-9 outcome lands in the commit message either way.
+Each command is independent; steps 2–4 can land days or weeks after step 1 — review state persists under `~/.matthews-reviews/<repo-slug>/<branch>/<review_id>/`.
 
-Each command is independent — you can go straight from review to fix if you only care about auto-eligible findings, or skip review entirely and run `:fix` against an existing artifact. Steps 2–4 can land days or weeks after step 1; the review artifact persists under `~/.adams-reviews/<slug>/<branch>/`.
+## Model selection
 
-`/adamsreview:promote <id>` remains useful for one-off manual promotions outside the walkthrough flow (e.g. promoting a `disproven` finding with `--force`, or conceptually looping over a set of IDs — `F003`, `F037`, `F039` — with `--defer-publish` on each so only the final invocation re-publishes to the PR).
+Every sub-agent dispatches through a named **role**; you choose the model per role. Role strings are `engine:model[:effort-or-thinking]`:
 
-## Documents
+- **Engines**: `claude` (native in Claude Code/omp sessions), `codex` (CLI subprocess, billed by Codex), `omp` (any omp provider model, native in omp only).
+- **Tiers** hold the defaults: `deep=claude:opus` (deep lenses, deep validation, cross-cutting, fix agents, post-fix review), `light=claude:sonnet` (light lenses/validation), `utility=claude:sonnet` (classifier, normalizer, dedup, scoring, fix-hint, briefer, drafter). Codex lanes (`ensemble_detect`, `codex_detect/validate/crosscut`) default `codex::high`.
+- **Overrides**: any role individually, e.g. `deep_validate=claude:sonnet`, `light=codex::medium`, `utility=claude:haiku`.
 
-- **`CLAUDE.md`** — operational guide for Claude Code sessions working in this repo. Self-contained for routine work; read first on a fresh session.
-- **`docs/state-and-gates.md`** — finding state model, score gates, deep/light lanes (the normative spec).
-- **`docs/pipeline.md`** — phase trees and token-tally semantics for every command.
-- **`docs/helpers.md`** — helper-script inventory and the batched-helper pattern.
-- **`bin/schema-v1.json`** — JSON Schema for `artifact.json` (source of truth for artifact shape).
-- **`docs/archive/`** — frozen design + build docs (2026-04-19 onward). `DESIGN.md` (rev 8) is the original normative spec; `BUILD.md` is the stage-by-stage journal. Not maintained; consult only for historical rationale.
-- **`plans/`** — per-branch plan files. Active follow-ups live in GitHub issues; historical backlog at `plans/old-backlog.md` (frozen 2026-05-04).
+Where config lives (later wins): built-in defaults → `~/.matthews-reviews/config.json` → `<repo>/.matthewsreview.json` → `--profile <name>` → `--models "<csv>"`.
 
-## Dependencies
-
-### Runtime
-
-| Tool | Version | Used by | Notes |
-|---|---|---|---|
-| `uv` | 0.7+ | `artifact-patch.py`, `artifact-render.py` | `brew install uv`. Scripts use a PEP 723 inline-script shebang (`#!/usr/bin/env -S uv run --quiet --script`) so `uv` fetches and caches `jsonschema` on first run — no venv, no global pip install |
-| `python3` | 3.10+ | invoked by `uv` | `uv` will install a matching Python if needed |
-| `bash` | 3.2+ | all `*.sh` helpers | Helpers are intentionally 3.2-portable (no `declare -A`, `mapfile`, `${var,,}`), so macOS's default `/bin/bash` works as-is. On Windows, Git for Windows ships bash 5+ via Git Bash and Claude Code auto-routes through it |
-| `jq` | 1.6+ | `artifact-read.sh`, log helpers | `brew install jq` |
-| `gh` | 2.x | `artifact-publish.sh`, `external-scrape.sh` | `brew install gh`, `gh auth login` |
-| `git` | 2.x | everywhere | standard |
-
-## Installation
-
-### macOS / Linux
-
-1. Install deps: `brew install uv jq gh git` (macOS) or the distro equivalent. (macOS's default `/bin/bash` 3.2 is fine — helpers are 3.2-portable.)
-2. In a Claude Code session: `/plugin marketplace add adamjgmiller/adamsreview`
-3. In the same session: `/plugin install adamsreview@adamsreview`
-
-### Windows (native)
-
-1. Install [Git for Windows](https://git-scm.com/downloads/win) — provides Git Bash (bash 5+) and `git`, which Claude Code uses internally. Claude Code auto-routes `#!/usr/bin/env bash` helpers through Git Bash; set `CLAUDE_CODE_GIT_BASH_PATH` if Git Bash lives in a non-default location (see *Troubleshooting*).
-2. Install [uv](https://docs.astral.sh/uv/), [jq](https://jqlang.github.io/jq/download/), and the [GitHub CLI](https://cli.github.com/).
-3. In a Claude Code session: `/plugin marketplace add adamjgmiller/adamsreview` and `/plugin install adamsreview@adamsreview`.
-
-### Install from a local checkout
-
-If you've cloned this repo and prefer running from source — or you want to pin to a specific commit — two paths work without the GitHub marketplace round-trip:
-
-- **Persistent install from a local path.** In a Claude Code session, run `/plugin marketplace add /path/to/adamsreview` then `/plugin install adamsreview@adamsreview`. Same end state as the GitHub marketplace flow above — the plugin is registered under `~/.claude/` and survives restarts. Use `.` in place of the absolute path if your cwd is already the clone.
-- **One-shot via `--plugin-dir`.** `claude --plugin-dir /path/to/adamsreview` launches Claude Code with the clone loaded as a plugin for that session only. Nothing is written to `~/.claude/`; re-launch without the flag and the plugin is gone. Handy for trying the plugin without any persistent state, or for running a specific checkout side-by-side with an installed version.
-
-Both paths still require the runtime deps listed above (`uv`, `jq`, `gh`, `bash`, `git`).
-
-### Commands (post-install)
-
-All invocations are plugin-namespaced:
-
-- `/adamsreview:review [--ensemble] [--full]`
-- `/adamsreview:codex-review [--effort <low|medium|high|xhigh>] [--full]`
-- `/adamsreview:add [<paste...>] [--file <path> --line <N> --claim "..."]`
-- `/adamsreview:walkthrough [threshold]`
-- `/adamsreview:fix [threshold]`
-- `/adamsreview:promote <finding_id> [--reason "..."] [--fix-hint "..."]`
-
-`--full` (on `:review` and `:codex-review`) opts out of the trivial-mode optimization, forcing every detection lens to run even on small or docs-only diffs. Useful when you want full coverage on a deliberately-small PR; otherwise the default trivial-mode classifier is the right call.
-
-No separate Python dep install. First invocation of any `*.py` helper triggers `uv` to resolve declared deps (`jsonschema` etc.) and cache them — this can take a few seconds on a fresh machine (see *Troubleshooting*). Subsequent runs are fast.
-
-### Plugin-author iteration
-
-If you're hacking on the plugin itself (not just using it), `scripts/dev-run.sh` launches Claude Code with the working tree loaded as a plugin via `claude --plugin-dir "$(pwd)"` — no marketplace install needed. For install-path simulation from a working tree, run `/plugin marketplace add .` inside a Claude Code session.
-
-### Review state location
-
-`/adamsreview:review` writes per-run state (artifact, trace, phase logs, token logs) under `~/.adams-reviews/<repo-slug>/<branch>/<review_id>/`. Override with `export ADAMS_REVIEW_REVIEWS_ROOT=/some/other/path` if you want state elsewhere.
-
-**Why not `~/.claude/reviews/`?** Claude Code hardcodes a sensitive-file permission prompt for writes to `~/.claude/...` that survives even `bypassPermissions` mode, and `~/.claude/reviews` is not on the short list of exempt subdirs (`.claude/commands`, `.claude/agents`, `.claude/skills`). Keeping review state outside `~/.claude/` avoids dozens of permission prompts per run.
-
-**Migrating from pre-Stage-2.5 state.** If you have reviews under `~/.claude/reviews/`, either:
-
-```bash
-# Option A: move state to the new canonical root (recommended).
-mv ~/.claude/reviews ~/.adams-reviews
-
-# Option B: keep state at the old location via the env var (accepts the prompts).
-export ADAMS_REVIEW_REVIEWS_ROOT=~/.claude/reviews
+```jsonc
+// ~/.matthews-reviews/config.json
+{
+  "tiers": { "utility": "claude:haiku" },
+  "roles": { "deep_validate": "claude:sonnet" },
+  "gates": { "phase3_gate": 45, "phase4_bands": [45, 60, 75], "fix_threshold": 60, "walkthrough_threshold": 60 },
+  "profiles": {
+    "max":   { "tiers": { "light": "claude:opus" } },
+    "cheap": { "tiers": { "utility": "claude:haiku", "light": "claude:haiku" } }
+  },
+  // Per-harness defaults: applied between built-ins and your tiers, so
+  // omp sessions get omp-native models while Claude Code keeps claude:*.
+  "orchestrator_defaults": {
+    "omp": {
+      "tiers": { "deep": "omp:moonshot/kimi-k3", "light": "omp:moonshot/kimi-k3", "utility": "omp:moonshot/kimi-k3" }
+    }
+  }
+}
 ```
 
-### Token counts: what they measure
+**Running from Codex.** Defaults stay harness-invariant: deep roles use `claude:opus`, light/utility roles use `claude:sonnet`, and dedicated Codex lanes use `codex::high`. A Codex-orchestrated run shells out to an authenticated Claude CLI for `claude:*` roles. Use `orchestrator_defaults.codex.tiers`, a profile, or `--models` when you want an all-Codex run.
 
-The rendered report can surface two numbers:
+**Running on omp models.** Role strings with the `omp:` engine dispatch through omp's eval bridge to any model your omp installation serves (`omp models` lists the registry). Append an omp thinking level when the model supports one, e.g. `omp:openai-codex/gpt-5.6-sol:max`. Example per-run: `--models "deep=omp:openai-codex/gpt-5.6-sol:max,light=omp:openai-codex/gpt-5.6-sol:max,utility=omp:openai-codex/gpt-5.6-sol:max"`. To make it permanent, set `orchestrator_defaults.omp.tiers` (above) — Claude Code sessions are unaffected. Without it, `claude:*` roles under omp require Anthropic auth in omp; if a role's model isn't servable, the preflight Model plan prints a warning and lens dispatches 404 (the run is then marked **REVIEW DEGRADED** in the report). `bin/doctor.sh` probes this upfront.
 
-- **Sub-agent tokens** — rolled up from the per-review `tokens.jsonl` log. Counts every dispatched sub-agent (lenses, validators, fix agents, post-fix reviewer, etc.) for this specific review. Precise. Always shown.
-- **Orchestrator tokens** — rolled up from the Claude Code session transcripts under `~/.claude/projects/<cwd-slug>/`, filtered to assistant turns with `timestamp >= review_started_at`. Captures the main-session spend that `subagent_tokens` deliberately excludes. **Opt-in** — see below.
+```bash
+/matthewsreview:review --full --models "utility=claude:haiku"
+/matthewsreview:review --profile cheap
+```
 
-When both are populated they're complementary (no overlap), and together estimate total cost.
+The preflight prints the resolved **Model plan** table (role / engine / model / effort-or-thinking / source) before any sub-agent launches; the plan is stored in the artifact (`model_plan`) and each dispatch's role string lands in `tokens.jsonl`. Codex effort supports `low|medium|high|xhigh|max|ultra`; omp thinking supports `off|minimal|low|medium|high|xhigh|max`.
 
-#### Orchestrator tokens are opt-in
+### Gate thresholds
 
-macOS Sequoia and Tahoe show an "*kitty (or your terminal) would like to access data from other apps*" prompt the first time a shell helper reads files marked with the `com.apple.provenance` extended attribute. Every Claude Code transcript carries one, and `bin/orchestrator-tokens.sh` reads them — so the helper would trigger the prompt on the first lifecycle command of every review and (because the TCC cache for this gate is partial) repeatedly thereafter. To avoid pestering users, the helper defaults to skip.
+Score gates are config values with unchanged defaults: `phase3_gate=45`, `phase4_bands=[45,60,75]`, `fix_threshold=60`, `walkthrough_threshold=60`. `bin/calibration-report.py ~/.matthews-reviews` aggregates your review history (demote rates, waste ratios, band→disposition matrix, per-phase token medians) so you can tune them from evidence. CLI thresholds on `fix`/`walkthrough` still override per run.
 
-To enable, do **either**:
+## Token counts
 
-- **Recommended** — grant your terminal app **Full Disk Access** (System Settings → Privacy & Security → Full Disk Access → `+` your terminal). One toggle, permanent, silences this prompt class for everything launched from your terminal. Then `export ADAMS_REVIEW_TALLY_ORCHESTRATOR=1` in your shell rc (`~/.zshrc`, `~/.bashrc`, etc.) so the helper actually runs.
-- **Just opt in without FDA** — `export ADAMS_REVIEW_TALLY_ORCHESTRATOR=1` and accept the macOS prompts when they fire. Each grant survives until the next OS update or terminal-app update; choose this if you want narrower permissions at the cost of clicking *Allow* periodically.
+`subagent_tokens` is always rolled up from the review's own `tokens.jsonl`.
+Claude Code can also capture the orchestrator's main-session spend:
 
-When opted out (the default), the helper exits 0 with one `orchestrator-tally: skipped` line and leaves the artifact's `orchestrator_tokens` field absent. The PR comment shows only **Sub-agent tokens** — still the precise per-review counter and the primary cost signal. Sub-agent tokens log under `~/.adams-reviews/`, which carries no provenance xattr, so that path triggers no prompts.
+```bash
+export MATTHEWS_REVIEW_TALLY_ORCHESTRATOR=1
+```
 
-**Stale-data behavior.** If you opt in for the initial review and then opt out before running `/adamsreview:fix`, the helper preserves the previously-written `orchestrator_tokens` value rather than wiping it. The rendered line shows the last-measured value, not a freshly-skipped zero — meaning it can under-report subsequent fix-time activity. Re-opt-in on the next lifecycle command refreshes. The reverse direction (opt out for review, opt in for fix) has no staleness: the fix-time tally's `--since review_started_at` window covers the full review→fix arc, so the first opt-in write captures everything.
+The `SessionStart` hook records the active session ID and exact transcript path.
+Each tally reads only that file, filters to matching assistant turns at or after
+the review start, and merges the session's counters into the artifact. It never
+scans sibling transcripts. Later `fix`, `add`, or `walkthrough` sessions retain
+earlier lifecycle-session counters; re-tallying the same session replaces its
+row rather than double-counting it.
 
-#### Orchestrator tokens can over-count (when opted in)
+This remains opt-in because reading a Claude Code transcript can trigger macOS's
+“access data from other apps” prompt (`com.apple.provenance`). Grant Full Disk
+Access to the terminal/Claude Code host if macOS blocks the read. Without the
+export, the helper skips and leaves any previously captured value untouched.
+The legacy `ADAMS_REVIEW_TALLY_ORCHESTRATOR=1` export still works. Codex- and
+omp-orchestrated runs have no Claude `SessionStart` transcript metadata, so this
+field remains absent; their dispatched-agent usage still appears under
+`subagent_tokens`.
 
-The transcript scan is a pure time-window filter, so any Claude Code turn in the same working directory between `review_started_at` and the last tally gets counted — even if it's unrelated work. In practice that means:
+## The artifact as a work queue
 
-- **Clean:** review → fix back-to-back, or review → new review on updated codebase (each review's `review_started_at` excludes the prior one's turns).
-- **Over-counts:** review → unrelated work in the same cwd → fix (the unrelated turns land in the fix run's re-tally).
-- **Mitigation:** run the lifecycle commands close together, or do unrelated work in a different worktree (different cwd → different transcript directory → not scanned).
+- **Dispositions export** — one row per finding with suggested actions, replacing hand-built ENGAGE/SKIP passes:
+  ```bash
+  bin/artifact-render.py --input <review_dir>/artifact.json --format dispositions > DISPOSITIONS.md
+  ```
+- **Calibration** — `bin/calibration-report.py` (see above).
+- **Doctor** — `bin/doctor.sh` for environment problems.
 
-Sub-agent tokens don't have this problem — their log is per-review. If you need a precise total, trust sub-agent tokens and treat orchestrator tokens as a rough ceiling. See `bin/orchestrator-tokens.sh` header for the full list of caveats.
+## Command reference
 
-### Why `uv` instead of plain pip
+```
+/matthewsreview:review [--ensemble] [--full] [--profile <name>] [--models "<csv>"]
+/matthewsreview:codex-review [--effort <low|medium|high|xhigh|max|ultra>] [--full] [--profile <name>] [--models "<csv>"]
+/matthewsreview:add [<paste...>] [--file <path> --line <N> --claim "..."] [--impact <type>] [--no-dedup] [--profile <name>] [--models "<csv>"]
+/matthewsreview:walkthrough [threshold] [--profile <name>] [--models "<csv>"]
+/matthewsreview:fix [threshold] [--granular-commits] [--profile <name>] [--models "<csv>"]
+/matthewsreview:promote <finding_id> [--reason "..."] [--fix-hint "..."] [--force] [--defer-publish]
+```
 
-PEP 668 (Python 3.12+ with Homebrew) marks system and user site-packages as externally managed and refuses direct `pip install`. The original plan assumed plain pip; `uv`'s inline-script dep spec is the cleanest workaround: each Python helper is self-contained, runs without activation ceremony, and its dep list lives next to the code that imports it. Tradeoff: requires `uv` on the machine running the scripts.
+## Maintenance
+
+- **Version bumps**: patch for fixes, minor for new commands or breaking output-shape changes — bump `.claude-plugin/plugin.json` or `/plugin marketplace update` / `omp plugin upgrade` won't pick up changes.
+- **CI**: `.github/workflows/smoke.yml` runs `test/smoke.sh` (483 assertions) on ubuntu + macOS, plus shellcheck and a bash-3.2 portability gate. Run `test/smoke.sh` locally before pushing.
+- **Upgrading**: Claude Code `/plugin marketplace update matthewsreview && /plugin update`; omp `omp plugin upgrade matthewsreview@matthewsreview`; Codex `git pull && ./install.sh --codex`.
+- **Working on the pipeline itself**: read `AGENTS.md` first. `docs/state-and-gates.md` (state model, gates, lanes) is the normative spec; `docs/pipeline.md` has phase trees; `docs/helpers.md` the helper inventory.
+
+## Migrating from adamsreview
+
+The pipeline reads the old identity's state with a migration nudge, so nothing breaks mid-transition:
+
+1. `mv ~/.adams-reviews ~/.matthews-reviews` (or keep the old root via `MATTHEWS_REVIEW_REVIEWS_ROOT=~/.adams-reviews`).
+2. Rename any `ADAMS_REVIEW_*` exports to `MATTHEWS_REVIEW_*` (old vars still work as fallbacks).
+3. In Claude Code: `/plugin uninstall adamsreview@adamsreview`, then install matthewsreview. Update any project `.claude/settings.json` `enabledPlugins` entries from `adamsreview@adamsreview` to `matthewsreview@matthewsreview`, and delete stale `plugins/cache/adamsreview/.../bin` PATH allowlist lines in `settings.local.json`.
+4. `bin/doctor.sh` flags anything you missed.
 
 ## Layout
 
 ```
-adamsreview/                           ← this repo (plugin root)
-├── CLAUDE.md                          ← operational guide (read first)
-├── README.md                          ← this file
-├── .claude-plugin/
-│   ├── plugin.json                    ← plugin manifest (name: adamsreview)
-│   └── marketplace.json               ← single-plugin marketplace
-├── .gitattributes                     ← LF enforcement
-├── docs/
-│   └── archive/                       ← frozen historical references (not maintained)
-│       ├── README.md                  ← frozen-as-of banner
-│       ├── DESIGN.md                  ← original normative design (rev 8)
-│       └── BUILD.md                   ← build journal (Stages 1–3 + hardening + walkthrough)
-├── plans/                             ← per-branch plan files (umbrella + optional PRD/PLAN/JOURNAL)
-├── test/                              ← smoke harness + fixtures
-├── commands/                          ← bare-stem command files (plugin namespacing)
-│   ├── review.md                      ← /adamsreview:review
-│   ├── codex-review.md                ← /adamsreview:codex-review
-│   ├── add.md                         ← /adamsreview:add
-│   ├── walkthrough.md                 ← /adamsreview:walkthrough
-│   ├── fix.md                         ← /adamsreview:fix
-│   └── promote.md                     ← /adamsreview:promote
-├── fragments/                         ← shared phase fragments + prompt references
-│   ├── _prelude-shared.md             ← loaded by every command
-│   ├── promote-core.md                ← shared precondition + patch (promote + walkthrough)
-│   ├── 00-preflight.md … 10-post-fix-and-commit.md
-│   │     (incl. 06b-auto-fix-hint.md for Phase 5.5)
-│   ├── 02-ensemble-adapter.md         ← --ensemble pooling
-│   ├── 01-codex-detection.md          ← Codex Phase 1 variant
-│   ├── 05-codex-validation.md         ← Codex Phase 4 variant
-│   ├── 06-codex-cross-cutting.md      ← Codex Phase 5 variant
-│   ├── lens-prompts/                  ← per-lens detection prompts
-│   └── lens-*-reference.md
-├── bin/                               ← helper scripts (plugin runtime auto-adds to $PATH)
-│   ├── include                        ← `!include <fragment>.md` wrapper
-│   ├── schema-v1.json                 ← JSON Schema for artifact.json
-│   ├── _common.py                     ← shared Python helpers
-│   ├── artifact-patch.py              ← machine-state writer
-│   ├── artifact-render.py             ← JSON → Markdown
-│   ├── artifact-validate.sh           ← schema check (bash wrapper)
-│   ├── artifact-read.sh               ← jq wrapper
-│   ├── artifact-publish.sh            ← PR comment post/patch
-│   ├── artifact-seed.sh               ← initial artifact scaffold
-│   ├── claude-md-paths.sh             ← walk-up CLAUDE.md finder
-│   ├── staleness.sh                   ← git diff intersection
-│   ├── freshness-gate.sh              ← trace freshness check
-│   ├── trivial-check.sh               ← trivial-mode classifier
-│   ├── codex-poll.sh                  ← Codex CLI invocation + watchdog
-│   ├── parse-validator-result.py      ← validator-output parser
-│   ├── parse-with-repair.py           ← JSON-with-repair parser
-│   ├── source-family-map.py           ← source-family lookup
-│   ├── log-phase.sh                   ← trace.md + phases.jsonl appender
-│   ├── log-tokens.sh                  ← tokens.jsonl appender
-│   └── (other helpers: group-fixes.py, repo-slug.sh, comment-freshness.sh,
-│      origin-crosscheck.sh, prior-fix-diff.sh, external-scrape.sh,
-│      assign-finding-ids.sh, line-range-check.sh, tally-subagent-tokens.sh,
-│      orchestrator-tokens.sh)
-├── hooks/
-│   ├── hooks.json                     ← SessionStart registration
-│   └── dep-check.sh                   ← soft dep-missing warning at session start
-└── scripts/
-    └── dev-run.sh                     ← `claude --plugin-dir` wrapper (plugin-author iteration)
+matthewsreview/
+├── AGENTS.md                  ← operational guide (read first when hacking on the repo)
+├── .claude-plugin/            ← plugin.json + marketplace.json (Claude Code)
+├── .omp-plugin/               ← marketplace.json (Oh My Pi)
+├── commands/                  ← the six commands (single source for all harnesses)
+├── fragments/                 ← shared phase fragments, lens prompts, Dispatch Protocol
+├── skills/matthewsreview/     ← workflow front-door skill (all three harnesses)
+├── bin/                       ← helpers (review-config.sh, agent-dispatch.sh, doctor.sh,
+│                                 calibration-report.py, artifact-*, codex-poll.sh, …)
+├── scripts/build-codex-skills.sh + install.sh   ← Codex skill generation/install
+├── hooks/                     ← SessionStart dependency check + exact transcript/session export
+├── docs/                      ← state-and-gates.md, pipeline.md, helpers.md, case-studies/
+├── test/                      ← smoke.sh + fixtures
+└── .github/workflows/smoke.yml
 ```
-
-No symlinks, no install script. The plugin runtime discovers `commands/`, `fragments/`, `bin/`, and `hooks/` by convention once the plugin is installed via `/plugin install adamsreview@adamsreview`.
 
 ## Troubleshooting
 
-### First invocation is slow
-
-The Python helpers (`artifact-patch.py`, `artifact-render.py`) use a PEP 723 inline-script shebang (`#!/usr/bin/env -S uv run --quiet --script`). On a fresh machine, the first run pauses for a few seconds while `uv` resolves a matching Python interpreter and fetches the `jsonschema` dep into its cache. Subsequent runs hit the cache and are effectively instant. This is a one-time cost per machine, not per review.
-
-### `--ensemble` mode requirements
-
-`/adamsreview:review --ensemble` additionally requires the `codex` Claude Code plugin (the local Codex CLI is invoked through the plugin's `codex-companion.mjs`, not as a standalone CLI on `$PATH`). Without the plugin installed, the readiness gate prompts you to either continue without Codex (in PR mode that means PR-comment scraping only; in local mode it means internal lenses only — Phase 1.5 has no work to do) or stop and run `/codex:setup` first. The default (non-ensemble) mode has no such requirement.
-
-### Windows: Git Bash not found
-
-Claude Code auto-discovers Git Bash on Windows and routes `#!/usr/bin/env bash` helpers through it. If the auto-discovery fails (non-default Git Bash install path, portable install, etc.), set `CLAUDE_CODE_GIT_BASH_PATH` to the absolute path of `bash.exe` before launching Claude Code — for example:
-
-```
-set CLAUDE_CODE_GIT_BASH_PATH=C:\Program Files\Git\bin\bash.exe
-```
-
-or the `$env:CLAUDE_CODE_GIT_BASH_PATH = ...` equivalent in PowerShell.
+- **First helper invocation is slow** — `uv` resolves Python + `jsonschema` on first run per machine; cached thereafter.
+- **`omp` sessions show `--tokens null` rows** — the eval bridge doesn't always expose sub-agent usage; logged as null rather than estimated. Codex dispatches report real counts from `token_count` events.
+- **Codex skills stopped working after moving the clone** — re-run `./install.sh --codex` (absolute paths are baked).
+- **Reviews root moved** — `~/.matthews-reviews` is canonical; `MATTHEWS_REVIEW_REVIEWS_ROOT` overrides; `~/.adams-reviews` still works read-side with a migrate warning.
 
 ## Status
 
-Current release: **v0.4.0** (auto-fix-hint feature: Phase 5.5 + Phase 7.5 + Step 4.5). All six commands are shipped and in daily use. `/adamsreview:codex-review` landed in v0.3.0; recent releases have focused on hardening (anti-serialization callouts at fan-out sites, parallel-dispatch correctness, JSON-pipeline backslash safety) and the auto-fix-hint flow that lets `:fix` and `:walkthrough` batch-accept Sonnet-proposed fixes in one confirm.
-
-Active follow-ups live in GitHub issues. Frozen historical context: `plans/old-backlog.md` and `docs/archive/`.
+Current release: **v1.0.4** — Bash 3.2 Codex-skill generation no longer stalls macOS CI; CodeRabbit/dogfood hardening, lifecycle/finalization/dispatch regressions, exact-session Claude orchestrator telemetry, rebrand + multi-harness (Claude Code / Codex / Oh My Pi), per-stage model selection, and telemetry-informed efficiency tuning. Fork of adamsreview v0.4.3 by Adam Miller.

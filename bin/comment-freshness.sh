@@ -186,7 +186,8 @@ fetch_pr_commits() {
         return
     fi
 
-    local api_err="$(mktemp)"
+    local api_err
+    api_err=$(mktemp)
     if ! PR_COMMITS_JSON=$(gh api --paginate "repos/$owner_repo/pulls/$PR_NUM/commits" 2>"$api_err"); then
         PR_COMMITS_FETCHED="failed"
         local excerpt
@@ -244,7 +245,7 @@ commit_reachable() {
 
     # Attempt one fetch (skipped in fixtures mode — no network).
     if [[ -z "$FIXTURES_DIR" && -n "$PR_NUM" ]]; then
-        git fetch --quiet origin "+refs/pull/$PR_NUM/head:refs/adams-review/pr-$PR_NUM" 2>/dev/null || true
+        git fetch --quiet origin "+refs/pull/$PR_NUM/head:refs/matthews-review/pr-$PR_NUM" 2>/dev/null || true
         if git cat-file -e "${sha}^{commit}" 2>/dev/null; then
             echo "$sha ok" >> "$COMMIT_REACH_TMP"
             echo "ok"

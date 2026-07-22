@@ -8,6 +8,19 @@ Capture `phase_3_start_epoch=$(date +%s)` as the first action of this
 phase — §13.5 observability requires an elapsed time on the phases.jsonl
 record and step 3.5 below references this variable.
 
+Materialize the resolved Phase-3 gate before any scoring or Wave-2 consumer.
+Read failures and non-numeric values are fatal; a missing/null gate uses the
+documented default:
+
+```bash
+phase3_gate=$(artifact-read.sh \
+  --path "$artifact_path" \
+  --filter '(.gates.phase3_gate // 45)') || exit $?
+phase3_gate=$(printf '%s\n' "$phase3_gate" | jq -er '
+  if type == "number" then . else error("phase3_gate must be numeric") end
+') || exit $?
+```
+
 ### 3.1. Pre-existing override (highest priority — §13.1)
 
 Before scoring runs, sweep the findings list for pre-existing candidates
@@ -39,9 +52,15 @@ Get every finding that still needs a `score_phase3` (i.e., not pre-existing-
 overridden):
 
 ```bash
-artifact-read.sh \
+scoring_ids=$(artifact-read.sh \
   --path "$artifact_path" \
-  --filter '[.findings[] | select(.disposition != "pre_existing_report") | .id]'
+  --filter '[.findings[] | select(.disposition != "pre_existing_report") | .id]') \
+  || exit $?
+scoring_count=$(printf '%s\n' "$scoring_ids" | jq -er '
+  if type == "array" then length
+  else error("scoring candidate enumeration must be an array")
+  end
+') || exit $?
 ```
 
 Capture as `scoring_ids`.
@@ -59,15 +78,17 @@ be all-gate skip too).
 
 Split `scoring_ids` into chunks of **at most 25 candidates per chunk**,
 balanced as evenly as feasible (e.g. 22 → one chunk of 22; 50 → 25/25;
-60 → 20/20/20). For each chunk, launch ONE Sonnet sub-agent. Fire all
-chunk-agents from a single orchestrator turn so they run concurrently —
-same parallel fan-out pattern as Phase 1 lenses, but at chunk granularity.
+60 → 20/20/20). For each chunk, DISPATCH one sub-agent with role
+`scoring` (default `claude:sonnet`). Fire all chunk-agents from a single
+orchestrator turn so they run concurrently — same parallel fan-out
+pattern as Phase 1 lenses, but at chunk granularity.
 
 **Why chunked, not per-finding.** Chunk into batches of at most 25
-candidates per Sonnet sub-agent. Unbounded batches collapse score
+candidates per scoring sub-agent. Unbounded batches collapse score
 resolution onto the rubric anchors (every score landing on
 0/25/50/75/100) and stop using parallelism on large reviews — the
-25-cap restores both. The Phase-3 gate is a sharp cutoff at 45, so
+25-cap restores both. The Phase-3 gate is a sharp cutoff at the resolved
+`gates.phase3_gate` (default 45), so
 slight per-candidate score loss is tolerable; loss of triage signal
 feeding Phase 4 is not.
 
@@ -116,7 +137,8 @@ Prompt essence:
 > 50 and 75 should score 60 or 65 — do not snap it to an anchor. If
 > half the chunk would naturally land at 50, that is a triage failure:
 > resolve which ones are 40, 55, 65, etc. before returning. The
-> Phase-3 gate cuts at exactly 45; scores compressed onto anchors lose
+> Phase-3 gate cuts at exactly the resolved `gates.phase3_gate` (default
+> 45); scores compressed onto anchors lose
 > the resolution Phase 4 needs to triage.
 >
 > Return JSON array, one entry per candidate (order does not matter,
@@ -136,7 +158,7 @@ For each chunk-agent's result:
     log-tokens.sh \
       --review-dir "$review_dir" --phase phase_3 \
       --agent-role scoring --agent-id <id-from-result> \
-      --model sonnet --tokens <N or null>
+      --model "$role_scoring" --tokens <N or null>
     ```
 
 2. **Parse** the JSON array (retry once on parse failure).
@@ -152,14 +174,20 @@ For each chunk-agent's result:
    - **Extra ids** (in result but not dispatched): ignore + trace.md
      note (likely a hallucinated candidate id).
 
-4. **Write each score** per finding via `--set` (auto-appends to
-   `score_history`):
+4. **Write all scores in ONE batched call** (auto-appends each to
+    `score_history`). Do NOT loop per-finding `--set` invocations —
+    rapid sequential patch calls raced in production (values vanished
+    mid-loop on a 125-finding run); `--set-scores` does one load, N
+    mutations, one atomic write:
 
     ```bash
-    artifact-patch.py \
-      --path "$artifact_path" --finding-id "$id" \
-      --set "score_phase3=$score" \
-      --set "reason=$score_rationale"
+    # Compose ONE JSON array across all chunks:
+    # [{"id":"F001","score_phase3":72,"reason":"<rationale>"}, ...]
+    printf '%s\n' "$all_chunk_tuples_json" \
+      | artifact-patch.py \
+          --path "$artifact_path" \
+          --set-scores - \
+          --expected "$scoring_count"
     ```
 
     (`reason` at this phase holds the scoring rationale; Phase 4's gate
@@ -171,19 +199,38 @@ For each chunk-agent's result:
 For every finding still at the Phase-1 parking disposition:
 
 ```bash
-artifact-read.sh \
+gate_entries_json=$(artifact-read.sh \
   --path "$artifact_path" \
   --filter '[.findings[]
     | select(.disposition == "pending_validation")
-    | {id, score: .score_phase3, families: .source_families}]'
+    | {id, score: .score_phase3, families: .source_families}]') \
+  || exit $?
 ```
 
-For each returned entry, compute:
+For each returned `entry_json`, compute the routing value with jq rather than
+Bash integer operators, so fractional gates remain exact and a null score is
+explicitly false:
 
-- `advances_to_phase_4 = (score >= 45) OR (count(distinct source_families) >= 2)`
+```bash
+id=$(printf '%s\n' "$entry_json" | jq -er '.id') || exit $?
+score=$(printf '%s\n' "$entry_json" | jq -r '.score') || exit $?
+advances_to_phase_4=$(printf '%s\n' "$entry_json" | jq -r \
+  --argjson gate "$phase3_gate" '
+    (if (.score | type) == "number"
+     then .score >= $gate
+     else false
+     end)
+    or (((.families // []) | unique | length) >= 2)
+  ') || exit $?
+```
+
+Use this exact predicate for Wave 2's Phase-3 gate as well.
+
+- `advances_to_phase_4 = (score >= $phase3_gate) OR (count(distinct source_families) >= 2)`
+  (where `$phase3_gate` is the materialized `gates.phase3_gate`, default 45)
 
 **When `score` is null** (§3.3 set it that way after a chunk parse
-failure or a missing-id response): treat `(score >= 45)` as false. The
+failure or a missing-id response): treat `(score >= $phase3_gate)` as false. The
 auto-graduation clause still runs — a candidate with ≥2 source families
 advances to Phase 4 even with a null score, matching §3.3's stated
 intent. Only candidates that are *both* null-scored and single-family

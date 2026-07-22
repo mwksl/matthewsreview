@@ -140,7 +140,6 @@ goes through atomic tmp+rename. Non-zero exits emit error-as-prompt
 blocks to stderr per DESIGN §8.6.
 """
 
-import argparse
 import copy
 import difflib
 import json
@@ -360,6 +359,9 @@ JSON_SETTABLE_ARTIFACT_FIELDS = frozenset({
     "orchestrator_tokens",
     "metrics",
     "reviewer_sources",
+    "model_plan",
+    "gates",
+    "degraded",
 })
 
 
@@ -451,7 +453,7 @@ def cmd_add_findings(args):
                   Distinct from 64 so a downstream caller can branch on
                   "every finding was bad" vs. "your input shape was
                   wrong." Phase 1's fragment handler treats both the
-                  same; /adamsreview:add migration may want to branch.
+                  same; /matthewsreview:add migration may want to branch.
       - 64      : EXIT_USAGE — malformed input up front. Three pathways
                   share this: (a) `read_json_arg()` already exits 64
                   when stdin / @file / inline isn't parseable JSON;
@@ -908,7 +910,25 @@ _ACTIONABILITY_TO_DISPOSITION = {
 }
 
 
-def _derive_phase4_disposition(tup, idx):
+DEFAULT_PHASE4_BANDS = c.DEFAULT_PHASE4_BANDS
+
+
+def _phase4_bands(artifact):
+    """Resolve Phase-4 cutoffs; only absent/null gates use defaults."""
+    try:
+        return c.resolve_phase4_bands(artifact)
+    except ValueError as exc:
+        c.err_prompt(
+            str(exc),
+            action=(
+                "repair gates.phase4_bands before applying decisions; malformed "
+                "present gates must not silently fall back to defaults."
+            ),
+        )
+        sys.exit(c.EXIT_VALIDATION)
+
+
+def _derive_phase4_disposition(tup, idx, bands=DEFAULT_PHASE4_BANDS):
     """Derive {disposition, confirmed_strength} per DESIGN §13.1 Phase 4.
 
     On invalid input (bad score type, missing actionability for confirmed
@@ -928,16 +948,17 @@ def _derive_phase4_disposition(tup, idx):
         )
         sys.exit(c.EXIT_VALIDATION)
 
-    if score < 45:
+    b1, b2, b3 = bands
+    if score < b1:
         return {"disposition": "disproven", "confirmed_strength": None}
-    if score < 60:
+    if score < b2:
         return {"disposition": "uncertain", "confirmed_strength": None}
 
     # Confirmed band — needs actionability.
     actionability = tup.get("actionability")
     if actionability is None:
         c.err_prompt(
-            f"--apply-decisions tuple #{idx} ({fid}): score_phase4={score} is in the confirmed band (>=60) but no actionability provided",
+            f"--apply-decisions tuple #{idx} ({fid}): score_phase4={score} is in the confirmed band (>={bands[1]}) but no actionability provided",
             valid_values=sorted(_ACTIONABILITY_TO_DISPOSITION.keys()),
             action="add actionability to the tuple (auto_fixable/manual/report_only); the validator owns that classification."
         )
@@ -953,8 +974,85 @@ def _derive_phase4_disposition(tup, idx):
 
     return {
         "disposition": _ACTIONABILITY_TO_DISPOSITION[actionability],
-        "confirmed_strength": "strong" if score >= 75 else "moderate",
+        "confirmed_strength": "strong" if score >= b3 else "moderate",
     }
+
+
+def cmd_set_scores(args):
+    """Batch Phase-3 score writes: one load, N mutations, one atomic write.
+
+    Replaces the per-finding `--set score_phase3=...` loop that raced on
+    rapid sequential invocations (observed: values vanished mid-loop on a
+    125-finding run). Tuples: {id, score_phase3 (number|null), reason?}.
+    First-fail-halt: any invalid tuple aborts before ANY write.
+    """
+    tuples = read_json_arg(args.set_scores, "--set-scores")
+
+    if not isinstance(tuples, list):
+        c.err_prompt(
+            f"--set-scores expects a JSON array, got {type(tuples).__name__}",
+            action="pass an array of {id, score_phase3, reason?} tuples."
+        )
+        return c.EXIT_USAGE
+
+    if len(tuples) != args.expected:
+        received_ids = [
+            (t.get("id") if isinstance(t, dict) and t.get("id") else f"<#{i}>")
+            for i, t in enumerate(tuples)
+        ]
+        c.err_prompt(
+            f"--set-scores expected {args.expected} tuple(s) but received {len(tuples)}",
+            context=(
+                f"received tuple ids: {received_ids}"
+                if received_ids else "received empty tuple array"
+            ),
+            action="re-dispatch scoring for the missing ids before writing any scores."
+        )
+        return c.EXIT_EXPECTED_MISMATCH
+
+    artifact = _load_or_fail(args.path)
+    seen = set()
+    for idx, tup in enumerate(tuples):
+        if not isinstance(tup, dict):
+            c.err_prompt(
+                f"--set-scores tuple #{idx} is not an object",
+                action="each tuple needs {id, score_phase3, reason?}."
+            )
+            return c.EXIT_VALIDATION
+        fid = tup.get("id")
+        if not fid or not isinstance(fid, str):
+            c.err_prompt(
+                f"--set-scores tuple #{idx}: missing or non-string 'id'",
+                action="every tuple names exactly one finding id."
+            )
+            return c.EXIT_VALIDATION
+        if fid in seen:
+            c.err_prompt(
+                f"--set-scores: duplicate id '{fid}' in batch",
+                action="one tuple per finding; duplicate writes would double-append score_history."
+            )
+            return c.EXIT_VALIDATION
+        seen.add(fid)
+        if "score_phase3" not in tup:
+            c.err_prompt(
+                f"--set-scores tuple #{idx} ({fid}): 'score_phase3' is required",
+                action="include score_phase3 explicitly as an integer 0-100 or null."
+            )
+            return c.EXIT_VALIDATION
+        score = tup["score_phase3"]
+        if score is not None and (not isinstance(score, (int, float)) or isinstance(score, bool)):
+            c.err_prompt(
+                f"--set-scores tuple #{idx} ({fid}): score_phase3 must be number or null, got {type(score).__name__}",
+                action="pass an integer 0-100, or null for the parse-failure below-gate path."
+            )
+            return c.EXIT_VALIDATION
+        finding = _find_finding(artifact, fid)
+        pairs = [("score_phase3", score)]
+        if "reason" in tup:
+            pairs.append(("reason", tup["reason"]))
+        _apply_finding_set(finding, pairs)
+
+    return _write_and_emit(args.path, artifact)
 
 
 def cmd_apply_decisions(args):
@@ -1038,6 +1136,9 @@ def cmd_apply_decisions(args):
 
     counts = {"confirmed_mechanical": 0, "confirmed_manual": 0, "confirmed_report": 0,
               "uncertain": 0, "disproven": 0}
+    initial_artifact = _load_or_fail(args.path)
+    bands = _phase4_bands(initial_artifact)
+
 
     for idx, tup in enumerate(decisions):
         if not isinstance(tup, dict):
@@ -1064,7 +1165,13 @@ def cmd_apply_decisions(args):
             )
             return c.EXIT_VALIDATION
 
-        derived = _derive_phase4_disposition(tup, idx)
+        if "score_phase4" not in tup:
+            c.err_prompt(
+                f"--apply-decisions tuple #{idx} ({fid}): 'score_phase4' is required",
+                action="include score_phase4 explicitly as an integer 0-100 or null."
+            )
+            return c.EXIT_VALIDATION
+        derived = _derive_phase4_disposition(tup, idx, bands)
 
         # Load fresh per-tuple so preceding tuples' writes are visible on the
         # next iteration's base state. Matches the "per-tuple atomic writes"
@@ -1084,13 +1191,10 @@ def cmd_apply_decisions(args):
         if tup.get("actionability") is not None:
             set_pairs.append(("actionability", tup["actionability"]))
 
-        # confirmed_strength: tuple override beats derived. `null` from the
-        # tuple counts as an explicit override (e.g., downgrading from a
-        # prior-phase classification); use a sentinel check.
-        if "confirmed_strength" in tup:
-            set_pairs.append(("confirmed_strength", tup["confirmed_strength"]))
-        else:
-            set_pairs.append(("confirmed_strength", derived["confirmed_strength"]))
+        # confirmed_strength is always derived from this artifact's resolved
+        # phase4_bands. Validator-normalizer hints may reflect default bands
+        # and must never override the gate-authoritative value.
+        set_pairs.append(("confirmed_strength", derived["confirmed_strength"]))
 
         # reason: if the tuple provides one use it, else fill a disposition-
         # appropriate default. Matches the prose in 05-validation step 4.4.
@@ -1265,7 +1369,7 @@ def cmd_apply_fix_start(args):
                     "a 'resolved' finding should have been filtered out of eligibility."
                 ),
                 valid_values=(sorted(allowed) or ["(none — terminal state)"]),
-                action="run /adamsreview:fix fresh; if this persists, check the Phase 8 step 8.1 eligibility filter."
+                action="run /matthewsreview:fix fresh; if this persists, check the Phase 8 step 8.1 eligibility filter."
             )
             sys.exit(c.EXIT_INVALID_TRANSITION)
 
@@ -1458,8 +1562,8 @@ def cmd_apply_fix_outcomes(args):
 # These two modes cover the auto-fix-hint feature (umbrella plan
 # `more-auto.md`). The first writes Phase 5.5's generation+verification
 # output into finding.auto_fix_hint; the second batch-promotes findings
-# whose auto_fix_hint the user accepted at /adamsreview:fix preflight or
-# /adamsreview:walkthrough Step 4.5.
+# whose auto_fix_hint the user accepted at /matthewsreview:fix preflight or
+# /matthewsreview:walkthrough Step 4.5.
 #
 # Distinct error models on purpose:
 #
@@ -1467,7 +1571,7 @@ def cmd_apply_fix_outcomes(args):
 #                               Per-finding rejections are reportable but
 #                               not fatal — Phase 5.5 input may include
 #                               stale ids (artifact mutated mid-run by a
-#                               concurrent /adamsreview:add) or findings
+#                               concurrent /matthewsreview:add) or findings
 #                               whose state shifted out of eligibility
 #                               between dispatch and patch-time. The wave
 #                               still lands the salvageable subset.
@@ -1753,7 +1857,7 @@ def cmd_apply_auto_fix_hints(args):
             ],
             action=(
                 "investigate the rejection reasons. Common causes: stale ids from a "
-                "concurrent /adamsreview:add; findings already promoted between Phase "
+                "concurrent /matthewsreview:add; findings already promoted between Phase "
                 "5.5 generation and patch-time; Phase 5.5 schema-fixer drift on hint/"
                 "confidence/second_opinion. Pass --overwrite to replace existing "
                 "auto_fix_hint values."
@@ -1908,7 +2012,7 @@ def cmd_apply_auto_rec_promotions(args):
             c.err_prompt(
                 f"--apply-auto-rec-promotions entry #{idx} ({fid}): finding has no auto_fix_hint to source fix_hint from",
                 context="auto-rec promotions require Phase 5.5 to have populated finding.auto_fix_hint.hint first.",
-                action="re-run /adamsreview:review (Phase 5.5 generates auto_fix_hint), or use /adamsreview:promote for a manual promote."
+                action="re-run /matthewsreview:review (Phase 5.5 generates auto_fix_hint), or use /matthewsreview:promote for a manual promote."
             )
             return c.EXIT_VALIDATION
 
@@ -1937,7 +2041,7 @@ def cmd_apply_auto_rec_promotions(args):
             c.err_prompt(
                 f"--apply-auto-rec-promotions entry #{idx} ({fid}): disposition='{disp}' is not auto-rec promotable",
                 valid_values=sorted(_AUTO_REC_PROMOTABLE_DISPOSITIONS),
-                action="auto-rec eligibility (§5.5) requires confirmed_mechanical / confirmed_manual / confirmed_report. Use /adamsreview:promote for other dispositions."
+                action="auto-rec eligibility (§5.5) requires confirmed_mechanical / confirmed_manual / confirmed_report. Use /matthewsreview:promote for other dispositions."
             )
             return c.EXIT_VALIDATION
 
@@ -2048,7 +2152,7 @@ def cmd_set_and_or_append(args):
 # ----- CLI ---------------------------------------------------------------
 
 def build_parser():
-    p = argparse.ArgumentParser(
+    p = c.PromptArgumentParser(
         prog="artifact-patch.py",
         description="Canonical writer for artifact.json (DESIGN §8.2, §21.2)."
     )
@@ -2157,6 +2261,12 @@ def build_parser():
         metavar="AUTO_REC_PROMOTIONS_JSON",
         help="Phase 7.5 / walkthrough Step 4.5: batch-promote findings whose auto_fix_hint the user accepted. Array of {id, reviewer, reason?}. Inline/@file/-. First-fail-halt."
     )
+    mode.add_argument(
+        "--set-scores",
+        dest="set_scores",
+        metavar="SCORES_JSON",
+        help="Phase 3: batch score writes in ONE atomic write (replaces per-finding --set loops). Array of {id, score_phase3, reason?}. Inline/@file/-."
+    )
     return p
 
 
@@ -2164,11 +2274,18 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    # --expected is meaningful only in --apply-decisions and
-    # --apply-auto-rec-promotions modes. Reject early if it's set without
-    # one of those so a typo doesn't silently become a no-op.
-    if args.expected and args.apply_decisions is None and args.apply_auto_rec_promotions is None:
-        parser.error("--expected is only valid with --apply-decisions or --apply-auto-rec-promotions")
+    # --expected is meaningful only for guarded batch modes. Reject early
+    # elsewhere so a typo cannot silently become a no-op.
+    expected_mode = (
+        args.apply_decisions is not None
+        or args.apply_auto_rec_promotions is not None
+        or args.set_scores is not None
+    )
+    if args.expected and not expected_mode:
+        parser.error(
+            "--expected is only valid with --apply-decisions, "
+            "--apply-auto-rec-promotions, or --set-scores"
+        )
     if args.expected < 0:
         parser.error("--expected must be >= 0")
 
@@ -2187,12 +2304,9 @@ def main():
                 parser.error("--add-finding cannot combine with --set / --set-json / --append-fix-attempt")
             return cmd_add_finding(args)
         if args.add_findings is not None:
-            # Mode-conflict + --dry-run paths exit with EXIT_USAGE (64)
-            # directly via sys.exit instead of parser.error(), which would
-            # emit argparse's default exit code (2). The new --add-findings
-            # mode's docstring contract pins these paths to 64; the older
-            # modes' parser.error() calls stay as-is (they already exit 2
-            # today and aren't in scope for this stage).
+            # Keep batched-mode conflict diagnostics explicit here so main()
+            # can return normally. Direct and parser-routed usage failures
+            # both follow the structured error-as-prompt contract with rc64.
             if args.set or args.set_json or args.append_fix_attempt or args.finding_id:
                 c.err_prompt(
                     "--add-findings cannot combine with --set / --set-json / --append-fix-attempt / --finding-id (each finding carries its own id)",
@@ -2248,6 +2362,14 @@ def main():
                 )
                 return c.EXIT_USAGE
             return cmd_apply_auto_fix_hints(args)
+        if args.set_scores is not None:
+            if args.expected <= 0:
+                parser.error("--set-scores requires --expected N with N > 0")
+            if args.set or args.set_json or args.append_fix_attempt or args.finding_id:
+                parser.error("--set-scores cannot combine with --set / --set-json / --append-fix-attempt / --finding-id (tuples carry their own finding ids)")
+            if args.dry_run:
+                parser.error("--set-scores does not support --dry-run (single atomic write; preflight on a throwaway path)")
+            return cmd_set_scores(args)
         if args.apply_auto_rec_promotions is not None:
             if args.set or args.set_json or args.append_fix_attempt or args.finding_id:
                 parser.error("--apply-auto-rec-promotions cannot combine with --set / --set-json / --append-fix-attempt / --finding-id (entries carry their own finding ids)")
@@ -2266,7 +2388,7 @@ def main():
         traceback.print_exc(file=sys.stderr)
         return c.EXIT_UNEXPECTED
 
-    parser.error("no mode selected (use --init, --add-finding, --add-findings, --delete-finding, --apply-decisions, --apply-fix-start, --apply-fix-outcomes, --apply-auto-fix-hints, --apply-auto-rec-promotions, --set, --set-json, or --append-fix-attempt)")
+    parser.error("no mode selected (use --init, --add-finding, --add-findings, --delete-finding, --apply-decisions, --apply-fix-start, --apply-fix-outcomes, --apply-auto-fix-hints, --apply-auto-rec-promotions, --set-scores, --set, --set-json, or --append-fix-attempt)")
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ usage() {
     cat >&2 <<USAGE
 Usage: $(basename "$0") --path <artifact.json>
 
-Validate an adamsreview artifact against schema-v1.json.
+Validate a matthewsreview artifact against schema-v1.json.
 Exits 0 if valid; 1 with violations to stderr if invalid.
 USAGE
 }

@@ -13,11 +13,14 @@ comments regardless of review_id (§13.4).
 
 Usage:
   artifact-render.py --input <artifact.json> [--output <artifact.md>]
+                     [--format markdown|dispositions|pr-comment]
+                     [--max-bytes <n>]
 
-If --output is omitted, Markdown goes to stdout.
+If --output is omitted, Markdown goes to stdout. `--max-bytes` applies
+only to the bounded `pr-comment` overflow format.
 """
 
-import argparse
+import html
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -26,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import _common as c  # noqa: E402
 
 
-MARKER = "<!-- adams-review-v1 -->"
+MARKER = "<!-- matthews-review-v1 -->"
 
 # Disposition → (section ordering key, section label, glyph, short label).
 # `section label` titles sections; `short label` appears in summary bullets and
@@ -194,6 +197,14 @@ def render_freshness_line(artifact):
     return f"**Base freshness:** `{freshness}` (see trace.md)"
 
 
+def command_name(artifact, command):
+    """Return the command spelling exposed by the artifact's orchestrator."""
+    orchestrator = (artifact.get("model_plan") or {}).get("orchestrator")
+    if orchestrator == "codex":
+        return f"$matthewsreview-{command}"
+    return f"/matthewsreview:{command}"
+
+
 def render_header(artifact):
     lines = []
     head = artifact.get("head_branch", "?")
@@ -212,7 +223,9 @@ def render_header(artifact):
     if freshness_line:
         lines.append(freshness_line)
     if not any_fix_attempts(artifact):
-        lines.append("**Fix threshold:** not yet set (run `/adamsreview:fix [threshold]` to apply fixes)")
+        lines.append(
+            f"**Fix threshold:** not yet set (run `{command_name(artifact, 'fix')} [threshold]` to apply fixes)"
+        )
     tokens = artifact.get("subagent_tokens") or {}
     total = tokens.get("total")
     invs = tokens.get("invocations")
@@ -222,7 +235,7 @@ def render_header(artifact):
     turn_count = orch.get("turn_count")
     # Suppress on missing AND on zero-turn. Missing means the helper
     # hasn't run (pre-feature artifacts, or opted-out runs since the
-    # ADAMS_REVIEW_TALLY_ORCHESTRATOR opt-in landed). Zero-turn means
+    # MATTHEWS_REVIEW_TALLY_ORCHESTRATOR opt-in landed). Zero-turn means
     # either a legacy artifact carrying the dropped Phase-0 zero seed,
     # or an opted-in run whose time window matched no turns — both
     # render as content-free noise. The four counters stay in the
@@ -242,7 +255,7 @@ def render_header(artifact):
     return "\n".join(lines)
 
 
-def render_summary(buckets):
+def render_summary(buckets, phase3_gate=45):
     findings_count = sum(len(v) for v in buckets.values())
     if findings_count == 0:
         return "No findings."
@@ -286,7 +299,6 @@ def render_summary(buckets):
     # below_gate is split: findings surfaced by render_polish_clusters
     # appear visibly downstream, so labeling them "filtered out" without
     # qualification contradicts the polish table. The split bullet keeps
-    # the headline label honest while preserving the "<45" affordance.
     filtered_bits = []
     disproven_n = len(buckets.get("disproven", []))
     below_gate_findings = buckets.get("below_gate", [])
@@ -306,16 +318,16 @@ def render_summary(buckets):
     if below_gate_n:
         if below_gate_clustered and below_gate_filtered:
             filtered_bits.append(
-                f"{below_gate_filtered} below score gate (<45); "
+                f"{below_gate_filtered} below score gate (<{phase3_gate}); "
                 f"{below_gate_clustered} surfaced in Polish clusters below"
             )
         elif below_gate_clustered:
             filtered_bits.append(
-                f"{below_gate_clustered} below score gate (<45), "
+                f"{below_gate_clustered} below score gate (<{phase3_gate}), "
                 "surfaced in Polish clusters below"
             )
         else:
-            filtered_bits.append(f"{below_gate_n} below score gate (<45)")
+            filtered_bits.append(f"{below_gate_n} below score gate (<{phase3_gate})")
 
     lines = [f"Found {findings_count} finding{'s' if findings_count != 1 else ''} across all lanes:"]
     if deep_bits:
@@ -529,7 +541,7 @@ def _finding_detail(f):
     return "\n".join(lines)
 
 
-def render_auto_recommendations(buckets):
+def render_auto_recommendations(buckets, artifact):
     """Findings with auto_fix_hint, regardless of disposition or lane.
 
     Surfaces AI-authored fix recommendations in the rendered MD so reviewers
@@ -547,11 +559,13 @@ def render_auto_recommendations(buckets):
     if not rows:
         return ""
 
+    fix_command = command_name(artifact, "fix")
+    walkthrough_command = command_name(artifact, "walkthrough")
     lines = [f"### Auto-recommendations ({len(rows)})", ""]
     lines.append(
         "_AI-authored fix directions for findings that aren't auto-fixable today. "
-        "Run `/adamsreview:fix` to batch-apply with one confirmation, or "
-        "`/adamsreview:walkthrough` to review one-by-one._"
+        f"Run `{fix_command}` to batch-apply with one confirmation, or "
+        f"`{walkthrough_command}` to review one-by-one._"
     )
     lines.append("")
     lines.append("| # | Score | Disp | File | Recommendation |")
@@ -579,18 +593,21 @@ def render_auto_recommendations(buckets):
     return "\n".join(lines)
 
 
-def render_deep_other(buckets, disposition):
+def render_deep_other(buckets, disposition, artifact):
     rows = [f for f in buckets.get(disposition, []) if f.get("validation_lane") == "deep"]
     if not rows:
         return ""
     _, label, glyph, _short = SECTION_LABEL[disposition]
     lines = [f"### {glyph} {label} ({len(rows)})", ""]
     if disposition == "confirmed_manual":
+        fix_command = command_name(artifact, "fix")
+        walkthrough_command = command_name(artifact, "walkthrough")
+        promote_command = command_name(artifact, "promote")
         lines.append(
-            "_Not auto-applied by `/adamsreview:fix` directly — these need a confirmation step. "
-            "Findings with an auto-recommendation get batch-confirmed at `:fix`'s Phase 7.5 "
-            "preflight (or `:walkthrough` Step 4.5); use `/adamsreview:promote <finding_id>` "
-            "for a single-finding manual override._"
+            f"_Not auto-applied by `{fix_command}` directly — these need a confirmation step. "
+            "Findings with an auto-recommendation get batch-confirmed at the fix command's "
+            f"Phase 7.5 preflight (or `{walkthrough_command}` Step 4.5); use "
+            f"`{promote_command} <finding_id>` for a single-finding manual override._"
         )
         lines.append("")
         lines.append("| # | Score | Impact | File | Issue | Why manual |")
@@ -610,13 +627,16 @@ def render_deep_other(buckets, disposition):
                 f"{file_link(f)} | {f.get('claim', '')} |"
             )
     if disposition == "uncertain":
+        review_command = command_name(artifact, "review")
         lines.append("")
-        lines.append("Phase 4 couldn't confirm decisively. Re-run `/adamsreview:review` if you suspect this deserves")
+        lines.append(
+            f"Phase 4 couldn't confirm decisively. Re-run `{review_command}` if you suspect this deserves"
+        )
         lines.append("further investigation with fresh context.")
     return "\n".join(lines)
 
 
-def render_light_lane(buckets):
+def render_light_lane(buckets, artifact):
     rows = []
     # `uncertain` included — see render_summary comment. The light-lane table
     # already carries a Disposition column, so mixed dispositions fit the
@@ -637,11 +657,14 @@ def render_light_lane(buckets):
         return ""
     lines = ["## Light lane — ux, policy, architecture", ""]
     if any(f.get("disposition") in ("confirmed_mechanical", "confirmed_manual") for f in rows):
+        fix_command = command_name(artifact, "fix")
+        walkthrough_command = command_name(artifact, "walkthrough")
+        promote_command = command_name(artifact, "promote")
         lines.append(
             "_Light-lane findings — including rows labeled auto-fixable — aren't applied by "
-            "`/adamsreview:fix` directly. Findings with an auto-recommendation get "
-            "batch-confirmed at `:fix`'s Phase 7.5 preflight (or `:walkthrough` Step 4.5); "
-            "use `/adamsreview:promote <finding_id>` for a single-finding manual override._"
+            f"`{fix_command}` directly. Findings with an auto-recommendation get "
+            f"batch-confirmed at the fix command's Phase 7.5 preflight (or `{walkthrough_command}` "
+            f"Step 4.5); use `{promote_command} <finding_id>` for a single-finding manual override._"
         )
         lines.append("")
     lines.append("| # | Score | Impact | File | Finding | Disposition |")
@@ -665,7 +688,7 @@ def render_light_lane(buckets):
     return "\n".join(lines)
 
 
-def render_polish_clusters(buckets):
+def render_polish_clusters(buckets, phase3_gate=45):
     """Surface clustered below_gate findings in a dedicated section.
 
     Phase 3 parks nits under `below_gate` so they don't flood the report,
@@ -691,7 +714,7 @@ def render_polish_clusters(buckets):
     total = sum(len(v) for v in clustered_by_file.values())
     lines = [f"## Polish — below threshold, clustered ({total})", ""]
     lines.append(
-        "Below-gate findings (score < 45) that cluster in the same area — "
+        f"Below-gate findings (score < {phase3_gate}) that cluster in the same area — "
         "not worth surfacing individually, but dense enough that a human pass "
         "may catch something the pipeline filtered out."
     )
@@ -817,30 +840,304 @@ def render_fix_runs(artifact):
 
 
 def render_footer(artifact):
-    return "🤖 Generated with the [adamsreview](https://github.com/adamjgmiller/adamsreview) Claude Code Review Plugin"
+    return "Generated by [matthewsreview](https://github.com/mwksl/matthewsreview), a multi-harness code review pipeline"
+
+# ----- Dispositions export ----------------------------------------------
+
+def _effective_score(f):
+    return f.get("score_phase4") if f.get("score_phase4") is not None else f.get("score_phase3")
+
+
+def _suggested_action(f, fix_threshold=60):
+    disp = f.get("disposition") or ""
+    state = f.get("current_state")
+    if state == "resolved":
+        return "done"
+    if state == "attempted":
+        return "recover"
+    if disp == "resolved":
+        return "done"
+    if disp == "pre_existing_report":
+        return "issue"
+    if disp == "uncertain":
+        return "judge"
+    if disp in ("disproven", "below_gate"):
+        return "skip"
+    if disp in ("confirmed_mechanical", "partial", "regression"):
+        score = f.get("score_phase4")
+        auto_eligible = (
+            f.get("human_confirmation") is not None
+            or (
+                f.get("impact_type") in ("correctness", "security")
+                and isinstance(score, (int, float))
+                and not isinstance(score, bool)
+                and score >= fix_threshold
+            )
+        )
+        return "fix" if auto_eligible else "walkthrough"
+    if disp in ("confirmed_manual", "confirmed_report"):
+        return "walkthrough"
+    return "judge"
+
+
+def render_dispositions(artifact):
+    """Flat ENGAGE/SKIP work-queue table — the machine-readable replacement
+    for hand-built disposition sweeps (GSD quick-task style)."""
+    findings = artifact.get("findings", [])
+    fix_threshold = (artifact.get("gates") or {}).get("fix_threshold", 60)
+    lines = [
+        f"# Dispositions — {artifact.get('review_id', '?')} ({artifact.get('head_branch', '?')})",
+        "",
+        "| # | File | Finding | Disposition | Score | State | Suggested action |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    engage = skip = 0
+    for f in findings:
+        action = _suggested_action(f, fix_threshold)
+        disp = f.get("disposition") or ""
+        if action not in ("done", "recover") and (
+            disp.startswith("confirmed_") or disp in ("uncertain", "partial", "regression")
+        ):
+            engage += 1
+        else:
+            skip += 1
+        claim = (f.get("claim") or "").replace("|", "\\|").replace("\n", " ")
+        if len(claim) > 100:
+            claim = claim[:97] + "..."
+        claim = html.escape(claim, quote=False)
+        score = _effective_score(f)
+        lines.append(
+            "| {id} | {file} | {claim} | {disp} | {score} | {state} | {action} |".format(
+                id=f.get("id", "?"),
+                file=file_link(f),
+                claim=claim,
+                disp=disp,
+                score=score if score is not None else "—",
+                state=f.get("current_state", "?"),
+                action=action,
+            )
+        )
+    fix_command = command_name(artifact, "fix")
+    walkthrough_command = command_name(artifact, "walkthrough")
+    lines += [
+        "",
+        f"**{engage} engage / {skip} skip** "
+        "(engage = confirmed_* + uncertain + retry-eligible partial/regression; "
+        f"actions: fix → `{fix_command}`, walkthrough → `{walkthrough_command}`, "
+        "recover → finish or reset the interrupted fix before fix/walkthrough, "
+        "issue → pre-existing, judge/skip → no action)",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _compact_text(value, max_chars):
+    """One-line, HTML-safe text bounded for the compact PR comment."""
+    text = str(value if value not in (None, "") else "?").replace("\n", " ")
+    if len(text) > max_chars:
+        text = text[: max_chars - 3] + "..."
+    return html.escape(text, quote=False)
+
+
+def _compact_cell(value, max_chars):
+    return _compact_text(value, max_chars).replace("|", "\\|")
+
+
+def _markdown_bytes(text):
+    return len(text.encode("utf-8"))
+
+
+def render_pr_comment(artifact, max_bytes=65000):
+    """Render a bounded fallback for GitHub's issue-comment size limit."""
+    if max_bytes < 512:
+        raise ValueError("pr-comment max_bytes must be at least 512")
+
+    findings = artifact.get("findings", [])
+    buckets = findings_by_disposition(artifact)
+    phase3_gate = (artifact.get("gates") or {}).get("phase3_gate", 45)
+    fix_threshold = (artifact.get("gates") or {}).get("fix_threshold", 60)
+    review_id = _compact_text(artifact.get("review_id"), 100)
+    head_branch = _compact_text(artifact.get("head_branch"), 120)
+    base_branch = _compact_text(artifact.get("base_branch"), 120)
+    degraded = render_degraded_banner(artifact)
+
+    prefix = [
+        MARKER,
+        "",
+        f"# Code review — {review_id}",
+        "",
+        (
+            "> **Publication note:** Full sectioned report exceeded GitHub's "
+            "issue-comment limit. This bounded disposition queue was published "
+            "instead; complete evidence and fix proposals remain in the local "
+            "`artifact.md` and `artifact.json`."
+        ),
+        "",
+        f"**Branch:** `{head_branch}` → `{base_branch}`",
+        "",
+    ]
+    if degraded:
+        prefix.extend([degraded.rstrip(), ""])
+    prefix.extend([
+        render_summary(buckets, phase3_gate),
+        "",
+        "## Disposition queue",
+        "",
+        "| # | File | Finding | Disposition | Score | State | Suggested action |",
+        "|---|---|---|---|---|---|---|",
+    ])
+
+    engage = 0
+    skip = 0
+    ranked_rows = []
+    action_rank = {
+        "recover": 0,
+        "fix": 1,
+        "walkthrough": 2,
+        "issue": 3,
+        "judge": 4,
+        "done": 5,
+        "skip": 6,
+    }
+    for index, finding in enumerate(findings):
+        action = _suggested_action(finding, fix_threshold)
+        disposition = finding.get("disposition") or ""
+        if action not in ("done", "recover") and (
+            disposition.startswith("confirmed_")
+            or disposition in ("uncertain", "partial", "regression")
+        ):
+            engage += 1
+        else:
+            skip += 1
+        location = (
+            f"{finding.get('file') or '?'}"
+            f"{format_line_range(finding.get('line_range'))}"
+        )
+        score = _effective_score(finding)
+        row = (
+            f"| {_compact_cell(finding.get('id'), 20)} "
+            f"| `{_compact_cell(location, 120)}` "
+            f"| {_compact_cell(finding.get('claim'), 140)} "
+            f"| {_compact_cell(disposition, 40)} "
+            f"| {_compact_cell(score if score is not None else '—', 12)} "
+            f"| {_compact_cell(finding.get('current_state'), 20)} "
+            f"| {_compact_cell(action, 20)} |"
+        )
+        ranked_rows.append((action_rank.get(action, 3), index, row))
+    ranked_rows.sort(key=lambda item: (item[0], item[1]))
+    rows = [item[2] for item in ranked_rows]
+
+    fix_command = command_name(artifact, "fix")
+    walkthrough_command = command_name(artifact, "walkthrough")
+
+    def assemble(included_rows, omitted):
+        lines = prefix + included_rows + [""]
+        if omitted:
+            lines.extend([
+                (
+                    f"**{omitted} finding{'s' if omitted != 1 else ''} omitted "
+                    "from this compact comment to stay within GitHub's limit.** "
+                    "Use the local `artifact.md` or `artifact.json` for every "
+                    "finding and its full evidence."
+                ),
+                "",
+            ])
+        lines.extend([
+            (
+                f"**{engage} engage / {skip} skip** "
+                "(actions: "
+                f"fix → `{fix_command}`, "
+                f"walkthrough → `{walkthrough_command}`, "
+                "recover → finish or reset the interrupted fix before fix/walkthrough, "
+                "issue → pre-existing, judge/skip → no action)"
+            ),
+            "",
+            render_footer(artifact),
+            "",
+        ])
+        return "\n".join(lines)
+
+    included = []
+    for row in rows:
+        candidate = assemble(included + [row], len(rows) - len(included) - 1)
+        if _markdown_bytes(candidate) <= max_bytes:
+            included.append(row)
+
+    rendered = assemble(included, len(rows) - len(included))
+    if _markdown_bytes(rendered) <= max_bytes:
+        return rendered
+
+    # Defensive floor: a maliciously long metadata value must not defeat the
+    # publisher's hard size contract even when no table row fits.
+    minimal = "\n".join([
+        MARKER,
+        "",
+        f"# Code review — {_compact_text(artifact.get('review_id'), 60)}",
+        "",
+        (
+            "> **Publication note:** Full sectioned report exceeded GitHub's "
+            "issue-comment limit."
+        ),
+        "",
+        (
+            f"**{len(findings)} findings omitted from this compact comment** "
+            "because even the bounded queue exceeded the configured byte "
+            "budget. Read the local `artifact.md` or `artifact.json`."
+        ),
+        "",
+        render_footer(artifact),
+        "",
+    ])
+    if _markdown_bytes(minimal) > max_bytes:
+        raise ValueError("pr-comment byte budget is too small for the minimal report")
+    return minimal
 
 
 # ----- Assembly ---------------------------------------------------------
 
+def render_degraded_banner(artifact):
+    """Prominent top-of-report warning for any recorded coverage failure."""
+    degraded = artifact.get("degraded") or {}
+    lens_failures = degraded.get("lens_dispatch_failures") or 0
+    candidate_failures = degraded.get("candidate_drop_failures") or 0
+    finalization_failures = degraded.get("finalization_failures") or 0
+    failures = []
+    if lens_failures:
+        failures.append(f"{lens_failures} lens dispatch(es) failed")
+    if candidate_failures:
+        failures.append(f"{candidate_failures} candidate output(s) dropped")
+    if finalization_failures:
+        failures.append(f"{finalization_failures} finalization operation(s) failed")
+    if not failures:
+        return ""
+    return (
+        f"> **REVIEW DEGRADED — {', '.join(failures)}** (see `trace.md`). "
+        "Findings below reflect partial coverage or incomplete finalization, "
+        "NOT a clean review. Resolve the recorded failures and re-run.\n"
+    )
+
+
 def render(artifact):
     buckets = findings_by_disposition(artifact)
     cross_cutting = artifact.get("cross_cutting_groups") or []
+    phase3_gate = (artifact.get("gates") or {}).get("phase3_gate", 45)
 
     sections = [
         MARKER,
+        render_degraded_banner(artifact),
         render_header(artifact),
-        render_summary(buckets),
+        render_summary(buckets, phase3_gate),
         "---",
         "## Deep lane — correctness & security" if any(
             f.get("validation_lane") == "deep" for f in artifact.get("findings", [])
         ) else "",
         render_deep_auto(buckets, cross_cutting),
-        render_auto_recommendations(buckets),
-        render_deep_other(buckets, "confirmed_manual"),
-        render_deep_other(buckets, "uncertain"),
-        render_deep_other(buckets, "confirmed_report"),
-        render_light_lane(buckets),
-        render_polish_clusters(buckets),
+        render_auto_recommendations(buckets, artifact),
+        render_deep_other(buckets, "confirmed_manual", artifact),
+        render_deep_other(buckets, "uncertain", artifact),
+        render_deep_other(buckets, "confirmed_report", artifact),
+        render_light_lane(buckets, artifact),
+        render_polish_clusters(buckets, phase3_gate),
         render_pre_existing(buckets),
         render_fix_runs(artifact),
         "---",
@@ -853,13 +1150,36 @@ def render(artifact):
 # ----- CLI --------------------------------------------------------------
 
 def main():
-    p = argparse.ArgumentParser(
+    p = c.PromptArgumentParser(
         prog="artifact-render.py",
         description="Render artifact.json -> artifact.md per DESIGN §7."
     )
     p.add_argument("--input", required=True, help="path to artifact.json")
     p.add_argument("--output", help="path to artifact.md (stdout if omitted)")
+    p.add_argument(
+        "--format",
+        default="markdown",
+        help=(
+            "markdown = full report (default); dispositions = flat ENGAGE/SKIP "
+            "work queue; pr-comment = bounded overflow fallback"
+        ),
+    )
+    p.add_argument(
+        "--max-bytes",
+        type=int,
+        default=65000,
+        help="maximum UTF-8 bytes for --format pr-comment (default: 65000)",
+    )
     args = p.parse_args()
+    valid_formats = ("markdown", "dispositions", "pr-comment")
+    if args.format not in valid_formats:
+        c.err_prompt(
+            f"invalid --format value '{args.format}'",
+            valid_values=valid_formats,
+            did_you_mean=c.suggest(args.format, valid_formats),
+            action="pass --format markdown, dispositions, or pr-comment.",
+        )
+        return c.EXIT_USAGE
 
     try:
         artifact = c.read_json(args.input)
@@ -881,7 +1201,19 @@ def main():
         )
         return c.EXIT_VALIDATION
 
-    md = render(artifact)
+    if args.format == "dispositions":
+        md = render_dispositions(artifact)
+    elif args.format == "pr-comment":
+        try:
+            md = render_pr_comment(artifact, args.max_bytes)
+        except ValueError as exc:
+            c.err_prompt(
+                str(exc),
+                action="pass --max-bytes 512 or greater.",
+            )
+            return c.EXIT_VALIDATION
+    else:
+        md = render(artifact)
     if args.output:
         Path(args.output).write_text(md)
         print(f"wrote {args.output}")

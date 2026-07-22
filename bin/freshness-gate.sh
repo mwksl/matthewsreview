@@ -3,7 +3,7 @@
 # (DESIGN §13.10). Extracts the ~80-line inline bash block from
 # fragments/00-preflight.md step 0.2a.
 #
-# The `AskUserQuestion` dispatch stays orchestrator-side: this helper
+# The ASK dispatch stays orchestrator-side: this helper
 # does everything *up to* the point where a behind-count case would
 # need user input, emits `base_freshness: "pending_user_gate"` in that
 # case, and exits 0 so the orchestrator can branch and re-invoke with
@@ -69,13 +69,13 @@ a JSON object with \`comparison_ref\`, \`base_freshness\`, \`remote_sha\`,
   --head-branch    Required. The head branch name. Reserved for future
                    per-branch logic; currently unused but accepted so
                    the call site documents its intent.
-  --after-choice   Optional. When re-invoked after AskUserQuestion:
+  --after-choice   Optional. When re-invoked after the orchestrator ASK:
                    a = fast-forward local <base-branch>
                    b = compare against origin/<base-branch>
                    c = proceed with stale local <base-branch>
 
 See fragments/00-preflight.md step 0.2a for the orchestrator-side
-AskUserQuestion flow and the prompt text shown to the user.
+ASK flow and the prompt text shown to the user.
 USAGE
 }
 
@@ -157,7 +157,7 @@ emit_terminal() {
 
 # Emit a pending JSON object (behind_count > 0 path). `ff_available`
 # signals to the orchestrator whether to offer option (a) in its
-# AskUserQuestion. Set false after a non-FF (a)-retry failure.
+# the orchestrator ASK. Set false after a non-FF (a)-retry failure.
 emit_pending() {
     local rsha="$1" bhc="$2" warnings="$3" ff_available="$4"
     jq -n \
@@ -210,7 +210,7 @@ if [[ "$AFTER_CHOICE" == "a" ]]; then
     # is already populated by the initial fetch earlier in the helper.
     current_branch=$(git symbolic-ref --short HEAD 2>/dev/null || true)
     if [[ "$current_branch" == "$BASE_BRANCH" ]]; then
-        ff_err_file=$(mktemp -t adams-ff-err.XXXXXX)
+        ff_err_file=$(mktemp -t matthews-ff-err.XXXXXX)
         ff_rc=0
         git merge --ff-only "origin/$BASE_BRANCH" --quiet 2>"$ff_err_file" || ff_rc=$?
         if [[ $ff_rc -eq 0 ]]; then
@@ -227,7 +227,7 @@ if [[ "$AFTER_CHOICE" == "a" ]]; then
         emit_pending "$remote_sha" "$behind_count" "$warnings_json" "false"
         exit 0
     fi
-    ff_err_file=$(mktemp -t adams-ff-err.XXXXXX)
+    ff_err_file=$(mktemp -t matthews-ff-err.XXXXXX)
     ff_rc=0
     git fetch origin "$BASE_BRANCH:$BASE_BRANCH" --quiet 2>"$ff_err_file" || ff_rc=$?
     if [[ $ff_rc -eq 0 ]]; then
@@ -258,7 +258,7 @@ fi
 
 # Remote exists. Fetch with a 30s soft timeout. GNU `timeout` when
 # available; a background+watchdog pattern on macOS where it isn't.
-fetch_err_file=$(mktemp -t adams-fetch-err.XXXXXX)
+fetch_err_file=$(mktemp -t matthews-fetch-err.XXXXXX)
 fetch_rc=0
 if command -v timeout >/dev/null 2>&1; then
     timeout 30 git fetch origin "$BASE_BRANCH" --quiet 2>"$fetch_err_file" || fetch_rc=$?

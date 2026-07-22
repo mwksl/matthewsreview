@@ -1,14 +1,14 @@
 ---
-allowed-tools: Bash(artifact-read.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(assign-finding-ids.sh:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(git:*), Bash(jq:*), Bash(date:*), Bash(timeout:*), Bash(sleep:*), Bash(kill:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(cat:*), Bash(printf:*), Bash(tr:*), Bash(awk:*), Bash(grep:*), Bash(mktemp:*), Read, Agent, AskUserQuestion
-argument-hint: "[<paste...>] [--file path --line N --claim \"...\"] [--impact <type>] [--no-dedup]"
-description: Inject externally-sourced findings (cloud /ultrareview, manual finds, etc.) into the most recent /adamsreview:review artifact for this branch. Validates via Phase 4, re-renders, re-publishes.
+allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(review-root.sh:*), Bash(doctor.sh:*), Bash(agent-dispatch.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(assign-finding-ids.sh:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(repo-slug.sh:*), Bash(git:*), Bash(jq:*), Bash(date:*), Bash(timeout:*), Bash(sleep:*), Bash(kill:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(cat:*), Bash(printf:*), Bash(tr:*), Bash(awk:*), Bash(grep:*), Bash(mktemp:*), Read, Agent, AskUserQuestion
+argument-hint: "[<paste...>] [--file path --line N --claim \"...\"] [--impact <type>] [--no-dedup] [--profile <name>] [--models \"<csv>\"]"
+description: Inject externally-sourced findings (cloud /ultrareview, manual finds, etc.) into the most recent /matthewsreview:review artifact for this branch. Validates via Phase 4, re-renders, re-publishes.
 disable-model-invocation: false
 ---
 
 This command is **additive** — it does NOT re-run Phase 1 detection,
 Phase 2 dedup against the original lens output, Phase 5 cross-cutting
 analysis, or any fix loop. To re-derive everything from the diff, run
-`/adamsreview:review` (which overwrites the artifact).
+`/matthewsreview:review` (which overwrites the artifact).
 
 ## Arguments
 
@@ -31,6 +31,8 @@ Optional flags:
   every emitted candidate. Default `correctness`. In paste mode this
   *overrides* the normalizer's per-candidate guess; useful when the
   reviewer knows the input is "all security."
+- `--profile <name>` / `--models "<csv>"` — model-plan overrides,
+  resolved fresh at load time (step 2b). Same semantics as `:review`.
 - `--no-dedup` — skip the dedup pass (§step 5). Useful when the
   reviewer is confident the input is fresh, or when the artifact has
   many findings and the dedup call would be expensive.
@@ -51,11 +53,13 @@ working context.
 
 Parse `$ARGUMENTS`:
 
-- Walk tokens left-to-right looking for the optional flags
-  (`--file <path>`, `--line <N>`, `--claim "..."`, `--impact <type>`,
-  `--no-dedup`). Strip surrounding quotes from `--claim`'s value.
-- All non-flag tokens (and tokens not consumed as flag values) join
-  with single spaces into `paste_body` (may be empty).
+- Walk tokens left-to-right looking for optional flags. `--file`,
+  `--line`, `--claim`, `--impact`, `--profile`, and `--models` each
+  consume the next token as their value (respect quoted values);
+  `--no-dedup` consumes no value. A missing value is a usage error.
+- All non-flag tokens (and only tokens not consumed as flag values)
+  join with single spaces into `paste_body` (may be empty). Any unknown
+  `--...` option is a usage error, not paste text.
 
 Capture:
 
@@ -64,6 +68,8 @@ Capture:
 - `cli_impact_set` (`true` if the user explicitly passed `--impact`,
   `false` otherwise — needed by step 4b to decide whether to overlay
   the impact onto normalizer output).
+- `profile`, `models_csv` (each may be empty; values from `--profile`
+  and `--models` respectively).
 - `no_dedup` (`true` / `false`, default `false`).
 - `paste_body` (string; may be empty).
 
@@ -76,8 +82,8 @@ Determine `mode_input`:
 - Anything else (e.g. only `cli_file` set, or all empty) → error-as-prompt:
 
   > ERROR: no input. Provide either:
-  >   1. Free-form paste:    `/adamsreview:add <paste body...>`
-  >   2. Structured one-shot: `/adamsreview:add --file <path> --line <N> --claim "<one-sentence claim>"`
+  >   1. Free-form paste:    `/matthewsreview:add <paste body...>`
+  >   2. Structured one-shot: `/matthewsreview:add --file <path> --line <N> --claim "<one-sentence claim>"`
   > Optional flags on either form: `--impact correctness|security|ux|policy|architecture` `--no-dedup`
   > Action: re-invoke with at least one of the two input shapes.
 
@@ -89,7 +95,7 @@ Validate `cli_impact` against the enum (`correctness`, `security`, `ux`,
 ### 2. Locate the artifact
 
 ```bash
-reviews_root="${ADAMS_REVIEW_REVIEWS_ROOT:-$HOME/.adams-reviews}"
+reviews_root=$(review-root.sh)
 head_branch=$(git rev-parse --abbrev-ref HEAD)
 repo_root=$(git rev-parse --show-toplevel)
 repo_slug=$(repo-slug.sh --repo-root "$repo_root")
@@ -100,7 +106,7 @@ If `latest.txt` is missing or empty → error-as-prompt:
 
 > ERROR: no review found for branch `$head_branch` under
 > `$reviews_root/$repo_slug/`.
-> Action: run /adamsreview:review against this branch first.
+> Action: run /matthewsreview:review against this branch first.
 
 Otherwise:
 
@@ -108,20 +114,107 @@ Otherwise:
 review_id=$(tr -d '[:space:]' < "$latest_path")
 review_dir="$reviews_root/$repo_slug/$head_branch/$review_id"
 artifact_path="$review_dir/artifact.json"
+```
+
+### 2a. Validate the artifact before config resolution
+
+Capture log paths and schema-validate before reading provenance or mutating
+the artifact:
+
+```bash
 trace_log_path="$review_dir/trace.md"
 phases_log_path="$review_dir/phases.jsonl"
 tokens_log_path="$review_dir/tokens.jsonl"
-```
 
-Schema-validate as a safety rail:
-
-```bash
 artifact-validate.sh --path "$artifact_path"
 ```
 
 On non-zero: surface the validator stderr and abort. A schema-invalid
-artifact means something upstream broke an invariant; do not try to
-patch around it.
+artifact means something upstream broke an invariant; do not resolve config
+or patch around it.
+
+### 2b. Resolve the model plan
+
+Resolve runtime roles/tiers and operational thresholds fresh for this
+invocation. Read repo configuration from the artifact's trusted comparison
+commit, never from the reviewed worktree. Preserve the artifact's
+classification provenance: retain its `phase3_gate` and `phase4_bands` (or
+their normative defaults when absent), while refreshing `fix_threshold` and
+`walkthrough_threshold` from the current trusted config.
+
+Persist the merged model plan and its exact `.gates` object together so the
+plan and top-level gates remain coherent:
+
+```bash
+if ! comparison_ref=$(
+  artifact-read.sh \
+    --path "$artifact_path" \
+    --filter '.base_context.comparison_ref' |
+  jq -er 'select(type == "string" and length > 0)'
+); then
+    printf '%s\n' \
+      'ERROR: artifact is missing trusted base_context.comparison_ref.' \
+      'Action: run /matthewsreview:review again before using /matthewsreview:add.' >&2
+    exit 1
+fi
+classification_gates_json=$(artifact-read.sh \
+  --path "$artifact_path" \
+  --filter '{
+    phase3_gate: (.gates.phase3_gate // .model_plan.gates.phase3_gate // 45),
+    phase4_bands: (.gates.phase4_bands // .model_plan.gates.phase4_bands // [45, 60, 75])
+  }') || exit $?
+
+plan_args=(
+  --repo-root "$repo_root"
+  --orchestrator "$harness_id"
+  --repo-config-ref "$comparison_ref"
+)
+[[ -n "${profile:-}" ]] && plan_args+=(--profile "$profile")
+[[ -n "${models_csv:-}" ]] && plan_args+=(--models "$models_csv")
+runtime_model_plan_json=$(review-config.sh "${plan_args[@]}") || exit $?
+model_plan_json=$(printf '%s\n' "$runtime_model_plan_json" |
+  jq -ce --argjson classification "$classification_gates_json" '
+    .gates.phase3_gate = $classification.phase3_gate
+    | .gates.phase4_bands = $classification.phase4_bands
+  ') || exit $?
+gates_json=$(printf '%s\n' "$model_plan_json" | jq -ce '.gates') || exit $?
+
+plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX) || exit $?
+plan_write_rc=0
+printf '%s\n' "$model_plan_json" > "$plan_tmp" || plan_write_rc=$?
+if [[ "$plan_write_rc" -ne 0 ]]; then
+    rm -f "$plan_tmp" 2>/dev/null || true
+    exit "$plan_write_rc"
+fi
+
+plan_patch_rc=0
+artifact-patch.py --path "$artifact_path" \
+  --set-json model_plan=@"$plan_tmp" \
+  --set-json gates="$gates_json" \
+  || plan_patch_rc=$?
+
+plan_cleanup_rc=0
+rm -f "$plan_tmp" || plan_cleanup_rc=$?
+if [[ "$plan_patch_rc" -ne 0 ]]; then
+    exit "$plan_patch_rc"
+fi
+if [[ "$plan_cleanup_rc" -ne 0 ]]; then
+    exit "$plan_cleanup_rc"
+fi
+
+printf '%s\n' "$model_plan_json" | jq -r '
+  "| Role | Engine | Model | Effort | Source |",
+  "|---|---|---|---|---|",
+  (.roles | to_entries[]
+   | "| \(.key) | \(.value.engine) | \(.value.model | if . == "" then "(cli default)" else . end) | \(.value.effort // "—") | \(.value.source) |"),
+  (.warnings[]? | "warning: \(.)")'
+```
+
+On non-zero from `review-config.sh`: surface stderr verbatim and stop.
+`$harness_id` is the Dispatch Protocol identity. On any temp write, patch,
+or cleanup failure, exit with that operation's status after best-effort temp
+cleanup; never let `rm` mask an `artifact-patch.py` failure.
+
 
 Capture `add_start_epoch=$(date +%s)`. Append a header to `trace.md`:
 
@@ -143,7 +236,7 @@ If `leftover_ids` is non-empty, print the deterministic recovery
 message and abort (same shape as Phase 7 step 4 in
 `08-fix-loader.md`):
 
-> ERROR: previous /adamsreview:fix run did not finish (N findings
+> ERROR: previous /matthewsreview:fix run did not finish (N findings
 > still in 'attempted'). The working tree may still contain partial
 > fix edits from that run.
 >
@@ -154,7 +247,7 @@ message and abort (same shape as Phase 7 step 4 in
 >      them.
 >   3. For each leftover 'attempted' finding, reset state manually:
 >      artifact-patch.py --finding-id <id> --set current_state=open
->   4. Re-run /adamsreview:add.
+>   4. Re-run /matthewsreview:add.
 >
 > Leftover 'attempted' finding ids: `$leftover_ids`
 
@@ -187,12 +280,13 @@ inspecting `trace.md` later can distinguish a genuinely-up-to-date
 branch (`behind=0`) from a silently-degraded gate (also `behind=0`).
 When the fetch fails AND the local fallback resolves to `behind=0`,
 emit a `branch_behind_base degraded` trace line — the gate decides
-not to fire (no `AskUserQuestion` since `behind == 0`), but the
+not to fire (no ASK since `behind == 0`), but the
 operator still needs a trail showing the count came from a possibly
 stale local ref.
 
 ```bash
-base_branch=$(jq -r '.base_branch' "$artifact_path")
+base_branch=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.base_branch' | jq -r '.')
 fetch_ok=true
 if command -v timeout >/dev/null 2>&1; then
     GIT_TERMINAL_PROMPT=0 timeout 30 git fetch origin \
@@ -231,7 +325,7 @@ else
         merge_ref="$base_branch"
         if [[ "$behind" == "0" ]]; then
             # Degraded fail-silent path: fetch failed, local rev-list
-            # resolved to 0. The AskUserQuestion below won't fire (gated
+            # resolved to 0. The ASK below won't fire (gated
             # on `behind > 0`), so without this trace line `trace.md`
             # has no signal distinguishing "branch genuinely fresh" from
             # "fetch failed, local says 0 but local may be stale."
@@ -257,7 +351,7 @@ All three branches (Proceed / Stop / Abort) write a distinct
 `branch_behind_base <verdict>` audit line to `trace.md` so an operator
 reading the trace later can tell which path the user took.
 
-If `$behind > 0`, `AskUserQuestion` once:
+If `$behind > 0`, ASK once:
 
 > Branch `$head_branch` is `$behind` commits behind `$base_branch`.$fetch_note
 > New findings will be deduped against the artifact's existing finding
@@ -266,7 +360,7 @@ If `$behind > 0`, `AskUserQuestion` once:
 > (callers or helpers on `$base_branch` that have changed since).
 > Recommend merging `$merge_ref` into `$head_branch` first.
 
-- **(a) Stop — I'll merge `$merge_ref` into `$head_branch` first, then re-run.** Emit a `branch_behind_base stopped` trace line, then exit 0 with: `Stopping. Run \`git merge $merge_ref\` (or fast-forward) on \`$head_branch\`, then re-run /adamsreview:add.`
+- **(a) Stop — I'll merge `$merge_ref` into `$head_branch` first, then re-run.** Emit a `branch_behind_base stopped` trace line, then exit 0 with: `Stopping. Run \`git merge $merge_ref\` (or fast-forward) on \`$head_branch\`, then re-run /matthewsreview:add.`
   ```bash
   printf '[%s] branch_behind_base stopped behind=%s merge_ref=%s fetch_ok=%s\n' \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$behind" "$merge_ref" "$fetch_ok" \
@@ -326,9 +420,10 @@ jq fails loudly — surface as error-as-prompt.)
 Dispatch the paste normalizer sub-agent (the prompt is at the bottom
 of this file under "Sub-agent prompts"). After it returns:
 
-- Repair missing location info, mirroring Phase 1.5 §1.5.5: `file: null
-  → "(unknown)"`, `line_range: null → [1, 1]`. The §13.10/§13.13
-  downstream pipeline already handles `(unknown)` as a sentinel.
+- Preserve missing location uncertainty, mirroring Phase 1.5 §1.5.5:
+  `file: null → "(unknown)"`, `line_range: null → null`. Schema,
+  validation, and rendering all support a nullable range; `[1,1]`
+  would fabricate a real source citation.
 - If `--impact` was set, overlay it on every candidate — it overrides
   the normalizer's guess.
 - If the normalizer returns `[]`, print:
@@ -347,7 +442,7 @@ if [[ "$cli_impact_set" == "true" ]]; then
     new_candidates=$(echo "$normalizer_output" | jq -c --arg impact "$cli_impact" '
       [ .[] | . + {
           file:        (.file // "(unknown)"),
-          line_range:  (.line_range // [1,1]),
+          line_range:  (.line_range // null),
           impact_type: $impact,
           source_family: "external-add-family"
         } ]')
@@ -355,7 +450,7 @@ else
     new_candidates=$(echo "$normalizer_output" | jq -c '
       [ .[] | . + {
           file:        (.file // "(unknown)"),
-          line_range:  (.line_range // [1,1]),
+          line_range:  (.line_range // null),
           source_family: "external-add-family"
         } ]')
 fi
@@ -414,7 +509,7 @@ new_source=$(echo "$candidate" | jq -r '.sources[0]')
 merged_sources=$(echo "$existing_sources" \
     | jq -c --arg s "$new_source" '. + [$s] | unique')
 
-src_tmp=$(mktemp -t adams-add-srcs.XXXXXX)
+src_tmp=$(mktemp -t matthews-add-srcs.XXXXXX)
 echo "$merged_sources" > "$src_tmp"
 artifact-patch.py \
     --path "$artifact_path" --finding-id "$match_id" \
@@ -487,7 +582,8 @@ derivation below matches Phase 1's builder: under `trivial_mode`,
 every candidate lands in the light lane regardless of `impact_type`.
 
 ```bash
-trivial_mode=$(jq -r '.trivial_mode' "$artifact_path")
+trivial_mode=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.trivial_mode' | jq -r '.')
 ```
 
 Build full schema-valid finding objects (mirrors the Wave 2 builder in
@@ -567,7 +663,7 @@ Capture `phase_4_start_epoch=$(date +%s)`.
 Snapshot the working tree's cleanliness before dispatch. Step 7.5's
 belt-and-braces sweep reverts any dirty state detected after
 validators run — but only when the tree was clean going in. Unlike
-`/adamsreview:review` Phase 0, `/adamsreview:add` has no clean-tree gate.
+`/matthewsreview:review` Phase 0, `/matthewsreview:add` has no clean-tree gate.
 If the user has their own uncommitted work when they invoke this
 command, a blind sweep would clobber it.
 
@@ -592,7 +688,8 @@ see the same governance context the original Phase 4 saw.
 #### 7.2 Partition new candidates into lanes
 
 ```bash
-trivial_mode=$(jq -r '.trivial_mode' "$artifact_path")
+trivial_mode=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.trivial_mode' | jq -r '.')
 
 deep_ids=$(artifact-read.sh \
     --path "$artifact_path" \
@@ -618,11 +715,21 @@ light_count=0
 [[ -n "$light_ids" ]] && light_count=$(awk -F, '{print NF}' <<<"$light_ids")
 ```
 
+Read the resolved Phase-4 cutoffs once for every validator prompt:
+
+```bash
+add_phase4_bands=$(artifact-read.sh \
+  --path "$artifact_path" --filter '.gates.phase4_bands')
+add_phase4_b1=$(printf '%s' "$add_phase4_bands" | jq -r '.[0]')
+add_phase4_b2=$(printf '%s' "$add_phase4_bands" | jq -r '.[1]')
+add_phase4_b3=$(printf '%s' "$add_phase4_bands" | jq -r '.[2]')
+```
+
 #### 7.3 Deep-lane dispatch (Opus, one sub-agent per candidate)
 
-For each id in `deep_ids`, launch ONE `Agent` tool-use with `model:
-opus`, `subagent_type: general-purpose`, dispatched in a single
-orchestrator turn for concurrency. Read the finding JSON and pass it
+For each id in `deep_ids`, launch ONE sub-agent with role
+`deep_validate` (default claude:opus), `subagent_type: general-purpose`,
+dispatched in a single orchestrator turn for concurrency. Read the finding JSON and pass it
 inline.
 
 **One Opus per candidate — never collapse multiple deep-lane candidates
@@ -630,7 +737,7 @@ into a single batched Opus call.** §7.6's `--apply-decisions --expected
 $total_dispatched` rejects under-sized batches with a recovery action.
 Each candidate needs its own blast-radius trace and fix-proposal context.
 
-Prompt essence — kept self-contained here; do NOT dispatch through `fragments/05-validation.md` (it pulls in Wave-2 / §4.6 / §4.4.5 logic that doesn't apply to the `/adamsreview:add` path).
+Prompt essence — kept self-contained here; do NOT dispatch through `fragments/05-validation.md` (it pulls in Wave-2 / §4.6 / §4.4.5 logic that doesn't apply to the `/matthewsreview:add` path).
 
 Prompt:
 
@@ -659,7 +766,7 @@ Prompt:
 > 5. **Produce `verification_context`:** `how_to_verify_fix`,
 >    `edge_cases_to_preserve`, `what_would_break_if_incomplete`.
 > 6. **Re-score 0–100** using the §20 rubric — based on what you found.
-> 7. This finding was injected by `/adamsreview:add` from an external
+> 7. This finding was injected by `/matthewsreview:add` from an external
 >    source; do NOT emit `related_candidates_to_investigate` (no Wave 2
 >    in this code path). If you notice adjacents, mention them in
 >    `evidence` for the user's awareness only.
@@ -685,13 +792,14 @@ Prompt:
 > confirmed findings.
 
 After each sub-agent returns: log tokens per candidate (phase
-`phase_add`, agent_role `validator`, `--finding-id` set, model `opus`).
+`phase_add`, agent_role `validator`, `--finding-id` set, `--model "$role_deep_validate"`).
 
 #### 7.4 Light-lane dispatch (Sonnet, chunked-batch fan-out)
 
 Split `light_ids` into chunks of **at most 25 candidates per chunk**,
-balanced as evenly as feasible. For each chunk, launch ONE `Agent`
-tool-use with `model: sonnet`. Dispatch all chunk-agents in one
+balanced as evenly as feasible. For each chunk, launch ONE sub-agent
+with role `light_validate` (default claude:sonnet). Dispatch all
+chunk-agents in one
 orchestrator turn for concurrency. Same chunked rationale as
 `05-validation.md` §4.3 — light-lane work is rubric-checking, not
 per-candidate investigation, so it batches well; the 25-cap restores
@@ -725,9 +833,9 @@ Prompt essence — verbatim from `05-validation.md` §4.3:
 > `manual`. Architecture findings default to `report_only`.
 >
 > **Anti-anchor-clustering instruction (chunk-batch specific):** Use
-> the full 0-100 range. Phase-4 routing has cutoffs at 45, 60, 75 — a
-> finding between adjacent anchors should score in between (e.g. 60,
-> 65). Do not snap onto an anchor.
+> the full 0-100 range. Phase-4 routing has resolved cutoffs at
+> `$add_phase4_b1`, `$add_phase4_b2`, `$add_phase4_b3`; score between
+> adjacent cutoffs when warranted. Do not snap onto a cutoff.
 >
 > Return JSON array, one entry per candidate (order does not matter,
 > routing is by `id`):
@@ -739,7 +847,7 @@ Prompt essence — verbatim from `05-validation.md` §4.3:
 After each chunk-agent returns: log tokens once per chunk-agent
 (phase `phase_add`, agent_role `validator`, `--finding-id` OMITTED
 because tokens are agent-level when a single sub-agent owns multiple
-findings, model `sonnet`).
+findings, `--model "$role_light_validate"`).
 
 #### 7.5 Tree-cleanliness sweep (belt-and-braces)
 
@@ -748,7 +856,7 @@ validators are read-only by contract — any post-validation dirt is
 validator-sourced and safely revertable. When `pre_validator_clean ==
 false`, skip the sweep: without a clean baseline we can't distinguish
 user state from validator writes, and a blind revert would clobber
-user work. `/adamsreview:add` has no Phase-0 dirty-tree gate, so this
+user work. `/matthewsreview:add` has no Phase-0 dirty-tree gate, so this
 conditional is the only safeguard against that data-loss class.
 
 ```bash
@@ -787,7 +895,7 @@ Compose the tuple array in orchestrator context and emit it to
 `{id, score_phase4, decision, actionability, reason, validation_result}`).
 
 ```bash
-scratch="/tmp/adams-review-add-$review_id"
+scratch="/tmp/matthews-review-add-$review_id"
 mkdir -p "$scratch"
 
 # Compose the tuple array in orchestrator context and write it to
@@ -893,9 +1001,9 @@ without bookkeeping here.
 
 Re-tally first so the rendered report (and the downstream PR comment
 update in step 9) reflects this run's new sub-agent + orchestrator
-spend on top of the prior `/adamsreview:review` baseline. The paste
+spend on top of the prior `/matthewsreview:review` baseline. The paste
 normalizer (§4b) and any Phase-4 re-validators that ran during this
-`/adamsreview:add` invocation already logged their sub-agent usage to
+`/matthewsreview:add` invocation already logged their sub-agent usage to
 `tokens.jsonl`; the orchestrator transcript on disk captured every
 main-session turn. Both helpers are pure readbacks:
 
@@ -905,7 +1013,8 @@ tally-subagent-tokens.sh \
     --artifact   "$artifact_path" \
     2>>"$trace_log_path" || printf 'add_tally_failed\n' >> "$trace_log_path"
 
-review_started_at=$(jq -r '.review_started_at // empty' "$artifact_path")
+review_started_at=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.review_started_at // empty' | jq -r '.')
 
 orchestrator-tokens.sh \
     --artifact "$artifact_path" \
@@ -928,9 +1037,12 @@ stand; the user can manually re-render).
 Read mode + comment_id from the artifact:
 
 ```bash
-mode=$(jq -r '.mode' "$artifact_path")
-pr_number=$(jq -r '.pr_number // empty' "$artifact_path")
-comment_id=$(jq -r '.comment_id // empty' "$artifact_path")
+mode=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.mode' | jq -r '.')
+pr_number=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.pr_number // empty' | jq -r '.')
+comment_id=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.comment_id // empty' | jq -r '.')
 ```
 
 If `mode == "pr"` AND `pr_number` is non-empty:
@@ -994,8 +1106,8 @@ Cumulative sub-agent spend: <total> tokens across <invs> invocations.
 Cumulative orchestrator spend: <output> output / <input> input across <turns> turns.
 
 Next:
-  - /adamsreview:fix             apply auto-eligible findings (deep confirmed_mechanical) plus auto-recommendations via Phase 7.5 batch-accept
-  - /adamsreview:walkthrough     review any remaining non-promoted findings (light-lane / manual / uncertain)
+  - /matthewsreview:fix             apply auto-eligible findings (deep confirmed_mechanical) plus auto-recommendations via Phase 7.5 batch-accept
+  - /matthewsreview:walkthrough     review any remaining non-promoted findings (light-lane / manual / uncertain)
 ```
 
 Build the per-finding lines from `artifact-read.sh`:
@@ -1004,29 +1116,36 @@ Build the per-finding lines from `artifact-read.sh`:
 artifact-read.sh \
   --path "$artifact_path" \
   --filter "[.findings[] | select(.id | IN(\"${new_ids//,/\",\"}\"))
-            | \"  \\(.id) \\(.disposition | (. + \"                \")[0:18]) \\(.impact_type | (. + \"          \")[0:11]) \\(.file):\\(.line_range[0]) — \\(.claim | .[0:80])\"]
+            | (if .file == \"(unknown)\" then \"(unknown)\"
+               elif .line_range == null then .file
+               else (.file + \":\" + (.line_range[0] | tostring))
+               end) as \$location
+            | \"  \\(.id) \\(.disposition | (. + \"                \")[0:18]) \\(.impact_type | (. + \"          \")[0:11]) \\(\$location) — \\(.claim | .[0:80])\"]
             | join(\"\n\")"
 ```
 
-Read the cumulative spend numbers from the artifact (populated by §8's
-re-tally). Direct `jq -r` call so stdout is the chat line itself, not
-a JSON-quoted string (`artifact-read.sh --filter` doesn't enable raw
-mode). Omit each line entirely if its source field is absent — matches
-`artifact-render.py`'s renderer guard so the chat never shows `null
-tokens across null invocations`:
+Read only the cumulative spend fields through `artifact-read.sh`, then use
+`jq -r` to decode that compact object into chat text. Do not load the full
+artifact for this two-line summary. Omit each line entirely if its source
+field is absent — matches `artifact-render.py`'s renderer guard so the chat
+never shows `null tokens across null invocations`:
 
 ```bash
-subagent_token_line=$(jq -r '
+artifact_costs=$(artifact-read.sh \
+    --path "$artifact_path" \
+    --filter '{subagent_tokens, orchestrator_tokens}')
+
+subagent_token_line=$(printf '%s' "$artifact_costs" | jq -r '
     if (.subagent_tokens.total // null) != null and (.subagent_tokens.invocations // null) != null
     then "Cumulative sub-agent spend: \(.subagent_tokens.total) tokens across \(.subagent_tokens.invocations) invocations."
     else empty end
-' "$artifact_path")
+')
 
-orchestrator_token_line=$(jq -r '
+orchestrator_token_line=$(printf '%s' "$artifact_costs" | jq -r '
     if (.orchestrator_tokens.turn_count // null) != null
     then "Cumulative orchestrator spend: \(.orchestrator_tokens.total_output) output / \(.orchestrator_tokens.total_input) input across \(.orchestrator_tokens.turn_count) turns."
     else empty end
-' "$artifact_path")
+')
 ```
 
 If publish failed in step 9, append:
@@ -1044,7 +1163,7 @@ The artifact patches stand; to republish run:
   retroactively grouped into existing `cross_cutting_groups`.
   Documented small loss; the rendered report still shows them in the
   standard per-finding tables.
-- **No persistence across fresh `/adamsreview:review` runs.** A re-review
+- **No persistence across fresh `/matthewsreview:review` runs.** A re-review
   overwrites the artifact; added findings are lost. Re-add if needed.
 
 ## Sub-agent prompts (used by steps 4 and 5)
@@ -1052,7 +1171,7 @@ The artifact patches stand; to republish run:
 ### Paste-mode normalizer prompt (Sonnet)
 
 > You are normalizing an externally-sourced code-review note into the
-> adamsreview candidate schema. The reviewer has either pasted a chat
+> matthewsreview candidate schema. The reviewer has either pasted a chat
 > transcript / review summary from another tool (Claude Code
 > /ultrareview, Opus chat, CodeRabbit text output, a teammate's Slack
 > message) or hand-written a list of bugs they want added.

@@ -7,7 +7,7 @@
 #   --summary              canned counts per current_state / disposition /
 #                          impact_type / validation_lane
 #
-# Default artifact path resolution via ~/.adams-reviews/<slug>/<branch>/
+# Default artifact path resolution via ~/.matthews-reviews/<slug>/<branch>/
 # latest.txt is deferred to Stage 2 (Phase 0 computes the slug); Stage 1
 # callers pass --path explicitly.
 #

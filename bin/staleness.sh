@@ -14,9 +14,9 @@
 # Classifications (§21.4):
 #   safe    HEAD == reviewed_sha. stdout: `safe`. exit 0.
 #   warn    HEAD moved, but no reviewed files touched. stdout: `warn: ...`. exit 0.
-#   unsafe  HEAD moved AND one or more reviewed files touched. stderr:
-#           `unsafe: files <list> changed since review; re-run /adamsreview:review or use --force`.
-#           exit 1.
+#   unsafe  HEAD moved AND one or more reviewed files touched. stderr
+#           names the files, emits structured ERROR/Action guidance, and
+#           exits 1.
 #
 # Other exits: 1 on git error / unreachable SHA (both treated as "can't
 # prove safe" → same exit as unsafe). 64 on usage error.
@@ -76,14 +76,14 @@ fi
 if ! REVIEWED_RESOLVED=$(git rev-parse --verify "${REVIEWED_SHA}^{commit}" 2>/dev/null); then
     echo "ERROR: reviewed sha '$REVIEWED_SHA' is not known to this repo" >&2
     echo "Possible causes: shallow clone, force-push rewrote history, or the review ran in a different repo." >&2
-    echo "Action: re-run /adamsreview:review to regenerate the review against the current history." >&2
+    echo "Action: re-run /matthewsreview:review to regenerate the review against the current history." >&2
     exit 1
 fi
 
 if ! git merge-base --is-ancestor "$REVIEWED_RESOLVED" HEAD 2>/dev/null; then
     echo "ERROR: reviewed sha '$REVIEWED_SHA' is not reachable from HEAD" >&2
     echo "The branch has likely been rebased or force-pushed since the review was generated." >&2
-    echo "Action: re-run /adamsreview:review against the current branch." >&2
+    echo "Action: re-run /matthewsreview:review against the current branch." >&2
     exit 1
 fi
 
@@ -127,5 +127,8 @@ fi
 UNIQUE=$(printf '%s\n' "$INTERSECTION" | awk '!seen[$0]++')
 COMMA_LIST=$(printf '%s\n' "$UNIQUE" | paste -sd, -)
 
-echo "unsafe: files $COMMA_LIST changed since review; re-run /adamsreview:review or use --force" >&2
+printf '%s\n' \
+    "unsafe: files $COMMA_LIST changed since review" \
+    "ERROR: reviewed files changed after this review; continuing cannot be proven safe." \
+    "Action: re-run /matthewsreview:review, or use --force only after inspecting the listed changes." >&2
 exit 1

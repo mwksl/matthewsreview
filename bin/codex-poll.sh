@@ -10,7 +10,7 @@
 #   - fragments/05-codex-validation.md  §4.3.2 (Phase 4b light chunked-batch)
 #   - fragments/06-codex-cross-cutting.md §5.2.2 (Phase 5 cross-cutting)
 #
-# Required by `/adamsreview:codex-review`. See plans/codex-watchdog.md
+# Required by `/matthewsreview:codex-review`. See plans/codex-watchdog.md
 # for the bug class this helper defends against (broker reports
 # `running` long after the underlying codex turn has died — a desync
 # between the broker's in-memory state and its on-disk job store).
@@ -78,11 +78,33 @@ plans/codex-watchdog.md for the design.
 USAGE
 }
 
-die_usage() { echo "ERROR: $1" >&2; usage; exit 64; }
+die_usage() {
+    echo "ERROR: $1" >&2
+    usage
+    echo "Action: correct the invocation using the usage above, then retry." >&2
+    exit 64
+}
 die_dep() {
     echo "ERROR: $1" >&2
     [[ -n "${2:-}" ]] && echo "Action: $2" >&2
     exit 5
+}
+
+normalize_nonnegative_integer() { # flag value → NORMALIZED_INTEGER
+    local flag="$1" value="$2" max_value=9223372036854775807
+    if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+        die_usage "$flag must be a non-negative base-10 integer (got '$value')"
+    fi
+    while [[ "${#value}" -gt 1 && "${value:0:1}" == "0" ]]; do
+        value="${value#0}"
+    done
+    [[ -n "$value" ]] || value=0
+    # shellcheck disable=SC2071  # equal-length digit strings compare lexically
+    if [[ "${#value}" -gt "${#max_value}" \
+          || ( "${#value}" -eq "${#max_value}" && "$value" > "$max_value" ) ]]; then
+        die_usage "$flag exceeds the largest arithmetic-safe integer ($max_value)"
+    fi
+    NORMALIZED_INTEGER="$value"
 }
 
 JOB=""
@@ -114,8 +136,10 @@ done
 [[ -n "$STALL"     ]] || die_usage "--stall-threshold-sec is required"
 [[ -n "$CEIL"      ]] || die_usage "--wall-clock-ceiling-sec is required"
 
-case "$STALL" in [0-9]*) ;; *) die_usage "--stall-threshold-sec must be a non-negative integer (got '$STALL')" ;; esac
-case "$CEIL"  in [0-9]*) ;; *) die_usage "--wall-clock-ceiling-sec must be a non-negative integer (got '$CEIL')" ;; esac
+normalize_nonnegative_integer --stall-threshold-sec "$STALL"
+STALL="$NORMALIZED_INTEGER"
+normalize_nonnegative_integer --wall-clock-ceiling-sec "$CEIL"
+CEIL="$NORMALIZED_INTEGER"
 
 if ! command -v node >/dev/null 2>&1; then
     die_dep "node not found on \$PATH" \
@@ -192,7 +216,7 @@ compute_mtime_age() {
 
 # ---- 1. status --json ---------------------------------------------------
 
-status_err=$(mktemp -t adams-codex-poll.XXXXXX)
+status_err=$(mktemp -t matthews-codex-poll.XXXXXX)
 status_out=$(node "$COMPANION" status "$JOB" --json 2>"$status_err") || {
     rc=$?
     err=$(tr '\n' ' ' <"$status_err" 2>/dev/null || true)
@@ -255,7 +279,7 @@ case "$job_status" in
         # Pluck raw_output via the same chain the fragments use today
         # (the disk-persisted store is the source of truth even when
         # the broker reports completed).
-        result_err=$(mktemp -t adams-codex-poll-result.XXXXXX)
+        result_err=$(mktemp -t matthews-codex-poll-result.XXXXXX)
         result_out=$(node "$COMPANION" result "$JOB" --json 2>"$result_err" || true)
         rm -f "$result_err"
         raw=$(printf '%s' "$result_out" | jq -r '
@@ -311,7 +335,7 @@ fi
 # active-job path) is NOT a desync — it just means broker and disk
 # agree the job is alive. Stay in stalled_suspect for those.
 
-result_err=$(mktemp -t adams-codex-poll-result.XXXXXX)
+result_err=$(mktemp -t matthews-codex-poll-result.XXXXXX)
 result_rc=0
 node "$COMPANION" result "$JOB" --json >/dev/null 2>"$result_err" || result_rc=$?
 result_stderr=$(cat "$result_err" 2>/dev/null || true)

@@ -60,8 +60,8 @@
 #                        (e.g. `internal`, `internal-codex`). Whitespace
 #                        around each label is trimmed; empty pieces are
 #                        dropped. Defaults to `internal` when omitted, so
-#                        the standard `/adamsreview:review` flow doesn't
-#                        need to pass it. `/adamsreview:codex-review`
+#                        the standard `/matthewsreview:review` flow doesn't
+#                        need to pass it. `/matthewsreview:codex-review`
 #                        passes `internal-codex`.
 #
 # Output (stdout): the schema-shaped seed JSON for the new artifact.

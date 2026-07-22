@@ -1,4 +1,4 @@
-"""Shared helpers for adamsreview Python scripts.
+"""Shared helpers for matthewsreview Python scripts.
 
 This module is imported by sibling scripts in the same `bin/` directory
 (notably `artifact-patch.py` and `artifact-render.py`). It is NOT a uv
@@ -10,6 +10,7 @@ See docs/archive/DESIGN.md §8 (helper scripts contract), §21.2 (artifact-patch
 §24 (error recovery), and docs/archive/BUILD.md cross-stage notes (uv deviation).
 """
 
+import argparse
 import difflib
 import json
 import os
@@ -34,6 +35,7 @@ EXIT_UNKNOWN_FAMILY = 3      # also used by source-family-map.py for unknown enu
 
 
 SCHEMA_PATH = Path(__file__).parent / "schema-v1.json"
+DEFAULT_PHASE4_BANDS = (45, 60, 75)
 
 
 # ----- Error-as-prompt ---------------------------------------------------
@@ -71,6 +73,17 @@ def suggest(bad_value, valid_values):
     return matches[0] if matches else None
 
 
+class PromptArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser whose usage failures follow the error-as-prompt contract."""
+
+    def error(self, message):
+        err_prompt(
+            message,
+            action=f"run `{self.prog} --help` and retry with valid input.",
+        )
+        self.exit(EXIT_USAGE)
+
+
 # ----- Schema validation -------------------------------------------------
 
 def _load_validator():
@@ -99,6 +112,72 @@ def _load_validator():
     return schema, Draft202012Validator
 
 
+def _semantic_finding_errors(finding, prefix=""):
+    """Cross-value invariants JSON Schema cannot express portably."""
+    if not isinstance(finding, dict):
+        return []
+    errors = []
+    line_range = finding.get("line_range")
+    if (
+        isinstance(line_range, list)
+        and len(line_range) == 2
+        and all(isinstance(value, int) and not isinstance(value, bool) for value in line_range)
+        and line_range[0] > line_range[1]
+    ):
+        errors.append(
+            f"${prefix}.line_range: start {line_range[0]} exceeds end {line_range[1]}"
+        )
+    return errors
+
+
+def _semantic_gates_errors(gates, prefix):
+    """Ordering invariant shared by top-level and model-plan gates."""
+    if not isinstance(gates, dict):
+        return []
+    bands = gates.get("phase4_bands")
+    if (
+        isinstance(bands, list)
+        and len(bands) == 3
+        and all(
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            for value in bands
+        )
+        and not bands[0] < bands[1] < bands[2]
+    ):
+        return [
+            f"${prefix}.phase4_bands: values must be unique and strictly ascending"
+        ]
+    return []
+
+
+def resolve_phase4_bands(artifact):
+    """Return effective top-level Phase-4 bands, rejecting malformed values."""
+    if not isinstance(artifact, dict):
+        raise ValueError("artifact must be an object")
+    gates = artifact.get("gates")
+    if gates is None:
+        return DEFAULT_PHASE4_BANDS
+    if not isinstance(gates, dict):
+        raise ValueError("gates must be an object or null")
+    bands = gates.get("phase4_bands")
+    if not (
+        isinstance(bands, list)
+        and len(bands) == 3
+        and all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and 0 <= value <= 100
+            for value in bands
+        )
+        and bands[0] < bands[1] < bands[2]
+    ):
+        raise ValueError(
+            "gates.phase4_bands must contain three unique, strictly ascending "
+            "numbers from 0 through 100"
+        )
+    return tuple(bands)
+
+
 def validate(artifact):
     """Validate `artifact` against schema-v1.json.
 
@@ -111,6 +190,19 @@ def validate(artifact):
     for e in sorted(v.iter_errors(artifact), key=lambda x: list(x.absolute_path)):
         path = _pretty_path(e.absolute_path) or "(root)"
         errors.append(f"${path}: {e.message}")
+    if isinstance(artifact, dict):
+        errors.extend(_semantic_gates_errors(artifact.get("gates"), "gates"))
+        model_plan = artifact.get("model_plan")
+        if isinstance(model_plan, dict):
+            errors.extend(
+                _semantic_gates_errors(
+                    model_plan.get("gates"),
+                    "model_plan.gates",
+                )
+            )
+        if isinstance(artifact.get("findings"), list):
+            for index, finding in enumerate(artifact["findings"]):
+                errors.extend(_semantic_finding_errors(finding, f"findings[{index}]"))
     return errors
 
 
@@ -197,6 +289,7 @@ def validate_finding(finding, validator):
     for e in sorted(validator.iter_errors(finding), key=lambda x: list(x.absolute_path)):
         path = _pretty_path(e.absolute_path) or "(root)"
         errors.append(f"${path}: {e.message}")
+    errors.extend(_semantic_finding_errors(finding))
     return errors
 
 

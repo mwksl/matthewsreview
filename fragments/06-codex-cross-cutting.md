@@ -7,7 +7,7 @@ only difference is the dispatch shape:
 
 - **Opus is replaced by ONE Codex job** that proposes cross-cutting
   groups over the confirmed deep-lane findings.
-- The freeform Codex output runs through ONE **Sonnet shape-fixer**
+- The freeform Codex output runs through ONE **`normalizer`-role shape-fixer**
   that emits the structured `cross_cutting_groups` JSON the schema
   expects.
 
@@ -45,10 +45,29 @@ Otherwise, capture the list as `xc_input_json` and proceed.
 
 ### 5.2. Dispatch the Codex cross-cutting job
 
+After §5.1 confirms work exists, materialize the resolved role:
+
+```bash
+[[ "$role_codex_crosscut" == codex:* ]] || {
+    echo "ERROR: codex_crosscut must resolve to codex:<model>:<effort>." >&2
+    exit 1
+}
+codex_crosscut_spec="${role_codex_crosscut#codex:}"
+if [[ "$codex_crosscut_spec" == *:* ]]; then
+    codex_crosscut_model="${codex_crosscut_spec%%:*}"
+    codex_crosscut_effort="${codex_crosscut_spec#*:}"
+else
+    codex_crosscut_model="$codex_crosscut_spec"
+    codex_crosscut_effort=""
+fi
+codex_dispatch_scratch="${codex_dispatch_scratch:-${scratch_dir:-/tmp/matthews-review-$review_id}/jobs}"
+mkdir -p "$codex_dispatch_scratch"
+```
+
 #### 5.2.1. Build the prompt
 
 ```bash
-prompt_file="/tmp/adams-review-codex-${review_id}-XC.md"
+prompt_file="/tmp/matthews-review-codex-${review_id}-XC.md"
 
 cat > "$prompt_file" <<'PROMPT'
 You are reviewing a set of confirmed, actionable deep-lane findings to
@@ -109,64 +128,159 @@ PROMPT
 
 #### 5.2.2. Launch + poll + fetch
 
+Launch through the transport selected by preflight:
+
 ```bash
-node "$CODEX_COMPANION" task --background --effort "$effort" \
-    --prompt-file "$prompt_file" --json
+set +e
+if [[ "$codex_launch_mode" == "companion" ]]; then
+    companion_args=(node "$CODEX_COMPANION" task --background \
+        --prompt-file "$prompt_file" --json)
+    [[ -n "$codex_crosscut_model" ]] && companion_args+=(--model "$codex_crosscut_model")
+    [[ -n "$codex_crosscut_effort" ]] && companion_args+=(--effort "$codex_crosscut_effort")
+    launch_json=$("${companion_args[@]}")
+    launch_rc=$?
+    xc_job_id=$(printf '%s' "$launch_json" | jq -r '.jobId // empty')
+else
+    dispatch_args=("${MRB}agent-dispatch.sh" start --engine codex \
+        --prompt-file "$prompt_file" --scratch-dir "$codex_dispatch_scratch")
+    [[ -n "$codex_crosscut_model" ]] && dispatch_args+=(--model "$codex_crosscut_model")
+    [[ -n "$codex_crosscut_effort" ]] && dispatch_args+=(--effort "$codex_crosscut_effort")
+    launch_json=$("${dispatch_args[@]}")
+    launch_rc=$?
+    xc_job_id=$(printf '%s' "$launch_json" | jq -r '.job_id // empty')
+fi
+set -e
 ```
 
-Capture `xc_job_id` from `.jobId`:
+A non-zero `launch_rc` or empty id enters §5.2.3's retry path.
+Cross-cutting is one pass over already validated findings, so use
+compressed ceilings:
 
 ```bash
-xc_job_id=$(node "$CODEX_COMPANION" task --background --effort "$effort" \
-    --prompt-file "$prompt_file" --json | jq -r '.jobId')
-```
-
-Poll via the watchdog helper. Cross-cutting is one pass over already-
-validated findings (no source-tree reads), so the ceiling is
-compressed further (8 min high / 12 min xhigh):
-
-```bash
-case "$effort" in
-    low)    ceiling=180 ;;    # 3 min
-    medium) ceiling=300 ;;    # 5 min
-    high)   ceiling=480 ;;    # 8 min
-    xhigh)  ceiling=720 ;;    # 12 min
+case "$codex_crosscut_effort" in
+    low)    ceiling=180 ;;
+    medium) ceiling=300 ;;
+    high)   ceiling=480 ;;
+    xhigh)  ceiling=720 ;;
+    max)    ceiling=960 ;;
+    ultra)  ceiling=1200 ;;
     *)      ceiling=480 ;;
 esac
 
-poll=$(codex-poll.sh \
+if [[ "$codex_launch_mode" == "companion" ]]; then
+    poll=$(codex-poll.sh \
         --job "$xc_job_id" \
         --companion "$CODEX_COMPANION" \
         --stall-threshold-sec 90 \
-        --wall-clock-ceiling-sec "$ceiling")
-verdict=$(printf '%s' "$poll" | jq -r '.verdict')
+        --wall-clock-ceiling-sec "$ceiling") || exit $?
+else
+    poll=$("${MRB}agent-dispatch.sh" poll \
+        --job "$xc_job_id" \
+        --scratch-dir "$codex_dispatch_scratch" \
+        --stall-threshold-sec 90 \
+        --wall-clock-ceiling-sec "$ceiling") || exit $?
+fi
+verdict=$(printf '%s\n' "$poll" | jq -er \
+  '.verdict | select(type == "string" and length > 0)') || exit $?
 ```
 
-Verdict-branching matches `fragments/01-codex-detection.md` §1.4's
-table. Direct calls to `node "$CODEX_COMPANION" status` are forbidden
-in this fragment (smoke `CR-13c` enforces).
-
-On `completed`, the verdict's `raw_output` is the freeform Codex
-stdout — the helper has already plucked the canonical
-`.storedJob.result.rawOutput // .storedJob.payload.rawOutput // .storedJob.rawOutput // ""`
-chain. Capture as `xc_codex_output`:
+On `completed`, capture the transport-neutral result:
 
 ```bash
-xc_codex_output=$(printf '%s' "$poll" | jq -r '.raw_output')
+xc_codex_output=$(printf '%s' "$poll" | jq -r '.raw_output // ""')
+xc_codex_tokens=$(printf '%s' "$poll" | jq -r '.tokens // "null"')
 ```
 
-On `broker_desynced` / `wall_clock_exceeded` / `failed_terminal`,
-cancel best-effort and route through §5.2.3's existing retry-or-
-escalate path (Phase 5 is observability, not correctness — failure
-just skips Phase 5 and ships the artifact without `cross_cutting_groups`):
+Empty output is retryable. `failed_terminal` and terminal `cancelled`
+enter §5.2.3 without another stop. Only `broker_desynced` (companion
+only) or `wall_clock_exceeded` needs cancellation before retry:
 
 ```bash
-( node "$CODEX_COMPANION" cancel "$xc_job_id" >/dev/null 2>&1 ) & disown   # fire-and-forget; `timeout` is GNU coreutils, not on stock macOS
+stop_verdict=not_requested
+if [[ "$codex_launch_mode" == "companion" ]]; then
+    ( node "$CODEX_COMPANION" cancel "$xc_job_id" >/dev/null 2>&1 ) & disown
+    stop_verdict=cancel_requested
+else
+    set +e
+    stop_result=$("${MRB}agent-dispatch.sh" stop \
+        --job "$xc_job_id" --scratch-dir "$codex_dispatch_scratch")
+    stop_rc=$?
+    set -e
+    stop_verdict=$(printf '%s\n' "$stop_result" | jq -ser \
+      --arg job "$xc_job_id" '
+        select(length == 1)
+        | .[0]
+        | select(
+            type == "object"
+            and .job_id == $job
+            and (
+              (.verdict == "cancelled" and .status == "cancelled")
+              or
+              (.verdict == "already_finished"
+               and .stop_noop == true
+               and (
+                 (.status == "completed" and .terminal_verdict == "completed")
+                 or
+                 (.status == "failed" and .terminal_verdict == "failed_terminal")
+               ))
+              or
+              (.verdict == "stop_failed"
+               and .status == "stop_failed"
+               and (.reason | type == "string" and length > 0)
+               and (.wrapper_alive | type == "boolean")
+               and (.engine_alive | type == "boolean"))
+            ))
+        | .verdict
+      ') || {
+        printf '%s\n' \
+          'ERROR: agent-dispatch.sh stop returned malformed, partial, or mismatched output.' \
+          'Action: inspect the job processes; do not retry as if cancellation succeeded.' >&2
+        exit 1
+    }
+    if [[ ( "$stop_rc" -eq 0 && "$stop_verdict" == "stop_failed" ) \
+          || ( "$stop_rc" -ne 0 && "$stop_verdict" != "stop_failed" ) ]]; then
+        printf 'ERROR: agent-dispatch.sh stop exited %s with verdict %s.\n' \
+          "$stop_rc" "$stop_verdict" >&2
+        exit 1
+    fi
+    case "$stop_verdict" in
+        cancelled)
+            : # terminal cancellation; retry policy may replace this job
+            ;;
+        already_finished)
+            poll=$("${MRB}agent-dispatch.sh" poll \
+                --job "$xc_job_id" \
+                --scratch-dir "$codex_dispatch_scratch" \
+                --stall-threshold-sec 90 \
+                --wall-clock-ceiling-sec "$ceiling") || exit $?
+            verdict=$(printf '%s\n' "$poll" | jq -er \
+              '.verdict | select(. == "completed" or . == "failed_terminal" or . == "cancelled")') \
+              || exit $?
+            xc_codex_output=$(printf '%s' "$poll" | jq -r '.raw_output // ""')
+            xc_codex_tokens=$(printf '%s' "$poll" | jq -r '.tokens // "null"')
+            ;;
+        stop_failed)
+            printf '%s\n' \
+              'ERROR: standalone Codex cancellation could not be verified.' \
+              'Action: inspect the authenticated wrapper/engine; do not launch a retry.' >&2
+            exit 1
+            ;;
+        *)
+            printf 'ERROR: unknown agent-dispatch stop verdict: %s\n' \
+              "$stop_verdict" >&2
+            exit 1
+            ;;
+    esac
+fi
 elapsed_for_log=$(printf '%s' "$poll" | jq -r '.elapsed_sec // "null"')
-printf 'phase_5_codex_watchdog: verdict=%s job=%s elapsed=%s\n' \
-    "$verdict" "$xc_job_id" "$elapsed_for_log" >> "$trace_log_path"
-# fall through to §5.2.3 retry-with-judgment / AskUserQuestion
+printf 'phase_5_codex_watchdog: mode=%s verdict=%s stop=%s job=%s elapsed=%s\n' \
+    "$codex_launch_mode" "$verdict" "$stop_verdict" "$xc_job_id" \
+    "$elapsed_for_log" >> "$trace_log_path"
 ```
+
+On `already_finished`, route the re-polled terminal verdict through the normal
+completed/failure branch before retry decisions. `stop_failed` blocks retry
+because the old engine may still be running.
 
 #### 5.2.3. Adaptive retry-with-judgment
 
@@ -174,7 +288,7 @@ Apply the §3.7 retry policy:
 
 1. On Codex job failure (non-zero exit, malformed output, or empty
    output), retry up to 3 times with the same prompt.
-2. If all 3 retries fail, dispatch `AskUserQuestion`:
+2. If all 3 retries fail, ASK:
 
    ```
    "Codex cross-cutting analysis failed after retry. Continue without
@@ -188,13 +302,13 @@ Apply the §3.7 retry policy:
    On Continue: log `phase_5_codex_dropped: continuing without groups`
    and proceed to Phase 6.
 
-#### 5.2.4. Sonnet shape-fixer
+#### 5.2.4. `normalizer`-role shape-fixer
 
-Dispatch ONE Sonnet `Agent` to canonicalize Codex's freeform output
+Dispatch ONE sub-agent with the resolved `normalizer` role to canonicalize Codex's freeform output
 into the structured shape:
 
 > You are normalizing one Codex cross-cutting analysis output into the
-> adamsreview cross_cutting_groups schema.
+> matthewsreview cross_cutting_groups schema.
 >
 > **Codex output (freeform):**
 >
@@ -239,13 +353,17 @@ into the structured shape:
 
 Capture the shape-fixer's response as `xc_response_json`.
 
-Log shape-fixer tokens:
+Log the Codex job and shape-fixer usage:
 
 ```bash
 log-tokens.sh \
   --review-dir "$review_dir" --phase phase_5 \
+  --agent-role codex_cross_cutting --agent-id "$xc_job_id" \
+  --model "$role_codex_crosscut" --tokens "$xc_codex_tokens"
+log-tokens.sh \
+  --review-dir "$review_dir" --phase phase_5 \
   --agent-role cross_cutting_shape_fixer --agent-id <id> \
-  --model sonnet --tokens <N or null>
+  --model "$role_normalizer" --tokens <N or null>
 ```
 
 ### 5.3. Apply the cross-cutting groups
@@ -256,30 +374,35 @@ write to a tmpfile, apply via `artifact-patch.py --set-json`:
 
 Mirror `fragments/06-cross-cutting.md` §5.3's pluck — accept either
 the envelope (with `.cross_cutting_groups`) or a bare groups array.
-The shape-fixer's prompt asks for the envelope, but a Sonnet that
+The shape-fixer's prompt asks for the envelope, but a normalizer that
 returns just the array shouldn't lose its work. The `// .` fallback
 is the same shape :review uses; `// []` would silently zero-out a
 valid bare-array response.
 
 ```bash
-jq -c '.cross_cutting_groups // .' <<<"$xc_response_json" \
-    > "/tmp/adams-review-ccg-$review_id.json"
+groups_tmp=$(mktemp -t matthews-review-ccg.XXXXXX)
+cleanup_groups_tmp() { rm -f "$groups_tmp" || true; }
+trap cleanup_groups_tmp EXIT HUP INT TERM
+if ! jq -c '.cross_cutting_groups // .' <<<"$xc_response_json" > "$groups_tmp"; then
+    printf 'phase_5_codex_groups_unparseable: shape-fixer output is invalid JSON; setting to []\n' \
+        >> "$trace_log_path"
+    printf '%s\n' '[]' > "$groups_tmp"
+fi
 
-# Defensive type-guard: if neither path produced an array (e.g. the
-# shape-fixer emitted a string or object), fall back to [] before
-# applying so artifact-patch.py's set-json doesn't choke on the type
-# mismatch and we still log a clean trace tag.
-if ! jq -e 'type == "array"' "/tmp/adams-review-ccg-$review_id.json" >/dev/null; then
+# Defensive type-guard: if neither path produced an array, fall back to [].
+if ! jq -e 'type == "array"' "$groups_tmp" >/dev/null; then
     printf 'phase_5_codex_groups_unparseable: shape-fixer output not an array; setting to []\n' \
         >> "$trace_log_path"
-    echo '[]' > "/tmp/adams-review-ccg-$review_id.json"
+    printf '%s\n' '[]' > "$groups_tmp"
 fi
 
 artifact-patch.py \
   --path "$artifact_path" \
-  --set-json "cross_cutting_groups=@/tmp/adams-review-ccg-$review_id.json"
-
-rm -f "/tmp/adams-review-ccg-$review_id.json"
+  --set-json "cross_cutting_groups=@$groups_tmp"
+patch_rc=$?
+cleanup_groups_tmp
+trap - EXIT HUP INT TERM
+[[ "$patch_rc" -eq 0 ]] || printf 'phase_5_codex_groups_apply_failed\n' >> "$trace_log_path"
 ```
 
 If `artifact-patch.py` rejects the write (schema validation — invalid
@@ -290,8 +413,9 @@ cross_cutting_groups. Same fallback as the original Opus path.
 Clean up the Phase 5 Codex prompt + output files:
 
 ```bash
-rm -f "/tmp/adams-review-codex-${review_id}-XC.md" \
-      "/tmp/adams-review-codex-${review_id}-XC.out.json"
+rm -f "/tmp/matthews-review-codex-${review_id}-XC.md" \
+      "/tmp/matthews-review-codex-${review_id}-XC.out.json"
+rm -rf -- "$codex_dispatch_scratch"
 ```
 
 ### 5.4. Log Phase 5 summary

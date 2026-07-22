@@ -2,8 +2,8 @@
 
 A two-pass Sonnet generation+verification chain produces an
 `auto_fix_hint` per eligible finding — pre-computing what
-`/adamsreview:walkthrough`'s per-finding briefer would write so that
-downstream `/adamsreview:fix` and `:walkthrough` can surface a
+`/matthewsreview:walkthrough`'s per-finding briefer would write so that
+downstream `/matthewsreview:fix` and `:walkthrough` can surface a
 batch-confirm UI instead of a per-finding interactive loop.
 
 Runs after Phase 5 cross-cutting and before Phase 6 finalize. Single
@@ -30,8 +30,8 @@ hints_before=$(artifact-read.sh \
 Read findings that qualify per the umbrella's predicate
 (`current_state == "open"` AND `human_confirmation == null` AND
 `auto_fix_hint == null` AND disposition ∈ {`confirmed_manual`,
-`confirmed_report`, `confirmed_mechanical`} AND `score_phase4 >= 60`
-AND disposition ≠ `pre_existing_report`):
+`confirmed_report`, `confirmed_mechanical`} AND `score_phase4 >=
+gates.phase4_bands[1]` AND disposition ≠ `pre_existing_report`):
 
 Lane is **not** gated here. Without this widening, dedup-induced
 lane/impact_type mismatches (a finding deduplicated from both a
@@ -46,24 +46,34 @@ and must be resolved via `:walkthrough` or `:promote` (Phase 8's
 `impact_type` filter alone does NOT pick up mismatched cases on the
 decline path).
 
+```bash
+confirmation_threshold=$(artifact-read.sh \
+  --path "$artifact_path" \
+  --filter '.gates.phase4_bands[1]')
+```
 <!-- AFH-PREDICATE-START -->
 ```bash
-eligible_findings=$(artifact-read.sh \
-  --path "$artifact_path" \
-  --filter '
-    [.findings[]
-       | select(.current_state == "open")
-       | select(.human_confirmation == null)
-       | select(.auto_fix_hint == null)
-       | select(.disposition != "pre_existing_report")
-       | select(
-           (.disposition == "confirmed_manual")
-           or (.disposition == "confirmed_report")
-           or (.disposition == "confirmed_mechanical")
-         )
-       | select(.score_phase4 != null and .score_phase4 >= 60)
-       | {id, file, line_range, claim, disposition, validation_lane, score_phase4, impact_type, validation_result}]
-  ')
+eligible_findings=$(
+  MATTHEWS_REVIEW_CONFIRM_THRESHOLD="$confirmation_threshold" \
+  artifact-read.sh \
+    --path "$artifact_path" \
+    --filter '
+      [.findings[]
+         | select(.current_state == "open")
+         | select(.human_confirmation == null)
+         | select(.auto_fix_hint == null)
+         | select(.disposition != "pre_existing_report")
+         | select(
+             (.disposition == "confirmed_manual")
+             or (.disposition == "confirmed_report")
+             or (.disposition == "confirmed_mechanical")
+           )
+         | select(
+             .score_phase4 != null
+             and .score_phase4 >= (env.MATTHEWS_REVIEW_CONFIRM_THRESHOLD | tonumber)
+           )
+         | {id, file, line_range, claim, disposition, validation_lane, score_phase4, impact_type, validation_result}]
+    ')
 eligible_count=$(printf '%s' "$eligible_findings" | jq 'length')
 ```
 <!-- AFH-PREDICATE-END -->
@@ -121,14 +131,15 @@ self-critique — independence is the second-opinion mechanism.
 ### 5.5.2. Generation pass — one Sonnet sub-agent per chunk
 
 ★ **Parallel dispatch — load-bearing.** Issue every generation
-sub-agent's `Agent` tool-use in a SINGLE orchestrator turn so they
+sub-agent's DISPATCH in a SINGLE batch (Prelude §3.4) so they
 run concurrently. Phase 5.5 wall-clock latency is
 `max(chunk_durations) * 2` (gen + verify), not
 `sum(chunk_durations) * 2`. Treating each chunk as its own turn
 serializes the lane.
 
-For each chunk file, launch ONE `Agent` tool-use with `model: sonnet`,
-`subagent_type: general-purpose`. Each gen sub-agent receives the
+For each chunk file, launch ONE sub-agent with role `fix_hint`
+(default claude:sonnet), `subagent_type: general-purpose`. Each gen
+sub-agent receives the
 chunk's findings (file content), `claude_md_paths` (absolute paths
 captured in Phase 0), and `repo_root`.
 
@@ -161,7 +172,7 @@ output:
 log-tokens.sh \
   --review-dir "$review_dir" --phase phase_5_5_gen \
   --agent-role auto_fix_hint_gen \
-  --agent-id <id-from-Agent-result> --model sonnet \
+  --agent-id <id-from-Agent-result> --model "$role_fix_hint" \
   --tokens <N or null>
 ```
 
@@ -181,8 +192,8 @@ verification sub-agents are independent of one another — fan them out
 in a SINGLE orchestrator turn.
 
 For each chunk that has a `${chunk_id}-gen.json` file (chunks dropped
-in §5.5.2 are skipped here), launch ONE `Agent` tool-use with
-`model: sonnet`. Each verify sub-agent receives:
+in §5.5.2 are skipped here), launch ONE sub-agent with role
+`fix_hint` (default claude:sonnet). Each verify sub-agent receives:
 
 - The chunk's original findings (`${chunk_id}.json`).
 - The gen pass's hints for that chunk (`${chunk_id}-gen.json`) —
@@ -209,7 +220,7 @@ After each verify sub-agent returns:
 log-tokens.sh \
   --review-dir "$review_dir" --phase phase_5_5_verify \
   --agent-role auto_fix_hint_verify \
-  --agent-id <id-from-Agent-result> --model sonnet \
+  --agent-id <id-from-Agent-result> --model "$role_fix_hint" \
   --tokens <N or null>
 ```
 

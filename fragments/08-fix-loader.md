@@ -2,18 +2,41 @@
 
 ### 7.1. Resolve argument flags
 
-Parse `$ARGUMENTS` (whitespace-split):
-- First token that parses as a non-negative integer → `threshold`.
-- `--granular-commits` → `granular_commits=true` (else `false`).
-- Any other token → stop and ask the user to clarify.
+Parse `$ARGUMENTS` left-to-right before any artifact lookup,
+`review-config.sh` call, or git/tree work:
 
-If no integer was provided, `threshold=60`. Record both
-in your working context.
+- Accept at most one positional threshold token. Validate the complete
+  original token as a finite JSON number in the inclusive range `[0, 100]`:
+
+  ```bash
+  jq -en --arg token "$token" '
+    ($token | fromjson) as $n
+    | (($n | type) == "number"
+       and (($n - $n) == 0)
+       and $n >= 0
+       and $n <= 100)
+  ' >/dev/null 2>&1
+  ```
+
+  Keep the original token as `threshold`; do not coerce it to an integer or
+  round it, so decimal thresholds retain their value. A second positional
+  token is a duplicate-threshold usage error.
+- `--granular-commits` → `granular_commits=true` (else `false`).
+- `--profile <name>` → `profile`; `--models "<csv>"` → `models_csv`.
+  Each value-taking flag requires the next non-empty token.
+- Reject a repeated flag, an unknown option, an unconsumed token, a
+  non-number, a non-finite number, or a number outside `[0, 100]` with a
+  usage error naming the valid invocation.
+
+Do not continue past parsing on any error. If no threshold was provided,
+step 7.2c sets it from the freshly resolved operational
+`gates.fix_threshold` (default 60). Capture `profile`, `models_csv`,
+`threshold`, and `granular_commits` in working context.
 
 ### 7.2. Locate the artifact via `latest.txt`
 
 ```bash
-reviews_root="${ADAMS_REVIEW_REVIEWS_ROOT:-$HOME/.adams-reviews}"
+reviews_root=$(review-root.sh)
 head_branch=$(git rev-parse --abbrev-ref HEAD)
 repo_root=$(git rev-parse --show-toplevel)
 ```
@@ -30,7 +53,7 @@ If `latest.txt` is missing or empty → abort with the user-visible
 message:
 
 > No review found for this branch (`$head_branch`) under
-> `$reviews_root/$repo_slug/`. Run `/adamsreview:review` first.
+> `$reviews_root/$repo_slug/`. Run `/matthewsreview:review` first.
 
 Otherwise read `review_id` from it:
 
@@ -38,29 +61,117 @@ Otherwise read `review_id` from it:
 review_id=$(tr -d '[:space:]' < "$latest_path")
 review_dir="$reviews_root/$repo_slug/$head_branch/$review_id"
 artifact_path="$review_dir/artifact.json"
+```
+
+### 7.2b. Capture paths and schema-validate the artifact
+
+```bash
 trace_log_path="$review_dir/trace.md"
 phases_log_path="$review_dir/phases.jsonl"
 tokens_log_path="$review_dir/tokens.jsonl"
+
+if ! validation_stderr=$(artifact-validate.sh --path "$artifact_path" 2>&1); then
+    printf '%s\n' "$validation_stderr" >> "$trace_log_path"
+    invalid_copy="/tmp/matthews-review-invalid-$(date -u +%Y%m%dT%H%M%SZ).json"
+    cp "$artifact_path" "$invalid_copy"
+    printf '%s\nInvalid artifact copy: %s\n' \
+        "$validation_stderr" "$invalid_copy" >&2
+    exit 1
+fi
 ```
 
-Capture all paths. Append a Phase 7 header to `trace.md`:
+A schema-invalid artifact means something upstream broke the invariant.
+Do NOT resolve/store a fresh model plan or otherwise mutate it first;
+surface the validator error and recovery copy to the user.
+
+### 7.2c. Resolve the model plan
+
+Resolve runtime roles/tiers and operational thresholds fresh for this
+invocation. Read repo configuration from the artifact's trusted comparison
+commit, never from the reviewed worktree. Preserve the classification
+provenance that produced the artifact's existing scores and dispositions:
+`phase3_gate` and `phase4_bands` remain the artifact values (or their
+normative defaults when absent), while `fix_threshold` and
+`walkthrough_threshold` come from the current trusted config.
+
+Persist the merged plan and its exact `.gates` object together so
+`model_plan.gates` and top-level `gates` cannot contradict one another:
 
 ```bash
-log-phase.sh \
-  --review-dir "$review_dir" --phase 7 --name fix-loader \
-  --summary "loading review $review_id; threshold=$threshold granular_commits=$granular_commits"
+if ! comparison_ref=$(
+  artifact-read.sh \
+    --path "$artifact_path" \
+    --filter '.base_context.comparison_ref' |
+  jq -er 'select(type == "string" and length > 0)'
+); then
+    printf '%s\n' \
+      'ERROR: artifact is missing trusted base_context.comparison_ref.' \
+      'Action: run /matthewsreview:review again before using /matthewsreview:fix.' >&2
+    exit 1
+fi
+classification_gates_json=$(artifact-read.sh \
+  --path "$artifact_path" \
+  --filter '{
+    phase3_gate: (.gates.phase3_gate // .model_plan.gates.phase3_gate // 45),
+    phase4_bands: (.gates.phase4_bands // .model_plan.gates.phase4_bands // [45, 60, 75])
+  }') || exit $?
+
+plan_args=(
+  --repo-root "$repo_root"
+  --orchestrator "$harness_id"
+  --repo-config-ref "$comparison_ref"
+)
+[[ -n "${profile:-}" ]] && plan_args+=(--profile "$profile")
+[[ -n "${models_csv:-}" ]] && plan_args+=(--models "$models_csv")
+runtime_model_plan_json=$(review-config.sh "${plan_args[@]}") || exit $?
+if [[ -z "${threshold:-}" ]]; then
+    threshold=$(printf '%s\n' "$runtime_model_plan_json" |
+      jq -er '.gates.fix_threshold') || exit $?
+fi
+
+model_plan_json=$(printf '%s\n' "$runtime_model_plan_json" |
+  jq -ce --argjson classification "$classification_gates_json" '
+    .gates.phase3_gate = $classification.phase3_gate
+    | .gates.phase4_bands = $classification.phase4_bands
+  ') || exit $?
+gates_json=$(printf '%s\n' "$model_plan_json" | jq -ce '.gates') || exit $?
+
+plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX) || exit $?
+plan_write_rc=0
+printf '%s\n' "$model_plan_json" > "$plan_tmp" || plan_write_rc=$?
+if [[ "$plan_write_rc" -ne 0 ]]; then
+    rm -f "$plan_tmp" 2>/dev/null || true
+    exit "$plan_write_rc"
+fi
+
+plan_patch_rc=0
+artifact-patch.py --path "$artifact_path" \
+  --set-json model_plan=@"$plan_tmp" \
+  --set-json gates="$gates_json" \
+  || plan_patch_rc=$?
+
+plan_cleanup_rc=0
+rm -f "$plan_tmp" || plan_cleanup_rc=$?
+if [[ "$plan_patch_rc" -ne 0 ]]; then
+    exit "$plan_patch_rc"
+fi
+if [[ "$plan_cleanup_rc" -ne 0 ]]; then
+    exit "$plan_cleanup_rc"
+fi
+
+printf '%s\n' "$model_plan_json" | jq -r '
+  "| Role | Engine | Model | Effort | Source |",
+  "|---|---|---|---|---|",
+  (.roles | to_entries[]
+   | "| \(.key) | \(.value.engine) | \(.value.model | if . == "" then "(cli default)" else . end) | \(.value.effort // "—") | \(.value.source) |"),
+  (.warnings[]? | "warning: \(.)")'
 ```
 
-### 7.3. Schema-validate the artifact
-
-```bash
-artifact-validate.sh --path "$artifact_path"
-```
-
-On non-zero: log the validator stderr to `trace.md`, dump a copy to
-`/tmp/adams-review-invalid-$(date -u +%Y%m%dT%H%M%SZ).json`,
-and abort. A schema-invalid artifact means something upstream broke
-the invariant; do NOT try to "fix" by patching — surface to the user.
+On non-zero from `review-config.sh`: surface the error-as-prompt stderr
+verbatim and stop. `$harness_id` is the Dispatch Protocol identity
+(`claude-code` / `omp` / `codex`). On any temp write, patch, or cleanup
+failure, exit with that operation's status after best-effort temp cleanup;
+never let `rm` mask an `artifact-patch.py` failure.
 
 ### 7.4. Leftover-`attempted` hard abort (§4 Phase 7 step 4)
 
@@ -73,7 +184,7 @@ leftover_ids=$(artifact-read.sh \
 If `leftover_ids` is non-empty, print the deterministic recovery
 message and abort (do NOT mutate state; the user decides):
 
-> ERROR: previous /adamsreview:fix run did not finish (N findings
+> ERROR: previous /matthewsreview:fix run did not finish (N findings
 > still in 'attempted').
 > The working tree may still contain partial fix edits from that run.
 >
@@ -85,7 +196,7 @@ message and abort (do NOT mutate state; the user decides):
 >      commit or stash them yourself if you want to keep them.
 >   3. For each leftover 'attempted' finding, reset state manually:
 >      artifact-patch.py --finding-id <id> --set current_state=open
->   4. Re-run /adamsreview:fix.
+>   4. Re-run /matthewsreview:fix.
 >
 > Leftover 'attempted' finding ids: `$leftover_ids`
 
@@ -107,10 +218,10 @@ Otherwise categorize (filenames only — do NOT dump diffs) and prompt:
 - **Staged**: lines starting with `A` / `M` in the index column (first char).
 - **Untracked**: lines starting with `??`.
 
-Dispatch `AskUserQuestion` once with two options:
+Dispatch ASK once with two options:
 
 - **Stash my changes, run fix, restore** (recommended). Run
-  `git stash push --include-untracked -m "pre-adams-review-fix-stash"`
+  `git stash push --include-untracked -m "pre-matthews-review-fix-stash"`
   immediately. Capture `stash_taken=true`. If the stash command fails
   (lock contention, invalid state): log stderr, abort —
   user resolves.
@@ -126,10 +237,10 @@ collide with in-flight edits.
 Derive `latest_known_sha`:
 
 ```bash
-latest_known_sha=$(jq -r '
-    ( [.findings[].fix_attempts[]?.output_sha | select(. != null)] | last )
-    // .reviewed_sha
-' "$artifact_path")
+latest_known_sha=$(artifact-read.sh \
+    --path "$artifact_path" \
+    --filter '([.findings[].fix_attempts[]?.output_sha | select(. != null)] | last) // .reviewed_sha' \
+    | jq -r '.')
 ```
 
 The fallback chain: most recent non-null `fix_attempts[-1].output_sha`
@@ -164,7 +275,7 @@ else
         printf 'staleness: %s\n' "$staleness_stdout" >> "$trace_log_path"
         echo "Reviewed files have changed since the last known-good SHA." >&2
         echo "$staleness_stdout" >&2
-        echo "Re-run /adamsreview:review, or check 'git log $latest_known_sha..HEAD' to see what moved." >&2
+        echo "Re-run /matthewsreview:review, or check 'git log $latest_known_sha..HEAD' to see what moved." >&2
         # Pop stash if we took one — don't leave the user's tree
         # behind a stash because we aborted before Phase 8 ran.
         if [[ "${stash_taken:-false}" == "true" ]]; then
@@ -203,12 +314,13 @@ inspecting `trace.md` later can distinguish a genuinely-up-to-date
 branch (`behind=0`) from a silently-degraded gate (also `behind=0`).
 When the fetch fails AND the local fallback resolves to `behind=0`,
 emit a `branch_behind_base degraded` trace line — the gate decides
-not to fire (no `AskUserQuestion` since `behind == 0`), but the
+not to fire (no ASK since `behind == 0`), but the
 operator still needs a trail showing the count came from a possibly
 stale local ref.
 
 ```bash
-base_branch=$(jq -r '.base_branch' "$artifact_path")
+base_branch=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.base_branch' | jq -r '.')
 fetch_ok=true
 if command -v timeout >/dev/null 2>&1; then
     GIT_TERMINAL_PROMPT=0 timeout 30 git fetch origin \
@@ -247,7 +359,7 @@ else
         merge_ref="$base_branch"
         if [[ "$behind" == "0" ]]; then
             # Degraded fail-silent path: fetch failed, local rev-list
-            # resolved to 0. The AskUserQuestion below won't fire (gated
+            # resolved to 0. The ASK below won't fire (gated
             # on `behind > 0`), so without this trace line `trace.md`
             # has no signal distinguishing "branch genuinely fresh" from
             # "fetch failed, local says 0 but local may be stale."
@@ -273,7 +385,7 @@ All three branches (Proceed / Stop / Abort) write a distinct
 `branch_behind_base <verdict>` audit line to `trace.md` so an operator
 reading the trace later can tell which path the user took.
 
-If `$behind > 0`, `AskUserQuestion` once:
+If `$behind > 0`, ASK once:
 
 > Branch `$head_branch` is `$behind` commits behind `$base_branch`.$fetch_note
 > The fix run will edit code that may merge-conflict with `$base_branch`,
@@ -282,7 +394,7 @@ If `$behind > 0`, `AskUserQuestion` once:
 
 - **(a) Stop — I'll merge `$merge_ref` into `$head_branch` first, then re-run.** Run the stash-pop block
   below if step 7.5 took one, then emit a `branch_behind_base stopped`
-  trace line, then exit 0 with: `Stopping. Run \`git merge $merge_ref\` (or fast-forward) on \`$head_branch\`, then re-run /adamsreview:fix.`
+  trace line, then exit 0 with: `Stopping. Run \`git merge $merge_ref\` (or fast-forward) on \`$head_branch\`, then re-run /matthewsreview:fix.`
   If `stash_pop_conflict=true`, append: `Stashed changes preserved — \`git stash list\` / \`git stash apply\` once tree is in desired state.`
   ```bash
   stash_pop_conflict=false
@@ -331,9 +443,12 @@ If `$behind > 0`, `AskUserQuestion` once:
 Load `mode` and `pr_number` from the artifact:
 
 ```bash
-mode=$(jq -r '.mode' "$artifact_path")
-pr_number=$(jq -r '.pr_number // empty' "$artifact_path")
-comment_id=$(jq -r '.comment_id // empty' "$artifact_path")
+mode=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.mode' | jq -r '.')
+pr_number=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.pr_number // empty' | jq -r '.')
+comment_id=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.comment_id // empty' | jq -r '.')
 ```
 
 If `mode == "pr"` AND `pr_number` is non-empty:
@@ -467,7 +582,7 @@ no tool call) covering every promotable finding. Surface
 **concerns** prominently — they are the load-bearing signal for
 "don't blindly accept this hint." Show concerns in their own column
 (or italicized inline below the row when the table would otherwise
-overflow) so the user sees them before the AskUserQuestion fires:
+overflow) so the user sees them before the ASK fires:
 
 ```markdown
 **$auto_rec_count auto-recommendation(s) ready for batch confirm.**
@@ -484,7 +599,19 @@ or skip if you want a closer look.
 | F012 | 80 | confirmed_mechanical (ux) | docs/api.md:200-215 | medium | Tighten the typo + casing in the example… | — |
 ```
 
-Build the rows from `$auto_rec_promotable` via jq. Columns:
+Build the rows from `$auto_rec_promotable` via jq. Define and use this
+location formatter, which branches before either nullable range element is
+indexed:
+
+```jq
+def location:
+  if .file == "(unknown)" then "(unknown)"
+  elif .line_range == null then .file
+  else "\(.file):\(.line_range[0])-\(.line_range[1])"
+  end;
+```
+
+Columns:
 - `id` — finding id.
 - `score` — `score_phase4` (always non-null per filter).
 - `disp` — `disposition` (suffixed with `(<impact_type>)` when
@@ -492,7 +619,9 @@ Build the rows from `$auto_rec_promotable` via jq. Columns:
   `correctness` or `security`, so the user can spot which mechanical
   findings are in the gap-case bucket — e.g. `confirmed_mechanical (ux)`
   for a deep+ux dedup-merge that needs the Phase 7.5 batch bypass).
-- `file:line` — `file` + `line_range[0]-line_range[1]`.
+- `file:line` — `location`: a known file with a null range displays the
+  file only; `(unknown)` stays `(unknown)`. Never render `null-null` or
+  fabricate line numbers.
 - `confidence` — `auto_fix_hint.confidence` (`high` / `medium` / `low`).
 - `hint` — `auto_fix_hint.hint`, truncated to ~80 chars + ellipsis if
   longer (full hint visible in the per-finding loop and the rendered
@@ -503,7 +632,7 @@ Build the rows from `$auto_rec_promotable` via jq. Columns:
   OR `second_opinion == "concerns"`, italicize the entire row's
   concerns text so the user can scan low-confidence rows at a glance.
 
-Then dispatch `AskUserQuestion` with **four single-select options**,
+Then ASK with **four single-select options**,
 default highlighted on the first:
 
 - "⭐ Apply all (recommended) — auto-promote $auto_rec_count finding(s) and run Phase 8"
@@ -636,14 +765,29 @@ per-iteration):
 autorec_batch_payload=()
 ```
 
-Loop over `$auto_rec_promotable` in order. For each entry:
+Loop over `$auto_rec_promotable` in order. For each entry, bind the
+current compact object to `$auto_rec_entry_json`, then derive the display
+location with the same null-safe branch used by the summary table:
+
+```bash
+auto_rec_location=$(printf '%s\n' "$auto_rec_entry_json" | jq -r '
+  if .file == "(unknown)" then "(unknown)"
+  elif .line_range == null then .file
+  else "\(.file):\(.line_range[0])-\(.line_range[1])"
+  end
+')
+```
+
+Do not index the range before the null branch. A known file with no range
+displays only the file; `(unknown)` remains locationless and must not trigger
+a Read request.
 
 1. **Render the brief** (orchestrator emits markdown directly):
 
    ```markdown
    ## $finding_id — <first line of claim>
 
-   **File:** `$file:$line_start-$line_end`
+   **File:** `$auto_rec_location`
    **Score:** $score_phase4 · **Disposition:** $disposition
 
    **Recommended hint** (confidence: $confidence): <auto_fix_hint.hint>
@@ -657,7 +801,7 @@ Loop over `$auto_rec_promotable` in order. For each entry:
    **Concerns:** <concerns joined with "; ">
    ```
 
-2. **Dispatch `AskUserQuestion`** with options:
+2. **Dispatch the ASK primitive** with options:
    - "⭐ Promote with this hint (recommended)" — uses
      `--apply-auto-rec-promotions` (the helper sources hint from
      `auto_fix_hint.hint`).
@@ -665,7 +809,7 @@ Loop over `$auto_rec_promotable` in order. For each entry:
      **$alt_i.label**: $alt_i.title" — falls through to the
      `promote-core.md` path with `fix_hint = alt_i.hint`.
    - "✎ Edit the hint" — captures a free-form replacement string via
-     a follow-up `AskUserQuestion`, then promotes via
+     a follow-up the ASK primitive, then promotes via
      `promote-core.md` with the edited hint.
    - "Skip this finding".
 
@@ -841,13 +985,16 @@ Skip when no promotions or edits landed (i.e. both `promoted_ids` and
 populated are degenerate and shouldn't post a no-op comment).
 
 ```bash
+autorec_artifact_snapshot=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.')
+
 if [[ "$mode" == "pr" && -n "$pr_number" ]] && \
    (( ${#promoted_ids[@]} > 0 || ${#edited_ids[@]} > 0 )); then
-    decisions_body=$(mktemp -t adams-fix-autorec-body.XXXXXX)
-    err_tmp=$(mktemp -t adams-fix-autorec-gh-err.XXXXXX)
+    decisions_body=$(mktemp -t matthews-fix-autorec-body.XXXXXX)
+    err_tmp=$(mktemp -t matthews-fix-autorec-gh-err.XXXXXX)
 
     {
-        printf '<!-- adams-review-fix-autorec-v1 -->\n'
+        printf '<!-- matthews-review-fix-autorec-v1 -->\n'
         printf '### Auto-recommendation acceptance\n\n'
         printf '`%s` · run_id=%s · choice=%s · threshold=%s · reviewer=%s · ts=%s\n\n' \
             "$review_id" "$run_id" "$auto_rec_choice" "$threshold" "$auto_rec_reviewer" "$auto_rec_ts"
@@ -856,12 +1003,12 @@ if [[ "$mode" == "pr" && -n "$pr_number" ]] && \
         if (( ${#promoted_ids[@]} > 0 )); then
             printf '#### Promoted (batch)\n\n'
             for fid in "${promoted_ids[@]}"; do
-                claim_first=$(jq -r --arg id "$fid" \
-                    '.findings[] | select(.id == $id) | .claim | split("\n") | .[0]' \
-                    "$artifact_path")
-                hint=$(jq -r --arg id "$fid" \
-                    '.findings[] | select(.id == $id) | .auto_fix_hint.hint' \
-                    "$artifact_path")
+                claim_first=$(printf '%s' "$autorec_artifact_snapshot" \
+                    | jq -r --arg id "$fid" \
+                        '.findings[] | select(.id == $id) | .claim | split("\n") | .[0]')
+                hint=$(printf '%s' "$autorec_artifact_snapshot" \
+                    | jq -r --arg id "$fid" \
+                        '.findings[] | select(.id == $id) | .auto_fix_hint.hint')
                 printf -- '- **%s** — %s\n  - **Hint:** `%s`\n' "$fid" "$claim_first" "$hint"
             done
             printf '\n'
@@ -869,12 +1016,12 @@ if [[ "$mode" == "pr" && -n "$pr_number" ]] && \
         if (( ${#edited_ids[@]} > 0 )); then
             printf '#### Promoted (alternative or edited hint)\n\n'
             for fid in "${edited_ids[@]}"; do
-                claim_first=$(jq -r --arg id "$fid" \
-                    '.findings[] | select(.id == $id) | .claim | split("\n") | .[0]' \
-                    "$artifact_path")
-                hint=$(jq -r --arg id "$fid" \
-                    '.findings[] | select(.id == $id) | .human_confirmation.fix_hint // "—"' \
-                    "$artifact_path")
+                claim_first=$(printf '%s' "$autorec_artifact_snapshot" \
+                    | jq -r --arg id "$fid" \
+                        '.findings[] | select(.id == $id) | .claim | split("\n") | .[0]')
+                hint=$(printf '%s' "$autorec_artifact_snapshot" \
+                    | jq -r --arg id "$fid" \
+                        '.findings[] | select(.id == $id) | .human_confirmation.fix_hint // "—"')
                 printf -- '- **%s** — %s\n  - **Hint:** `%s`\n' "$fid" "$claim_first" "$hint"
             done
             printf '\n'
@@ -882,15 +1029,15 @@ if [[ "$mode" == "pr" && -n "$pr_number" ]] && \
         if (( ${#skipped_ids[@]} > 0 )); then
             printf '#### Skipped during per-finding review\n\n'
             for fid in "${skipped_ids[@]}"; do
-                claim_first=$(jq -r --arg id "$fid" \
-                    '.findings[] | select(.id == $id) | .claim | split("\n") | .[0]' \
-                    "$artifact_path")
+                claim_first=$(printf '%s' "$autorec_artifact_snapshot" \
+                    | jq -r --arg id "$fid" \
+                        '.findings[] | select(.id == $id) | .claim | split("\n") | .[0]')
                 printf -- '- **%s** — %s\n' "$fid" "$claim_first"
             done
             printf '\n'
         fi
         printf '---\n\n'
-        printf 'Auto-recommendation acceptance: append-only audit. Each `/adamsreview:fix` run posts a fresh entry. Promoted findings are now `confirmed_mechanical` with `human_confirmation` set; Phase 8 dispatches them next.\n'
+        printf 'Auto-recommendation acceptance: append-only audit. Each `/matthewsreview:fix` run posts a fresh entry. Promoted findings are now `confirmed_mechanical` with `human_confirmation` set; Phase 8 dispatches them next.\n'
     } > "$decisions_body"
 
     set +e

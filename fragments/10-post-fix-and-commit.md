@@ -37,7 +37,7 @@ fi
 
 Delete-leak (`deleted_paths` non-empty) goes straight to abort — v1 revert
 can't handle deletes and neither can reconcile, so no merge offer. For
-plain overlap, offer a three-way `AskUserQuestion` before abort.
+plain overlap, offer a three-way the ASK primitive before abort.
 
 Snapshot for commit message + trace:
 
@@ -62,7 +62,7 @@ Fix agents touched overlapping files:
 Choose how to proceed.
 ```
 
-Dispatch `AskUserQuestion` with three options; Abort highlighted as default:
+Dispatch ASK with three options; Abort highlighted as default:
 
 - "⭐ Abort (recommended) — discard all edits, restore tree, reset state, re-run manually"
 - "Reconcile — dispatch one merge agent to combine edits, then run full Phase 9 review"
@@ -211,13 +211,13 @@ Rules:
   pick a winner.
 ```
 
-Dispatch ONE `Agent` tool-use with `subagent_type: general-purpose`,
-`model: opus`.
+Dispatch ONE sub-agent with `subagent_type: general-purpose`, role
+`reconcile` (default claude:opus).
 
 After the agent returns:
 
 1. **Log tokens** via `log-tokens.sh --phase phase_9_reconcile
-   --agent-role reconcile --model opus`. (Match Phase 8 §8.6 step 1 —
+   --agent-role reconcile --model "$role_reconcile"`. (Match Phase 8 §8.6 step 1 —
    always log tokens before branching on content so cost is accounted
    even when output fails to parse.)
 
@@ -479,7 +479,7 @@ Reached from `abort`, delete-leak short-circuit, or reconcile fallback.
 
 5. Jump to 9e **no-commit branch**. User-visible error after terminal cleanup:
 
-   > ERROR: /adamsreview:fix aborted before commit — fix agents
+   > ERROR: /matthewsreview:fix aborted before commit — fix agents
    > touched overlapping files across groups.
    >
    > Overlapping files: `<files>`
@@ -492,12 +492,12 @@ Reached from `abort`, delete-leak short-circuit, or reconcile fallback.
    >   3. Reset each affected finding's current_state:
    >      artifact-patch.py --finding-id <id> --set current_state=open
    >      (ids listed in `trace.md`)
-   >   4. Re-run /adamsreview:fix.
+   >   4. Re-run /matthewsreview:fix.
 
    On `reconcile_fallback`, swap the first line for the variant below,
    interpolating `$reconcile_fallback_reason` (§9.pre.reconcile step 3):
 
-   > ERROR: /adamsreview:fix — reconcile attempt failed, aborted before
+   > ERROR: /matthewsreview:fix — reconcile attempt failed, aborted before
    > commit. Reason: `$reconcile_fallback_reason`. The working tree holds
    > the Phase-8 agent edits plus any partial merge-agent edits; recovery
    > steps 1–4 above apply unchanged (`git restore .` + `git clean -fd`
@@ -507,8 +507,8 @@ Reached from `abort`, delete-leak short-circuit, or reconcile fallback.
 
 ### 9a. Phase 9 post-fix review (one Opus sub-agent)
 
-Dispatch ONE `Agent` (`subagent_type: general-purpose`, `model: opus`)
-carrying the §19.9 prompt. Embeds all attempted findings, Phase 8 per-group
+Dispatch ONE sub-agent (`subagent_type: general-purpose`, role
+`post_fix_review` — default claude:opus) carrying the §19.9 prompt. Embeds all attempted findings, Phase 8 per-group
 results, and the unstaged working-tree diff.
 
 Capture the diff snapshot before dispatch:
@@ -529,7 +529,8 @@ downstream or the reviewer agent's interpretation.
 # Per-finding context (id, file, line_range, claim, validation_result.*).
 # printf '%s', not echo — see operational rule 12.
 attempted_ids_json=$(printf '%s' "$fix_groups_with_actual" | jq -c '[.[].finding_ids[]] | unique')
-jq --argjson ids "$attempted_ids_json" --argjson groups "$fix_groups_with_actual" '
+artifact-read.sh --path "$artifact_path" --filter '.' \
+  | jq --argjson ids "$attempted_ids_json" --argjson groups "$fix_groups_with_actual" '
     [ .findings[] | select(.id | IN($ids[])) | . as $f | {
         id, file, line_range, claim,
         evidence:               .validation_result.evidence,
@@ -537,7 +538,7 @@ jq --argjson ids "$attempted_ids_json" --argjson groups "$fix_groups_with_actual
         fix_proposal:           .validation_result.fix_proposal,
         verification_context:   .validation_result.verification_context,
         fix_group_id:           ($groups[] | select(.finding_ids | index($f.id)) | .id)
-    } ]' "$artifact_path" > /tmp/9a-findings-$run_id.json
+    } ]' > /tmp/9a-findings-$run_id.json
 
 # Per-group results (Phase 8 self-report)
 printf '%s' "$fix_groups_with_actual" | jq '[.[] | {
@@ -557,9 +558,22 @@ You are the Phase 9 post-fix reviewer. Fix groups edited the working
 tree; nothing committed yet. Review each attempted finding against the
 current tree and classify.
 
+Source of truth (two pinned baselines — the working tree may have
+drifted since either was captured):
+- Finding evidence was validated against the review's `reviewed_sha`
+  ($reviewed_sha) — when you need the ORIGINAL code a finding
+  references, read it via `git show $reviewed_sha:<path>`.
+- Fix deltas are measured against `input_sha` ($input_sha, the tree
+  state when Phase 7 loaded) — when you need the pre-edit version of
+  a file a fix group touched, read it via `git show $input_sha:<path>`.
+If `git rev-parse HEAD` matches neither, the tree drifted mid-run —
+note `head_drift: true` in your per-finding evidence and continue
+against the pinned SHAs regardless.
+
 Run identity:
 - run_id: $run_id
 - input_sha: $input_sha
+- reviewed_sha: $reviewed_sha
 
 Attempted findings and their validation contexts:
 <jq output: each attempted finding's id, file, line_range, claim, plus
@@ -663,7 +677,7 @@ Return JSON of exactly this shape:
 After the agent returns:
 
 1. **Log tokens** via `log-tokens.sh --phase phase_9 --agent-role
-   post_fix_review --model opus`.
+   post_fix_review --model "$role_post_fix_review"`.
 2. Parse JSON; light repair + one retry on parse failure.
 3. Full parse failure after retry: mark every attempted finding as
    `outcome: partial` with `phase_9_finding: "phase 9 reviewer parse
@@ -706,22 +720,45 @@ reverted_count=$(echo "$reverted_groups" | jq 'length')
 surviving_count=$(echo "$surviving_groups" | jq 'length')
 ```
 
+```bash
+# Finding-level counts for user-visible summaries. Every finding in a
+# reverted group is a regression because the whole group's edits were
+# restored, even if the reviewer marked a sibling finding verified.
+surviving_finding_ids=$(printf '%s' "$surviving_groups" | jq -c \
+    '[.[].finding_ids[]] | unique')
+reverted_finding_ids=$(printf '%s' "$reverted_groups" | jq -c \
+    '[.[].finding_ids[]] | unique')
+surviving_finding_count=$(printf '%s' "$surviving_finding_ids" | jq 'length')
+regression_finding_count=$(printf '%s' "$reverted_finding_ids" | jq 'length')
+verified_finding_count=$(jq -nc \
+    --argjson ids "$surviving_finding_ids" \
+    --argjson outcomes "$phase_9a_outcomes" \
+    '[$outcomes[] | select(.finding_id | IN($ids[])) | select(.outcome == "verified")] | length')
+partial_finding_count=$((surviving_finding_count - verified_finding_count))
+retry_eligible_finding_count=$((partial_finding_count + regression_finding_count))
+reverted_names=$(printf '%s' "$reverted_groups" | jq -r '[.[].id] | join(", ")')
+```
+
 **Revert each regression group** (§4 Phase 9b):
 
 ```bash
 revert_failed=false
 revert_failure_detail=""
-for row in $(echo "$reverted_groups" | jq -c '.[]'); do
-    group_id=$(echo "$row" | jq -r '.id')
-    # Restore each modified file to pre-Phase-8 content
-    for f in $(echo "$row" | jq -r '.files_modified[]?'); do
+while IFS= read -r row; do
+    group_id=$(printf '%s' "$row" | jq -r '.id')
+    # Index arrays instead of iterating command substitution: paths may
+    # contain spaces and must remain one argument to git/rm.
+    modified_count=$(printf '%s' "$row" | jq '.files_modified | length')
+    for ((file_i = 0; file_i < modified_count; file_i++)); do
+        f=$(printf '%s' "$row" | jq -r --argjson i "$file_i" '.files_modified[$i]')
         if ! git checkout -- "$f" 2>>"$trace_log_path"; then
             revert_failed=true
             revert_failure_detail="$revert_failure_detail; git checkout -- $f failed in $group_id"
         fi
     done
-    # Remove created files
-    for f in $(echo "$row" | jq -r '.files_created[]?'); do
+    created_count=$(printf '%s' "$row" | jq '.files_created | length')
+    for ((file_i = 0; file_i < created_count; file_i++)); do
+        f=$(printf '%s' "$row" | jq -r --argjson i "$file_i" '.files_created[$i]')
         if ! rm -f -- "$f" 2>>"$trace_log_path"; then
             revert_failed=true
             revert_failure_detail="$revert_failure_detail; rm -f $f failed in $group_id"
@@ -729,10 +766,10 @@ for row in $(echo "$reverted_groups" | jq -c '.[]'); do
     done
     printf 'reverted group=%s files_modified=%s files_created=%s\n' \
         "$group_id" \
-        "$(echo "$row" | jq -c '.files_modified')" \
-        "$(echo "$row" | jq -c '.files_created')" \
+        "$(printf '%s' "$row" | jq -c '.files_modified')" \
+        "$(printf '%s' "$row" | jq -c '.files_created')" \
         >> "$trace_log_path"
-done
+done < <(printf '%s' "$reverted_groups" | jq -c '.[]')
 ```
 
 **On revert failure** (§24.2): do NOT commit or proceed to 9c. Log to
@@ -793,7 +830,7 @@ whole run (committed + reverted). Heredoc file, not `-m "$(...)"`, so
 `$`/backticks/quotes in claims don't need escaping:
 
 ```bash
-msg_file="/tmp/adams-fix-msg-$run_id.txt"
+msg_file="/tmp/matthews-fix-msg-$run_id.txt"
 reconciled_flag=$(echo "$fix_groups" | jq -r '.[0].id == "FG-RECON"')
 {
     if [[ "$reconciled_flag" == "true" ]]; then
@@ -832,7 +869,7 @@ reconciled_flag=$(echo "$fix_groups" | jq -r '.[0].id == "FG-RECON"')
     partial_count=$(echo "$group_outcomes" | jq '[.[] | select(.outcome == "partial")] | length')
     echo "Post-fix review: $verified_count/$surviving_count groups verified complete; $partial_count group(s) partial; $reverted_count group(s) reverted."
     if [[ "$partial_count" -gt 0 || "$reverted_count" -gt 0 ]]; then
-        echo "Re-run /adamsreview:fix to address partial and regression findings (retry with revised_fix_proposal context)."
+        echo "Re-run /matthewsreview:fix to address partial and regression findings (retry with revised_fix_proposal context)."
     fi
 } > "$msg_file"
 ```
@@ -904,7 +941,7 @@ apply_tuples=$(jq -nc \
               fix_group_id: $gm.group,
               input_sha: $input_sha,
               output_sha: (if $gm.group_outcome == "regression" then null else $commit_sha end),
-              phase_9_outcome: $o.outcome,
+              phase_9_outcome: (if $gm.group_outcome == "regression" then "regression" else $o.outcome end),
               timestamp: $ts
             }
           # Attach phase_9_finding + revised_fix_proposal only when present
@@ -934,7 +971,7 @@ abort the block. `commit_sha` from 9c distinguishes the two branches.
 1. **fix_attempts + state transitions** — done in 9d above.
 
 2. **Re-tally `subagent_tokens` and `orchestrator_tokens`** so the
-   artifact reflects cumulative spend across `/adamsreview:review` + this
+   artifact reflects cumulative spend across `/matthewsreview:review` + this
    fix run (Phase 9a/9b/9c reviewer + any 9.pre.reconcile agent, plus
    every orchestrator turn since `review_started_at`). `tokens.jsonl` and
    transcript files are append-only; this is pure readback:
@@ -945,7 +982,8 @@ abort the block. `commit_sha` from 9c distinguishes the two branches.
      --artifact   "$artifact_path" \
      2>>"$trace_log_path" || printf 'tally_failed\n' >> "$trace_log_path"
 
-   review_started_at=$(jq -r '.review_started_at // empty' "$artifact_path")
+   review_started_at=$(artifact-read.sh \
+     --path "$artifact_path" --filter '.review_started_at // empty' | jq -r '.')
 
    orchestrator-tokens.sh \
      --artifact "$artifact_path" \
@@ -1083,33 +1121,101 @@ abort the block. `commit_sha` from 9c distinguishes the two branches.
      changes preserved — `git stash list` / `git stash apply` once
      tree is in desired state."
 
-   If none: mirror the rendered `artifact.md` to chat (full content, not
-   a summary — matches Phase 6). Then a user-visible summary. On
-   `reconciled_flag == true`, swap the first two lines for a reconcile-
-   specific summary naming the original group count and overlap:
+   Before rendering the summary, count remaining walkthrough work with
+   the walkthrough command's selector (including configured gates):
 
-   > `/adamsreview:fix complete (reconciled).`
+   ```bash
+   remaining_walkthrough=$(jq -r '
+     (.gates.fix_threshold // 60) as $fix_thr
+     | (.gates.walkthrough_threshold // 60) as $walk_thr
+     | def fix_disposition:
+         (.disposition == "confirmed_mechanical"
+          or .disposition == "partial"
+          or .disposition == "regression");
+       def auto_eligible:
+         fix_disposition
+         and (
+           .human_confirmation != null
+           or (
+             (.impact_type == "correctness" or .impact_type == "security")
+             and (.score_phase4 != null and .score_phase4 >= $fix_thr)
+           )
+         );
+       [.findings[]
+        | select(.current_state == "open")
+        | select(.disposition != "resolved"
+                 and .disposition != "disproven"
+                 and .disposition != "pending_validation"
+                 and .disposition != "below_gate"
+                 and .disposition != "pre_existing_report")
+        | select(.human_confirmation == null)
+        | select(auto_eligible | not)
+        | select((.score_phase4 // .score_phase3 // -1) >= $walk_thr)
+       ] | length
+   ' "$artifact_path")
+   ```
+
+   If none: select the chat mirror, then emit its full content before the
+   user-visible summary:
+
+   ```bash
+   mirror_path="$review_dir/artifact.md"
+   if [[ "$mode" == "pr" \
+         && "$publish_failed" == "false" \
+         && -f "$review_dir/published.md" ]]; then
+       mirror_path="$review_dir/published.md"
+   fi
+   ```
+
+   `published.md` is the exact body selected by `artifact-publish.sh`; use it
+   after a successful PR publication so overflow compaction is identical in
+   chat and on GitHub. Local mode and failed publication keep the full
+   `artifact.md` mirror. This matches Phase 6.
+
+   Then emit the completion summary. On `reconciled_flag == true`, swap the
+   first two lines for a reconcile-specific summary naming the original group
+   count and overlap:
+
+   > `/matthewsreview:fix complete (reconciled).`
    >
    > Reconciled one merge pass covering $reconciled_finding_count
    > finding(s) across $reconciled_file_count file(s), merged from
    > $original_group_count originally-parallel fix groups that
-   > collided on $overlap_count file(s). Outcome: $verified_count
-   > verified, $partial_count partial, $reverted_count regression.
+   > collided on $overlap_count file(s). Outcome:
+   > $verified_finding_count verified, $partial_finding_count partial,
+   > $regression_finding_count regression.
 
    Otherwise (non-reconciled run):
 
-   > `/adamsreview:fix complete.`
+   > `/matthewsreview:fix complete.`
    >
-   > Committed: $surviving_count groups ($(attempted-count-verified+partial) findings → $verified_count verified, $partial_count partial).
-   > Reverted:  $reverted_count groups ($regression-count findings → regression detected).
+   > Committed: $surviving_count group(s)
+   > ($surviving_finding_count finding(s) →
+   > $verified_finding_count verified, $partial_finding_count partial).
+   > Reverted: $reverted_count group(s)
+   > ($regression_finding_count finding(s) → regression detected).
 
-   Either variant ends with the same trailing block:
+   Either variant ends with:
 
-   > $((partial_count + regression_count)) findings remain open and retry-eligible.
-   > Re-run /adamsreview:fix to attempt again with revised_fix_proposal context.
+   > $retry_eligible_finding_count finding(s) remain open and
+   > retry-eligible. [only when retry_eligible_finding_count > 0]
+   > Re-run `/matthewsreview:fix` to attempt them again with
+   > `revised_fix_proposal` context.
+   > [only when retry_eligible_finding_count > 0]
    >
    > Commit: `$commit_sha`
    > PR comment: (URL if PR mode AND publish succeeded)
+
+   Then emit a **Still open** block only when at least one child row
+   applies:
+
+   > **Still open**
+   > - `/matthewsreview:walkthrough` — $remaining_walkthrough finding(s)
+   >   need human judgment. [only when remaining_walkthrough > 0]
+   > - Reverted group(s) $reverted_names need manual attention — the
+   >   Phase 9 review rejected their edits. Inspect the affected findings
+   >   in `artifact.md` and the Phase 9 evidence in `trace.md`.
+   >   [only when reverted_count > 0]
 
 #### No-commit branch (`commit_sha == null`)
 
@@ -1133,6 +1239,7 @@ for step 8.
      artifact reflects reality before the rest of 9e runs:
      ```bash
      if [[ "$all_regression" == "true" ]]; then
+        ts=${ts:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
          # 9d is skipped on all-regression, so $group_by_finding is not
          # yet computed. Build from $group_outcomes (set in 9b).
          group_by_finding=$(echo "$group_outcomes" | jq -c '
@@ -1160,7 +1267,7 @@ for step 8.
                  | ($group_map[] | select(.id == $o.finding_id)) as $gm
                  | {id:$o.finding_id, run_id:$run_id, fix_group_id:$gm.group,
                     input_sha:$input_sha, output_sha:null,
-                    phase_9_outcome:$o.outcome,
+                    phase_9_outcome:"regression",
                     timestamp:$ts}
                  + (if ($o.phase_9_finding // null) != null then {phase_9_finding:$o.phase_9_finding} else {} end)
                  + (if ($o.revised_fix_proposal // null) != null then {revised_fix_proposal:$o.revised_fix_proposal} else {} end)
@@ -1210,31 +1317,43 @@ for step 8.
 7. **No push, no publish** — no commit, nothing to ship. The artifact-
    side update still matters for next-run staleness and user inspection.
 
-8. **Surface user-visible degenerate-case error:**
+8. **Count remaining walkthrough work** using the exact
+   `remaining_walkthrough` jq selector from the committed branch above.
+   This runs after artifact state transitions and applies to every
+   degenerate path.
+
+9. **Surface user-visible degenerate-case error:**
 
    - `overlap_abort` → the overlap message from 9.pre.abort step 5.
    - `reconcile_fallback` → the reconcile-fallback variant of 9.pre.abort
      step 5 (same recovery, first line names the fallback reason).
    - `overlap_inspect` → "Working tree left as-is for manual review.
      Overlapping files: `$overlap_files_snapshot_summary`. Findings
-     remain `current_state=attempted` — next /adamsreview:fix hard-aborts
+     remain `current_state=attempted` — next /matthewsreview:fix hard-aborts
      with the leftover-attempted recovery prompt. When ready: either
      commit manually and run `artifact-patch.py --finding-id <id> --set
      current_state=open` on the affected findings, or `git restore . &&
      git clean -fd` to discard. Stash (if any) preserved at `git stash
      list`."
-   - `all_regression` → "All $reverted_count fix groups regressed. Tree
-     restored; no commit. `$(partial-plus-regression count)` findings are
-     retry-eligible with revised_fix_proposal context. Re-run
-     /adamsreview:fix." (Reconciled all-regression: merge reverted
-     atomically — one "group" of many findings. Same message applies.)
+   - `all_regression` → "All $reverted_count fix groups
+     ($regression_finding_count findings) regressed. Reverted group(s):
+     $reverted_names. Tree restored; no commit. The findings are
+     retry-eligible with `revised_fix_proposal` context; re-run
+     `/matthewsreview:fix`, or inspect their Phase 9 evidence in
+     `artifact.md` and `trace.md` before fixing manually." (Reconciled
+     all-regression: the synthetic group names one atomic reverted merge
+     of all findings. Same message applies.)
    - `revert_failed` → "Per-group revert failed. Tree is in an unknown
      state — do NOT run destructive git commands without inspecting
      first. `$revert_failure_detail`. Stash (if any) preserved at `git
      stash list`. See `$trace_log_path`. Once resolved manually, reset
-     `current_state` on affected findings and re-run /adamsreview:fix."
-   - `no_eligible` → "No fix-eligible findings at threshold=$threshold.
-     Nothing to do." (Clean no-op, no error prefix.)
+     `current_state` on affected findings and re-run
+     `/matthewsreview:fix`."
+   - `no_eligible` → "No fix-eligible findings at
+     threshold=$threshold. Nothing to do." Then, when
+     `remaining_walkthrough > 0`, append:
+     "`/matthewsreview:walkthrough` has $remaining_walkthrough open
+     finding(s) for human judgment." (Clean no-op, no error prefix.)
 
 Terminal invariant: regardless of branch, the on-disk artifact is
 schema-valid and tracks git reality. A partially failed terminal block

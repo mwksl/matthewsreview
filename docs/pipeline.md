@@ -1,9 +1,12 @@
 # Pipeline detail
 
 Detailed phase trees for each lifecycle command, plus the token-tally semantics.
-CLAUDE.md keeps a one-paragraph summary per command; this file is the reference.
+AGENTS.md keeps a one-paragraph summary per command; this file is the reference.
 
-## `/adamsreview:review [--ensemble] [--full]`
+## `/matthewsreview:review [--ensemble] [--full] [--profile <name>] [--models "<csv>"]`
+
+To select a Codex effort for ensemble detection, use the supported model-plan
+override `--models 'ensemble_detect=codex::<effort>'`.
 
 ```
 ├── Phase 0 — Pre-flight (branch/PR detect, base-branch freshness,
@@ -35,22 +38,22 @@ CLAUDE.md keeps a one-paragraph summary per command; this file is the reference.
                render, PR comment POST)
 ```
 
-## `/adamsreview:codex-review [--effort <low|medium|high|xhigh>] [--full]`
+## `/matthewsreview:codex-review [--effort <low|medium|high|xhigh|max|ultra>] [--full] [--profile <name>] [--models "<csv>"]`
 
 ```
-├── Codex readiness gate (find codex-companion.mjs; `setup --json` ready?
-│     fail-fast on missing/not-ready — no Claude fallback; suggest /codex:setup —
-│     EXCEPT the documented shared-mode cold-start broker-ENOENT shape, which is
-│     bypassed because `auth.loggedIn` requires the broker socket and that only
-│     exists once a task runs; first lens dispatch warms it)
+├── Codex transport gate (prefer a ready codex-companion; preserve the
+│     documented shared-mode cold-start broker-ENOENT bypass; otherwise use
+│     an authenticated standalone `codex` CLI through agent-dispatch.sh;
+│     fail only when neither transport is usable — never fall back to Claude)
 ├── Phase 0 — Pre-flight (same fragment as :review; passes `--reviewer-sources
 │              internal-codex` to artifact-seed.sh so the seeded artifact
 │              carries reviewer_sources: ["internal-codex"])
-├── Phase 1 — Codex detection (7 parallel `node $CODEX_COMPANION task
-│              --background --effort $effort` jobs, one per lens L1–L7;
-│              prompt body = fragments/lens-prompts/_shared-invariants.md +
-│              fragments/lens-prompts/L<N>.md with $claude_md_paths and
-│              $prior_fix_suspects substituted; poll via codex-poll.sh
+├── Phase 1 — Codex detection (7 parallel Codex jobs, one per lens L1–L7,
+│              launched through the selected companion or agent-dispatch
+│              transport; prompt body = fragments/lens-prompts/
+│              _shared-invariants.md + fragments/lens-prompts/L<N>.md with
+│              $claude_md_paths and $prior_fix_suspects substituted; poll via
+│              the selected transport's lifecycle helper
 │              [stall→cancel→§3.7 retry watchdog]; one combined Sonnet
 │              normalizer over all 7 outputs → parse-with-repair + schema-
 │              guard + line-range-check + assign-finding-ids +
@@ -84,7 +87,7 @@ CLAUDE.md keeps a one-paragraph summary per command; this file is the reference.
                precedent)
 ```
 
-## `/adamsreview:fix [threshold] [--granular-commits]`
+## `/matthewsreview:fix [threshold] [--granular-commits]`
 
 ```
 ├── Phase 7 — Load artifact; leftover-attempted abort; clean-tree gate;
@@ -103,7 +106,7 @@ CLAUDE.md keeps a one-paragraph summary per command; this file is the reference.
                fix_group_id preserved per-finding in fix_attempts)
 ```
 
-## `/adamsreview:add [<paste...>] [--file path --line N --claim "..."] [--impact <type>] [--no-dedup]`
+## `/matthewsreview:add [<paste...>] [--file path --line N --claim "..."] [--impact <type>] [--no-dedup]`
 
 ```
 └── Locate artifact (latest.txt) → leftover-attempted gate →
@@ -125,65 +128,65 @@ CLAUDE.md keeps a one-paragraph summary per command; this file is the reference.
 
 **`:fix` Phase 7** loads the artifact and adds: `run_id` (ULID, `fixrun_<ULID>`), `threshold`, `latest_known_sha`, `stash_taken`, `input_sha` (pre-edit). Phase 8 adds `eligible_finding_ids` (step 8.1) and `fix_groups` (step 8.3, from `group-fixes.py`). Phase 9 adds `phase_9a_outcomes`, `overlap_files`, `reverted_groups`, `surviving_groups`, `commit_sha`.
 
-Path-handling invariants (helpers receive absolute paths; fragments never assume a cwd; `log-phase.sh` writes to the Phase-0-known path) are operational doctrine — see CLAUDE.md Rule 11.
+Path-handling invariants (helpers receive absolute paths; fragments never assume a cwd; `log-phase.sh` writes to the Phase-0-known path) are operational doctrine — see AGENTS.md Rule 11.
 
 ## Token tally — `subagent_tokens` and `orchestrator_tokens`
 
-Every lifecycle command re-tallies two sibling fields before its final re-render so
-the published PR comment reflects cumulative spend across the full review → fix /
+Every lifecycle command re-tallies two sibling fields before its final re-render
+so the published PR comment reflects cumulative spend across the review → fix /
 add / walkthrough arc:
 
-- **`subagent_tokens`** — rolled up from `tokens.jsonl` (every dispatched sub-agent's
-  cost). Captures Phase 1 lenses, Phase 4 validators, Phase 8 fix groups, Phase 9
-  post-fix reviewer, etc. The Codex CLI invoked under `--ensemble` is billed
-  by its own provider and is NOT in `tokens.jsonl` — only the Phase 1.5
-  Sonnet normalizer pass over its output is.
-- **`orchestrator_tokens`** — rolled up from the Claude Code session transcript(s)
-  under `~/.claude/projects/<cwd-slug>/` (main-session `message.usage` per assistant
-  turn, filtered by timestamp ≥ `review_started_at`). Captures what
-  `subagent_tokens` deliberately excludes: the orchestrator's own per-turn spend,
-  which is what the statusline's live `ctx:` badge is measuring the depth of.
-  **Opt-in via `ADAMS_REVIEW_TALLY_ORCHESTRATOR=1`** — defaults to skip because
-  the transcript scan trips the macOS Sequoia/Tahoe "access data from other apps"
-  prompt (Claude Code marks every transcript with the `com.apple.provenance`
-  xattr). When opted out, the helper exits 0 with a `skipped` stdout line and
-  leaves the artifact field absent; the renderer omits the line cleanly. See
-  README §"Token counts" for the user-facing rationale and the FDA + env-var
-  enable path.
+- **`subagent_tokens`** — rolled up from the review-local `tokens.jsonl` (every
+  dispatched sub-agent's cost). Captures native Claude/omp agents and Codex CLI
+  jobs whenever the selected transport reports usage; an unavailable or
+  unparseable count is preserved as `tokens: null`. Codex provider billing
+  remains separate even though its reported usage is recorded.
+- **`orchestrator_tokens`** — Claude Code main-session `message.usage`, captured
+  from the exact active transcript identified by the `SessionStart` hook. The
+  hook persists `session_id` and `transcript_path` through `CLAUDE_ENV_FILE`;
+  `orchestrator-tokens.sh` reads that one file and accepts only assistant lines
+  whose `sessionId` matches and whose timestamp is at or after
+  `review_started_at`. No cwd slug is derived and no sibling transcript is
+  opened. **Opt-in via `MATTHEWS_REVIEW_TALLY_ORCHESTRATOR=1`** — default skip
+  avoids the macOS Sequoia/Tahoe “access data from other apps” prompt caused by
+  Claude Code's `com.apple.provenance` transcript xattr.
 
-The two are non-overlapping (sub-agent internal API calls vs. main-session turns).
-Four separate orchestrator counters — fresh input / output / cache-read /
-cache-creation — are preserved in the artifact because their $/token pricing
-differs by roughly an order of magnitude, but only two (output + fresh input)
-surface in the rendered PR-comment line: cache-read and cache-creation are
-prompt-cache plumbing, not user-facing signal. All four remain in
-`artifact.orchestrator_tokens` for offline cost analysis.
+The fields are non-overlapping: dispatched-agent API calls versus main-session
+turns. Four orchestrator counters — fresh input, output, cache-read, and
+cache-creation — remain separate in the artifact because their prices differ
+materially. The rendered PR-comment line shows output and fresh input only;
+cache counters remain available for offline cost analysis.
 
-`/adamsreview:walkthrough` re-tallies both in §6.1 before §6.2's re-publish;
-issue-filer agents dispatched in §6.5 (and the orchestrator turns that dispatch
-them) land in the logs/transcript after the tally, so their cost surfaces on the
-next lifecycle command's tally.
+### Session accumulation and idempotency
 
-### Over-count modes (v1 accepted, opted-in only)
+Each `orchestrator_tokens.sessions[]` row stores its own four counters.
+Re-tallying the active session replaces its prior row, so a growing transcript
+is idempotent. A later lifecycle command in another Claude session retains
+earlier rows and adds the new one without reopening old transcript files. The
+top-level counters are recomputed from those rows. The first exact-session tally
+on a pre-v1.0.2 artifact intentionally replaces the old aggregate because old
+rows lack per-session counters and may include cwd-wide contamination.
 
-When `ADAMS_REVIEW_TALLY_ORCHESTRATOR=1` is set, the time-window filter
-(`timestamp >= review_started_at`) counts every assistant turn in any transcript
-under `~/.claude/projects/<cwd-slug>/`, regardless of whether it belongs to this
-review. Clean cases: review → fix back-to-back; review → new review on the
-updated codebase (each new review's `review_started_at` excludes the prior arc).
-Over-count cases: any unrelated session or unrelated same-session chat in the
-same cwd between `review_started_at` and the tally's invocation. Sub-agent tokens
-are unaffected (their log is per-review-id, not cwd-wide). When opted out (the
-default) there is no over-count *or* under-count from this filter — the field
-stays absent and only any prior opted-in value survives. See
-`bin/orchestrator-tokens.sh` header for the full caveat list;
-`plans/orchestrator-tokens.md` §"Known limitations" for why the time-window
-filter was accepted over a `SessionStart`-hook-based fix.
+Codex- and omp-orchestrated commands do not receive Claude Code `SessionStart`
+metadata, so `orchestrator_tokens` remains absent there. `subagent_tokens`
+continues to work on every harness.
+
+### Remaining attribution limits
+
+Exact file + session-ID filtering removes cross-session over-count. Unrelated
+assistant turns in the *same* Claude session after `review_started_at` are still
+indistinguishable and can over-count. A final tally also cannot include work
+that happens afterward: for example, walkthrough issue-filer agents dispatched
+after §6.1 surface on the next lifecycle command's tally.
+
+Malformed JSONL lines are ignored while valid matching lines are retained.
+Missing or incomplete hook-derived transcript/session metadata skips without
+mutation; a missing explicitly requested `--transcript-file` is an error.
 
 ### Stale-data preservation across opt-in toggles
 
-Skip on opt-out deliberately does not wipe a previously-written
-`orchestrator_tokens` value. So an opted-in `/adamsreview:review` followed by
-an opted-out `/adamsreview:fix` will publish the cumulative-cost line with the
-review-time value, not a refreshed one — the rendered number can lag actual
-spend. Re-opt-in on the next lifecycle command refreshes.
+Skip on opt-out deliberately does not wipe a previously written
+`orchestrator_tokens` value. An opted-in `/matthewsreview:review` followed by an
+opted-out `/matthewsreview:fix` therefore publishes the prior captured value,
+which can lag actual spend. Re-enable the export on a later lifecycle command
+to refresh it.

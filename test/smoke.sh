@@ -261,10 +261,10 @@ FAKE_ROOT="$WORK/reviews"
 mkdir -p "$FAKE_ROOT/fake-slug/fake-branch/rev_fake"
 echo "rev_fake" > "$FAKE_ROOT/fake-slug/fake-branch/latest.txt"
 echo "# rendered" > "$FAKE_ROOT/fake-slug/fake-branch/rev_fake/artifact.md"
-out=$(ADAMS_REVIEW_REVIEWS_ROOT="$FAKE_ROOT" "$TOOLS/artifact-publish.sh" \
+out=$(MATTHEWS_REVIEW_REVIEWS_ROOT="$FAKE_ROOT" "$TOOLS/artifact-publish.sh" \
         --mode pr --review-id rev_fake --pr 1 \
         --repo-slug fake-slug --branch fake-branch --dry-run 2>&1); code=$?
-expected_path="$FAKE_ROOT/fake-slug/fake-branch/rev_fake/artifact.md"
+expected_path="$(cd "$FAKE_ROOT" && pwd -P)/fake-slug/fake-branch/rev_fake/artifact.md"
 if [[ "$code" == "0" ]] && [[ "$out" == "$expected_path" ]]; then
     pass "B4: publish --dry-run resolves latest.txt → $expected_path"
 else
@@ -272,7 +272,7 @@ else
 fi
 
 # B5. publish --mode pr with latest.txt disagreeing with --review-id → non-zero + staleness note
-stderr=$(ADAMS_REVIEW_REVIEWS_ROOT="$FAKE_ROOT" "$TOOLS/artifact-publish.sh" \
+stderr=$(MATTHEWS_REVIEW_REVIEWS_ROOT="$FAKE_ROOT" "$TOOLS/artifact-publish.sh" \
         --mode pr --review-id rev_stale --pr 1 \
         --repo-slug fake-slug --branch fake-branch --dry-run 2>&1 >/dev/null); code=$?
 if [[ "$code" != "0" ]] && echo "$stderr" | grep -q "latest.txt points to review_id='rev_fake'"; then
@@ -281,26 +281,231 @@ else
     fail "B5: expected staleness error, got code=$code stderr=$stderr"
 fi
 
-# B6. publish default root (no ADAMS_REVIEW_REVIEWS_ROOT override) → ~/.adams-reviews.
+# B6. publish default root (no MATTHEWS_REVIEW_REVIEWS_ROOT override) → ~/.matthews-reviews.
 # Stage 2.5.A relocated the default root outside ~/.claude/ so that Claude Code's
 # hardcoded sensitive-file gate for ~/.claude/... paths doesn't fire. Assert the
 # new default by triggering a latest.txt-not-found error against a slug guaranteed
 # not to exist under the real home dir; the error message names the resolved path
-# so we can grep for ~/.adams-reviews without polluting actual state.
-ghost_slug="adams-review-smoke-missing-$$-$(date +%s)"
-stderr=$(env -u ADAMS_REVIEW_REVIEWS_ROOT "$TOOLS/artifact-publish.sh" \
+# so we can grep for ~/.matthews-reviews without polluting actual state.
+ghost_slug="matthews-review-smoke-missing-$$-$(date +%s)"
+# Isolate HOME so a real ~/.adams-reviews on the machine can't trip the
+# legacy-state fallback and shadow the default-root assertion.
+B6_HOME="$WORK/b6home"
+mkdir -p "$B6_HOME"
+stderr=$(env -u MATTHEWS_REVIEW_REVIEWS_ROOT -u ADAMS_REVIEW_REVIEWS_ROOT HOME="$B6_HOME" "$TOOLS/artifact-publish.sh" \
         --mode pr --review-id rev_ghost --pr 1 \
         --repo-slug "$ghost_slug" --branch ghost-branch --dry-run 2>&1 >/dev/null); code=$?
-if [[ "$code" != "0" ]] && echo "$stderr" | grep -q "\.adams-reviews/$ghost_slug/ghost-branch/latest.txt"; then
-    pass "B6: publish default reviews root resolves under ~/.adams-reviews (Stage 2.5.A)"
+if [[ "$code" != "0" ]] && echo "$stderr" | grep -q "\.matthews-reviews/$ghost_slug/ghost-branch/latest.txt"; then
+    pass "B6: publish default reviews root resolves under ~/.matthews-reviews (Stage 2.5.A)"
 else
-    fail "B6: expected error naming ~/.adams-reviews/$ghost_slug/ghost-branch/latest.txt; code=$code stderr=$stderr"
+    fail "B6: expected error naming ~/.matthews-reviews/$ghost_slug/ghost-branch/latest.txt; code=$code stderr=$stderr"
+fi
+
+# B7. publish honors legacy ADAMS_REVIEW_REVIEWS_ROOT when the new var is unset
+# (backward-compat fallback; FAKE_ROOT fixture from B4 reused).
+out=$(env -u MATTHEWS_REVIEW_REVIEWS_ROOT ADAMS_REVIEW_REVIEWS_ROOT="$FAKE_ROOT" "$TOOLS/artifact-publish.sh" \
+        --mode pr --review-id rev_fake --pr 1 \
+        --repo-slug fake-slug --branch fake-branch --dry-run 2>/dev/null); code=$?
+if [[ "$code" == "0" ]] && [[ "$out" == "$expected_path" ]]; then
+    pass "B7: publish falls back to ADAMS_REVIEW_REVIEWS_ROOT when MATTHEWS_REVIEW_REVIEWS_ROOT unset"
+else
+    fail "B7: legacy env-var fallback mismatch" "code=$code out=$out expected=$expected_path"
+fi
+
+# B8. publish falls back to legacy ~/.adams-reviews state root (with migrate
+# nudge) when neither env var is set and only the legacy dir exists.
+LEGACY_HOME="$WORK/legacyhome"
+mkdir -p "$LEGACY_HOME/.adams-reviews/fake-slug/fake-branch/rev_fake"
+echo "rev_fake" > "$LEGACY_HOME/.adams-reviews/fake-slug/fake-branch/latest.txt"
+echo "# rendered" > "$LEGACY_HOME/.adams-reviews/fake-slug/fake-branch/rev_fake/artifact.md"
+out=$(env -u MATTHEWS_REVIEW_REVIEWS_ROOT -u ADAMS_REVIEW_REVIEWS_ROOT HOME="$LEGACY_HOME" "$TOOLS/artifact-publish.sh" \
+        --mode pr --review-id rev_fake --pr 1 \
+        --repo-slug fake-slug --branch fake-branch --dry-run 2>&1); code=$?
+if [[ "$code" == "0" ]] && echo "$out" | grep -q "migrate: mv" && echo "$out" | grep -q "\.adams-reviews/fake-slug/fake-branch/rev_fake/artifact.md"; then
+    pass "B8: publish falls back to ~/.adams-reviews with migrate nudge when no root configured"
+else
+    fail "B8: legacy dir fallback mismatch" "code=$code out=$out"
+fi
+
+# B8a. review-root.sh is the single normalization boundary: existing
+# directories canonicalize, literal ~/ expands, and unsafe roots fail without
+# stdout so command substitutions cannot continue with split/cwd-relative state.
+mkdir -p "$WORK/review-root-real"
+ln -s "$WORK/review-root-real" "$WORK/review-root-link"
+root_expected=$(cd "$WORK/review-root-real" && pwd -P)
+root_canonical=$("$TOOLS/review-root.sh" --path "$WORK/review-root-link" 2>/dev/null)
+root_tilde=$(HOME="$B6_HOME" "$TOOLS/review-root.sh" --path '~/first-run' 2>/dev/null)
+root_relative=$(
+    MATTHEWS_REVIEW_REVIEWS_ROOT=relative "$TOOLS/review-root.sh" \
+        2>"$WORK/review-root-relative.err"
+)
+root_relative_rc=$?
+root_multiline=$(
+    MATTHEWS_REVIEW_REVIEWS_ROOT=$'bad\npath' "$TOOLS/review-root.sh" \
+        2>"$WORK/review-root-multiline.err"
+)
+root_multiline_rc=$?
+if [[ "$root_canonical" == "$root_expected" \
+   && "$root_tilde" == "$B6_HOME/first-run" \
+   && "$root_relative_rc" -eq 1 && -z "$root_relative" \
+   && "$root_multiline_rc" -eq 1 && -z "$root_multiline" \
+   && "$(cat "$WORK/review-root-relative.err")" == *"ERROR:"* \
+   && "$(cat "$WORK/review-root-multiline.err")" == *"Action:"* ]]; then
+    pass "B8a (F095): canonical review root expands/canonicalizes safe paths and rejects relative/multiline roots"
+else
+    fail "B8a: review-root normalization contract failed" \
+      "canonical=$root_canonical expected=$root_expected tilde=$root_tilde relative=$root_relative_rc:$root_relative multiline=$root_multiline_rc:$root_multiline"
+fi
+
+# B8b. Publisher consumes the canonical helper rather than accepting a
+# cwd-relative root through an independent fallback.
+publish_relative=$(
+    MATTHEWS_REVIEW_REVIEWS_ROOT=relative "$TOOLS/artifact-publish.sh" \
+        --mode pr --review-id rev_fake --pr 1 \
+        --repo-slug fake-slug --branch fake-branch --dry-run \
+        2>"$WORK/publish-relative.err"
+)
+publish_relative_rc=$?
+if [[ "$publish_relative_rc" -eq 1 && -z "$publish_relative" \
+   && "$(cat "$WORK/publish-relative.err")" == *"must be absolute"* ]]; then
+    pass "B8b (F095): publisher rejects a relative configured reviews root"
+else
+    fail "B8b: publisher bypassed canonical reviews-root validation" \
+      "code=$publish_relative_rc out=$publish_relative err=$(cat "$WORK/publish-relative.err")"
+fi
+
+# B8c. Calibration delegates both explicit and configured roots to the same
+# helper, so symlink canonicalization and unsafe-input rejection cannot diverge
+# from publication.
+calibration_link=$(
+    "$TOOLS/calibration-report.py" "$WORK/review-root-link" \
+        2>"$WORK/calibration-link.err"
+)
+calibration_link_rc=$?
+calibration_relative=$(
+    MATTHEWS_REVIEW_REVIEWS_ROOT=relative "$TOOLS/calibration-report.py" \
+        2>"$WORK/calibration-relative.err"
+)
+calibration_relative_rc=$?
+if [[ "$calibration_link_rc" -eq 1 && -z "$calibration_link" \
+   && "$(cat "$WORK/calibration-link.err")" == *"no runs found under $root_expected"* \
+   && "$calibration_relative_rc" -eq 1 && -z "$calibration_relative" \
+   && "$(cat "$WORK/calibration-relative.err")" == *"must be absolute"* ]]; then
+    pass "B8c (F095): calibration and publisher share canonical reviews-root semantics"
+else
+    fail "B8c: calibration bypassed canonical reviews-root validation" \
+      "link=$calibration_link_rc:$calibration_link:$(cat "$WORK/calibration-link.err") relative=$calibration_relative_rc:$calibration_relative:$(cat "$WORK/calibration-relative.err")"
+fi
+
+# B9. Oversized PR reports are compacted before sending to GitHub. The full
+# artifact.md remains intact; published.md records the exact body sent.
+PUBLISH_STUB_BIN="$WORK/publish-stub-bin"
+PUBLISH_CAPTURE="$WORK/publish-capture.md"
+mkdir -p "$PUBLISH_STUB_BIN"
+cat > "$PUBLISH_STUB_BIN/gh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+if [[ "${1:-}" == "repo" && "${2:-}" == "view" ]]; then
+    printf 'example/repo\n'
+    exit 0
+fi
+if [[ "${1:-}" == "api" ]]; then
+    input=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --input) input="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    jq -j '.body' "$input" > "$PUBLISH_CAPTURE"
+    printf '{"id":9001}\n'
+    exit 0
+fi
+printf 'unexpected gh invocation: %s\n' "$*" >&2
+exit 2
+SH
+chmod +x "$PUBLISH_STUB_BIN/gh"
+
+BIG_PUB_DIR="$WORK/pub-big"
+mkdir -p "$BIG_PUB_DIR"
+cp "$ART" "$BIG_PUB_DIR/artifact.json"
+awk 'BEGIN { for (i = 0; i < 70000; i++) printf "x"; printf "\n" }' \
+    > "$BIG_PUB_DIR/artifact.md"
+big_artifact_sha=$(sha_of "$BIG_PUB_DIR/artifact.md")
+b9_out=$(PATH="$PUBLISH_STUB_BIN:$PATH" PUBLISH_CAPTURE="$PUBLISH_CAPTURE" \
+    "$TOOLS/artifact-publish.sh" \
+    --mode pr --review-id rev_stage1smoke --pr 9 \
+    --review-dir "$BIG_PUB_DIR" 2>"$WORK/b9.err"); code=$?
+b9_bytes=$(wc -c < "$BIG_PUB_DIR/published.md" 2>/dev/null | tr -d '[:space:]')
+if [[ "$code" == "0" ]] \
+    && [[ "$b9_out" == '{"comment_id": 9001}' ]] \
+    && [[ -n "$b9_bytes" && "$b9_bytes" -le 65536 ]] \
+    && cmp -s "$PUBLISH_CAPTURE" "$BIG_PUB_DIR/published.md" \
+    && [[ "$(sha_of "$BIG_PUB_DIR/artifact.md")" == "$big_artifact_sha" ]] \
+    && grep -Fq '<!-- matthews-review-v1 -->' "$BIG_PUB_DIR/published.md" \
+    && grep -Fq 'Full sectioned report exceeded GitHub' "$BIG_PUB_DIR/published.md" \
+    && grep -Fq 'compact_fallback' "$BIG_PUB_DIR/trace.md"; then
+    pass "B9: oversized report publishes bounded compact body and preserves full artifact.md"
+else
+    fail "B9: oversized report fallback failed" \
+        "code=$code out=$b9_out bytes=${b9_bytes:-missing} stderr=$(cat "$WORK/b9.err")"
+fi
+
+# B10. Small PR reports still publish byte-for-byte and published.md mirrors
+# the exact body sent, so chat can mirror the actual PR comment.
+SMALL_PUB_DIR="$WORK/pub-small"
+mkdir -p "$SMALL_PUB_DIR"
+printf '<!-- matthews-review-v1 -->\n\n# Small report\n' \
+    > "$SMALL_PUB_DIR/artifact.md"
+PUBLISH_CAPTURE="$WORK/publish-small-capture.md"
+b10_out=$(PATH="$PUBLISH_STUB_BIN:$PATH" PUBLISH_CAPTURE="$PUBLISH_CAPTURE" \
+    "$TOOLS/artifact-publish.sh" \
+    --mode pr --review-id rev_small --pr 10 \
+    --review-dir "$SMALL_PUB_DIR" 2>"$WORK/b10.err"); code=$?
+if [[ "$code" == "0" ]] \
+    && [[ "$b10_out" == '{"comment_id": 9001}' ]] \
+    && cmp -s "$SMALL_PUB_DIR/artifact.md" "$SMALL_PUB_DIR/published.md" \
+    && cmp -s "$PUBLISH_CAPTURE" "$SMALL_PUB_DIR/published.md"; then
+    pass "B10: small report publishes unchanged and persists exact published.md"
+else
+    fail "B10: small report publication mirror mismatch" \
+        "code=$code out=$b10_out stderr=$(cat "$WORK/b10.err")"
+fi
+
+# B11. The compact renderer enforces its byte budget even when not called
+# through artifact-publish.sh.
+B11_MD="$WORK/pr-comment-bounded.md"
+if "$TOOLS/artifact-render.py" \
+    --input "$ART" --format pr-comment --max-bytes 1024 \
+    --output "$B11_MD" >/dev/null 2>"$WORK/b11.err"; then
+    b11_bytes=$(wc -c < "$B11_MD" | tr -d '[:space:]')
+    if [[ "$b11_bytes" -le 1024 ]] \
+        && grep -Fq '<!-- matthews-review-v1 -->' "$B11_MD" \
+        && grep -Fq 'omitted from this compact comment' "$B11_MD"; then
+        pass "B11: compact PR renderer stays within byte budget and reports omissions"
+    else
+        fail "B11: compact PR renderer violated budget or hid omissions" \
+            "bytes=$b11_bytes body=$(cat "$B11_MD")"
+    fi
+else
+    fail "B11: compact PR renderer failed" "stderr=$(cat "$WORK/b11.err")"
+fi
+
+# B12. Review finalization and post-fix output mirror the exact successful PR
+# publication body, while local/failed publication retains full artifact.md.
+if grep -Fq '$review_dir/published.md' "$REPO/fragments/07-finalize.md" \
+    && grep -Fq 'successful PR publication' "$REPO/fragments/07-finalize.md" \
+    && grep -Fq '$review_dir/published.md' "$REPO/fragments/10-post-fix-and-commit.md" \
+    && grep -Fq 'successful PR publication' "$REPO/fragments/10-post-fix-and-commit.md"; then
+    pass "B12: final review and post-fix chat mirror exact successful PR publication body"
+else
+    fail "B12: lifecycle prompts do not mirror published.md after successful PR publication"
 fi
 
 # OC. Fresh-run-won't-overwrite (DESIGN §13.4, rev 7).
 # The publisher no longer auto-discovers a prior comment by marker. Each
-# command carries its own continuation intent: fresh /adamsreview:review
-# omits --comment-id (→ POST); /adamsreview:fix and /adamsreview:promote
+# command carries its own continuation intent: fresh /matthewsreview:review
+# omits --comment-id (→ POST); /matthewsreview:fix and /matthewsreview:promote
 # pass --comment-id read from the artifact (→ PATCH).
 
 # OC-1: find_by_marker function is gone from the publisher.
@@ -343,10 +548,10 @@ else
     fail "OC-5: artifact-publish.sh has syntax errors"
 fi
 
-# OC-6: DESIGN §13.4 documents the new rule (fresh /adamsreview:review POSTs).
+# OC-6: DESIGN §13.4 documents the new rule (fresh /matthewsreview:review POSTs).
 # Path repointed to docs/archive/ after the 2026-04-19 docs-consolidation move.
 if grep -q 'always .POST. a new comment' "$REPO/docs/archive/DESIGN.md"; then
-    pass "OC-6: DESIGN §13.4 documents fresh-/adamsreview:review-POSTs rule"
+    pass "OC-6: DESIGN §13.4 documents fresh-/matthewsreview:review-POSTs rule"
 else
     fail "OC-6: DESIGN §13.4 missing new POST-on-fresh-review rule"
 fi
@@ -386,7 +591,7 @@ mkdir -p "$WORK/repo"
     echo two > foo.txt && git commit -q -am c3
     err=$("$TOOLS/staleness.sh" --reviewed-sha "$SHA1" --reviewed-files foo.txt 2>&1); code=$?
     [[ "$code" != "0" ]] || exit 13
-    [[ "$err" == unsafe:* ]] || exit 14
+    [[ "$err" == unsafe:* && "$err" == *$'\nERROR:'* && "$err" == *$'\nAction:'* ]] || exit 14
 )
 subrc=$?
 if [[ "$subrc" == "0" ]]; then
@@ -529,21 +734,63 @@ mkdir -p "$EXT"
 cat > "$EXT/issue_comments.json" <<'JSON'
 [
   {"id":1,"user":{"login":"humanuser","type":"User"},"created_at":"2026-02-01T00:00:00Z","body":"human comment"},
-  {"id":2,"user":{"login":"coderabbit-ai[bot]","type":"Bot"},"created_at":"2026-02-01T00:00:00Z","body":"bot finding"},
-  {"id":3,"user":{"login":"dependabot[bot]","type":"Bot"},"created_at":"2026-02-01T00:00:00Z","body":"dep bump"},
-  {"id":5,"user":{"login":"coderabbit-ai[bot]","type":"Bot"},"created_at":"2025-01-01T00:00:00Z","body":"age no longer filtered"}
+  {"id":2,"user":{"login":"coderabbit-ai[bot]","type":"Bot"},"created_at":"2026-02-01T00:00:00Z","body":"bot finding uses \\d at 100%"},
+  {"id":3,"user":{"login":"dependabot[bot]","type":"Bot"},"created_at":"2026-02-01T00:00:00Z","body":"dep bump uses \\w at 50%"},
+  {"id":5,"user":{"login":"coderabbit-ai[bot]","type":"Bot"},"created_at":"2025-01-01T00:00:00Z","body":"age no longer filtered uses \\s at 25%"}
 ]
 JSON
 echo '[]' > "$EXT/reviews.json"
 echo '[]' > "$EXT/review_comments.json"
 # Default config (no --config) — DEFAULT_DENY applies, allow=null.
-out=$(ADAMS_REVIEW_FIXTURES_USER=smokeuser "$TOOLS/external-scrape.sh" \
+out=$(MATTHEWS_REVIEW_FIXTURES_USER=smokeuser "$TOOLS/external-scrape.sh" \
         --fixtures-dir "$EXT")
 ids=$(echo "$out" | jq -c '[.[].id] | sort')
 if [[ "$ids" == "[2,5]" ]]; then
     pass "G: external-scrape fixture replay keeps both coderabbit records, drops human + dep-bump"
 else
     fail "G: expected ids [2,5], got $ids" "out=$out"
+fi
+
+# Exercise the branch-added G2/G3 captured-JSON boundaries with the same shell
+# option enabled by `bash -O xpg_echo`. Backslashes catch echo-based emitters;
+# percent signs catch data accidentally used as a printf format string.
+g_restore_xpg_echo=false
+if ! shopt -q xpg_echo; then
+    shopt -s xpg_echo
+    g_restore_xpg_echo=true
+fi
+# G2. external-scrape honors legacy ADAMS_REVIEW_CONFIG_ROOT when the new var
+# is unset (backward-compat fallback). A config-supplied deny list REPLACES
+# DEFAULT_DENY, so denying coderabbit alone drops records 2+5 and dependabot
+# (id 3) survives — [3] proves the legacy config root was read (the default
+# chain would yield [2,5]).
+LEGACY_CFG="$WORK/legacy-cfg"
+mkdir -p "$LEGACY_CFG"
+echo '{"external_reviewer_bots":{"deny":["coderabbit-ai[bot]"]}}' > "$LEGACY_CFG/review-config.json"
+out=$(env -u MATTHEWS_REVIEW_CONFIG_ROOT ADAMS_REVIEW_CONFIG_ROOT="$LEGACY_CFG" \
+        MATTHEWS_REVIEW_FIXTURES_USER=smokeuser "$TOOLS/external-scrape.sh" --fixtures-dir "$EXT")
+ids=$(printf '%s\n' "$out" | jq -c '[.[].id] | sort')
+g2_body=$(printf '%s\n' "$out" | jq -r '.[0].body')
+if [[ "$ids" == "[3]" && "$g2_body" == 'dep bump uses \w at 50%' ]]; then
+    pass "G2: legacy config root preserves backslash/percent JSON under xpg_echo"
+else
+    fail "G2: legacy config-root fallback mismatch" "ids=$ids body=$g2_body"
+fi
+
+# G3. external-scrape honors legacy ADAMS_REVIEW_FIXTURES_USER when the new
+# var is unset (backward-compat fallback).
+out=$(env -u MATTHEWS_REVIEW_FIXTURES_USER ADAMS_REVIEW_FIXTURES_USER=smokeuser \
+        "$TOOLS/external-scrape.sh" --fixtures-dir "$EXT")
+ids=$(printf '%s\n' "$out" | jq -c '[.[].id] | sort')
+g3_bodies=$(printf '%s\n' "$out" | jq -r 'map(.body) | join("|")')
+if [[ "$g_restore_xpg_echo" == true ]]; then
+    shopt -u xpg_echo
+fi
+if [[ "$ids" == "[2,5]" \
+      && "$g3_bodies" == 'bot finding uses \d at 100%|age no longer filtered uses \s at 25%' ]]; then
+    pass "G3: legacy fixtures user preserves backslash/percent JSON under xpg_echo"
+else
+    fail "G3: legacy fixtures-user fallback mismatch" "ids=$ids bodies=$g3_bodies"
 fi
 
 # N. pending_validation is a valid disposition enum (R2 fix)
@@ -799,6 +1046,25 @@ if [[ "$code" == "0" ]] \
     pass "W: --apply-decisions batch routes per §13.1; validation_result only for confirmed band (Stage 2.5.B)"
 else
     fail "W: apply-decisions state mismatch" "code=$code F101=($F101_DISP,$F101_IA,$F101_CS,$F101_VR) F102=($F102_DISP,$F102_VR) F103=($F103_DISP,$F103_VR,$F103_REASON) out=$out"
+fi
+
+# W2. Legacy artifacts may have no persisted disposition. A Phase-4 decision
+# supplies the derived disposition and actionability in one atomic pair set;
+# coupling must validate the proposed pair, not the missing stored value.
+jq '(.findings[] | select(.id == "F101")) |=
+      (del(.disposition) | .is_actionable = false | .score_phase4 = null)' \
+  "$APPLY_DIR/art.json" > "$APPLY_DIR/legacy-no-disposition.json"
+legacy_batch=$(jq -n --argjson vr "$VR_JSON" \
+  '[{id:"F101",score_phase4:80,decision:"confirmed",actionability:"auto_fixable",validation_result:$vr}]')
+legacy_out=$("$TOOLS/artifact-patch.py" \
+  --apply-decisions "$legacy_batch" \
+  --path "$APPLY_DIR/legacy-no-disposition.json" 2>&1); legacy_code=$?
+legacy_state=$(jq -r '.findings[] | select(.id=="F101") | "\(.disposition)|\(.is_actionable)"' \
+  "$APPLY_DIR/legacy-no-disposition.json" 2>/dev/null || true)
+if [[ $legacy_code -eq 0 && "$legacy_state" == "confirmed_mechanical|true" ]]; then
+    pass "W2: --apply-decisions validates derived coupling for legacy disposition-null findings"
+else
+    fail "W2: legacy disposition-null decision rejected" "code=$legacy_code state=$legacy_state out=$legacy_out"
 fi
 
 # Y. Light-lane uncertain findings render in both summary and table (Stage 2.5.D).
@@ -1895,7 +2161,7 @@ fi
 
 # ------------------------------------------------------------------ Stage 3
 #
-# Stage 3 introduces `/adamsreview:fix`. These assertions cover the helper
+# Stage 3 introduces `/matthewsreview:fix`. These assertions cover the helper
 # contracts it depends on — `group-fixes.py` (§21.5) fix-group union-find
 # and `artifact-patch.py` batched fix-outcome modes. Fragment-level prose
 # (Phase 7/8/9 orchestration) is not machine-tested here; real-repo runs
@@ -2218,16 +2484,16 @@ fi
 
 FRAG="$REPO/fragments/10-post-fix-and-commit.md"
 
-# FX-RECON-1: fragment offers a three-way AskUserQuestion on overlap,
+# FX-RECON-1: fragment offers a three-way ASK on overlap,
 # with Abort as the default (recommended) choice.
 if grep -q "9.pre.offer" "$FRAG" \
-   && grep -q "AskUserQuestion" "$FRAG" \
+   && grep -q "ASK with three options" "$FRAG" \
    && grep -q "Abort (recommended)" "$FRAG" \
    && grep -q "Reconcile — dispatch one merge agent" "$FRAG" \
    && grep -q "Inspect — leave tree as-is" "$FRAG"; then
-    pass "FX-RECON-1: 9.pre.offer presents three-way AskUserQuestion with Abort as default"
+    pass "FX-RECON-1: 9.pre.offer presents three-way ASK with Abort as default"
 else
-    fail "FX-RECON-1: fragment missing one of {9.pre.offer, AskUserQuestion, Abort/Reconcile/Inspect options}"
+    fail "FX-RECON-1: fragment missing one of {9.pre.offer, ASK with three options, Abort/Reconcile/Inspect options}"
 fi
 
 # FX-RECON-2: reconcile branch collapses fix_groups to a synthetic
@@ -2539,7 +2805,7 @@ fi
 # previously a usage error before Stage 2.8 because --since was required.
 
 # CF-ES-1: external-scrape.sh --fixtures-dir succeeds without --since.
-es_out=$(ADAMS_REVIEW_FIXTURES_USER=smokeuser "$TOOLS/external-scrape.sh" \
+es_out=$(MATTHEWS_REVIEW_FIXTURES_USER=smokeuser "$TOOLS/external-scrape.sh" \
             --fixtures-dir "$EXT" 2>"$CF_DIR/es1.err")
 es_rc=$?
 es_type=$(echo "$es_out" | jq -r 'type' 2>/dev/null)
@@ -2558,7 +2824,7 @@ else
     fail "CF-ES-2: expected exit 64 + unknown-arg; got code=$es_code stderr=$es_stderr"
 fi
 
-# ------------------------------------------------------------------ MP-* /adamsreview:promote (§27)
+# ------------------------------------------------------------------ MP-* /matthewsreview:promote (§27)
 #
 # Covers the human_confirmation field, Phase 8 eligibility bypass
 # (§5.2.1, §13.1, §13.2), and the renderer's (human-confirmed) tag.
@@ -2675,7 +2941,7 @@ fi
 
 # MP-7: schema accepts human_confirmation with non-empty fix_hint string. Covers
 # the §27.3 / schema rev-adding-fix_hint path — this is the on-disk shape
-# /adamsreview:promote --fix-hint "..." produces after step 5's jq build.
+# /matthewsreview:promote --fix-hint "..." produces after step 5's jq build.
 MP_HC_WITH_HINT=$(jq -nc '{
     reviewer: "tester@example.com",
     reason:   "promote with steering",
@@ -3093,7 +3359,8 @@ fi
 # join to the extracted filter (which itself ends with a "| ... ]"
 # array constructor).
 afh13_selected=$(printf '%s' "$afh11_synth" \
-    | jq -r "$afh13_filter"' | map(.id) | sort | join(",")')
+    | MATTHEWS_REVIEW_CONFIRM_THRESHOLD=60 \
+      jq -r "$afh13_filter"' | map(.id) | sort | join(",")')
 if [[ "$afh13_selected" == "F-DM,F-LM,F-MAN,F-REP" ]]; then
     pass "AFH-13 (v0.4.2 fragment behavior): canonical predicate extracted from fragments/06b-auto-fix-hint.md §5.5.0 selects expected ids on AFH-11 synthetic (drift catches: score threshold, lane gate re-add, missing select clause)"
 else
@@ -3102,9 +3369,9 @@ fi
 
 # ---------------------------------------------------------------- walkthrough
 #
-# WT-* cover the /adamsreview:walkthrough command surface. WT-1..WT-4 exercise
+# WT-* cover the /matthewsreview:walkthrough command surface. WT-1..WT-4 exercise
 # the scope-filter jq (the inverse of 09-fix-execution.md step 8.1); WT-5 is a
-# structural check on /adamsreview:promote's --defer-publish + shared-fragment
+# structural check on /matthewsreview:promote's --defer-publish + shared-fragment
 # wiring. The scope jq MUST stay in sync with Phase 8 eligibility — any drift
 # surfaces here.
 
@@ -3259,13 +3526,13 @@ else
     fail "WT-4: expected W030 only (score floor 60 excludes W031@50 and W032@40); got '$wt4_ids'"
 fi
 
-# WT-6: /adamsreview:walkthrough decisions-log template contains the required
+# WT-6: /matthewsreview:walkthrough decisions-log template contains the required
 # structural markers. Since the markdown is rendered inline by Claude at
 # runtime (the command file is a prompt, not a shell script), this is a
 # template-integrity check — guards against accidental removal of any
 # section so the posted PR comment stays auditable.
 WALK_MD="$REPO/commands/walkthrough.md"
-if grep -q 'adams-review-walkthrough-v1' "$WALK_MD" \
+if grep -q 'matthews-review-walkthrough-v1' "$WALK_MD" \
    && grep -q '### Walkthrough decisions' "$WALK_MD" \
    && grep -q '#### Promoted' "$WALK_MD" \
    && grep -q '#### Skipped' "$WALK_MD" \
@@ -3276,7 +3543,7 @@ else
     fail "WT-6: walkthrough decisions-log template missing required sections in $WALK_MD"
 fi
 
-# WT-5: /adamsreview:promote wires --defer-publish and includes promote-core.md.
+# WT-5: /matthewsreview:promote wires --defer-publish and includes promote-core.md.
 # Structural check guarding against accidental removal of either piece (plans/
 # walkthrough-mode.md §5, §6). If a future refactor merges the shared fragment
 # back inline or drops the --defer-publish flag, this assertion surfaces it
@@ -3370,7 +3637,7 @@ if grep -q 'Qualifying only' "$WALK_MD" \
    && grep -q 'Full skip set' "$WALK_MD" \
    && grep -q 'Cancel' "$WALK_MD" \
    && grep -q 'Phase 3 scoring gate' "$WALK_MD" \
-   && grep -q 'Phase 4 confirmation gate' "$WALK_MD" \
+   && grep -q 'Phase 4 confirmation cutoffs' "$WALK_MD" \
    && grep -q 'Phase 8 fix gate' "$WALK_MD" \
    && grep -q 'scope_qualifying_ids' "$WALK_MD" \
    && grep -q 'scope_full_ids' "$WALK_MD" \
@@ -3696,7 +3963,7 @@ else
 fi
 
 # ------------------------------------------------------------------ assign-finding-ids --start-from
-# AS-* assertions cover the --start-from flag added for /adamsreview:add (so
+# AS-* assertions cover the --start-from flag added for /matthewsreview:add (so
 # new findings injected into an existing artifact continue the id sequence
 # instead of colliding from F001). The default-no-flag behavior must remain
 # F001..F0NN to keep Phase 1's pooled-candidate join unchanged.
@@ -3727,7 +3994,7 @@ else
     fail "AS-3: expected exit 64, got $code"
 fi
 
-# ------------------------------------------------------------------ /adamsreview:add command
+# ------------------------------------------------------------------ /matthewsreview:add command
 # RA-* assertions cover the structural shape of the new top-level command
 # (commands/add.md). The command is a prose markdown file
 # that Claude Code interprets — these assertions verify the load-bearing
@@ -3744,7 +4011,7 @@ fi
 
 # RA-2: leftover-attempted hard abort present (mirrors Phase 7 step 4).
 # Re-uses the same "attempted" detection + recovery message shape so a
-# /adamsreview:fix run in flight cannot be silently extended by an add.
+# /matthewsreview:fix run in flight cannot be silently extended by an add.
 if grep -qF 'select(.current_state == "attempted")' "$ADD_MD" \
     && grep -qF 'leftover_ids' "$ADD_MD"; then
     pass "RA-2: leftover-attempted hard abort present (mirrors Phase 7)"
@@ -3864,7 +4131,8 @@ fi
 # trivial-mode artifact would be stored as validation_lane=deep for
 # correctness/security while the rest of the artifact is all-light,
 # and artifact-render.py's lane-section filter would misplace them.
-if grep -qF 'trivial_mode=$(jq -r ' "$ADD_MD" \
+if grep -qF 'trivial_mode=$(artifact-read.sh' "$ADD_MD" \
+    && grep -qF -- "--path \"\$artifact_path\" --filter '.trivial_mode'" "$ADD_MD" \
     && grep -qF -e '--argjson trivial "$trivial_mode"' "$ADD_MD" \
     && grep -qF 'if $trivial then "light"' "$ADD_MD"; then
     pass "RA-11: step 6 validation_lane honors trivial_mode (Phase 1 parity)"
@@ -3874,7 +4142,7 @@ fi
 
 # RA-12: step 7.5 tree-cleanliness sweep is GATED on pre_validator_clean
 # so the sweep does not clobber the user's own uncommitted work.
-# /adamsreview:add has no clean-tree gate (§3.8 design decision) — if
+# /matthewsreview:add has no clean-tree gate (§3.8 design decision) — if
 # the user had dirty state going in, the sweep would revert it. The
 # gate + skip-branch + distinct trace tag together prove the guard is
 # wired correctly.
@@ -4128,14 +4396,14 @@ else
     fail "L7-3: expected pre_existing/medium on ancestor L7 range; got origin=$origin conf=$conf"
 fi
 
-# L7-4: CLAUDE.md pipeline-shape narrative reflects the 6-vs-7 lens
+# L7-4: AGENTS.md pipeline-shape narrative reflects the 6-vs-7 lens
 # count. A sanity guard so this meta-doc doesn't silently drift from
-# the fragment.
-if grep -qF '7 under --ensemble' "$REPO/CLAUDE.md" \
-    && grep -qF 'holistic Opus safety net' "$REPO/CLAUDE.md"; then
-    pass "L7-4 (§2.9.D): CLAUDE.md pipeline-shape narrative mentions L7 under --ensemble"
+# the fragment. (Moved from CLAUDE.md when AGENTS.md became canonical.)
+if grep -qF '7 under --ensemble' "$REPO/AGENTS.md" \
+    && grep -qF 'holistic Opus safety net' "$REPO/AGENTS.md"; then
+    pass "L7-4 (§2.9.D): AGENTS.md pipeline-shape narrative mentions L7 under --ensemble"
 else
-    fail "L7-4: CLAUDE.md pipeline-shape block missing L7 / --ensemble update"
+    fail "L7-4: AGENTS.md pipeline-shape block missing L7 / --ensemble update"
 fi
 
 # L7-5: artifact-patch.py --add-finding accepts source_families:
@@ -4396,8 +4664,8 @@ else
     fail "TK-4: expected total=13000 invs=6 phase_9=5000; got total=$tk4_total invs=$tk4_invs phase_9=$tk4_p9"
 fi
 
-# TK-5: the chat-summary jq -r filter used by adamsreview:add step 10 and
-# adamsreview:walkthrough step 9. Must produce a clean (unquoted) line on
+# TK-5: the chat-summary jq -r filter used by matthewsreview:add step 10 and
+# matthewsreview:walkthrough step 9. Must produce a clean (unquoted) line on
 # a populated artifact and empty stdout when subagent_tokens is absent.
 token_filter='if (.subagent_tokens.total // null) != null and (.subagent_tokens.invocations // null) != null
     then "Cumulative sub-agent spend: \(.subagent_tokens.total) tokens across \(.subagent_tokens.invocations) invocations."
@@ -4444,48 +4712,58 @@ fi
 # ------------------------------------------------------------------ orchestrator-tokens.sh
 
 # OT-1 through OT-7 exercise the populated tally path; the helper now
-# defaults to skip unless ADAMS_REVIEW_TALLY_ORCHESTRATOR is set, so
+# defaults to skip unless MATTHEWS_REVIEW_TALLY_ORCHESTRATOR is set, so
 # scope-export it here. OT-8 (added below) covers the opt-out skip path
 # explicitly via `env -u` so test ordering doesn't matter. The trailing
 # `unset` keeps the export from leaking into downstream test blocks.
-export ADAMS_REVIEW_TALLY_ORCHESTRATOR=1
+export MATTHEWS_REVIEW_TALLY_ORCHESTRATOR=1
 
 OT_DIR="$WORK/ot"
 mkdir -p "$OT_DIR"
 cp "$FIX/artifact-seed.json" "$OT_DIR/artifact.json"
 
-# OT-1: slug derivation — both `/` AND `.` map to `-`. Claude Code's own
-# convention; easy to miss because `/ → -` alone would handle the worktree
-# path too, but `/.claude/` must become `--claude-` (double hyphen from
-# the slash+dot pair), not `-.claude-`. Guard the algorithm directly so
-# a future refactor can't break it silently.
-ot1_slug=$(printf '%s' "/Users/x/Projects/adams-review/.claude/worktrees/y" | tr '/.' '-')
-ot1_expected="-Users-x-Projects-adams-review--claude-worktrees-y"
-if [[ "$ot1_slug" == "$ot1_expected" ]]; then
-    pass "OT-1: slug derivation (tr '/.' '-') — both chars collapse correctly"
+# OT-1: without SessionStart metadata, the helper skips instead of deriving a
+# cwd slug and scanning every transcript in that project directory. Seed a
+# plausible legacy directory to ensure no implicit fallback can count it.
+OT1_HOME="$OT_DIR/t1-home"
+mkdir -p "$OT_DIR/art1" "$OT1_HOME/.claude/projects/legacy"
+cp "$FIX/artifact-seed.json" "$OT_DIR/art1/artifact.json"
+cat > "$OT1_HOME/.claude/projects/legacy/unrelated.jsonl" <<'JSONL'
+{"type":"assistant","timestamp":"2026-04-21T10:00:00.000Z","sessionId":"unrelated","message":{"usage":{"input_tokens":999,"output_tokens":999,"cache_read_input_tokens":999,"cache_creation_input_tokens":999}}}
+JSONL
+ot1_stdout=$(env -u MATTHEWS_REVIEW_TRANSCRIPT_FILE -u MATTHEWS_REVIEW_SESSION_ID \
+    HOME="$OT1_HOME" "$TOOLS/orchestrator-tokens.sh" \
+      --artifact "$OT_DIR/art1/artifact.json" \
+      --since "2026-04-21T00:00:00.000Z" 2>&1)
+ot1_field=$(jq -r '.orchestrator_tokens // "absent"' "$OT_DIR/art1/artifact.json")
+if [[ "$ot1_stdout" == *"no Claude SessionStart transcript metadata"* \
+      && "$ot1_field" == "absent" ]]; then
+    pass "OT-1: missing SessionStart metadata skips without cwd-wide transcript scan"
 else
-    fail "OT-1: slug mismatch" "expected=[$ot1_expected] got=[$ot1_slug]"
+    fail "OT-1: helper retained an implicit directory scan" "stdout=$ot1_stdout field=$ot1_field"
 fi
 
-# OT-2: missing transcript dir → zero rollup; schema-validates.
-"$TOOLS/orchestrator-tokens.sh" \
+# OT-2: a missing explicit transcript file is a caller error and may not write
+# a misleading zero rollup.
+ot2_explicit=$("$TOOLS/orchestrator-tokens.sh" \
     --artifact "$OT_DIR/artifact.json" \
-    --since    "2026-04-21T00:00:00.000Z" \
-    --transcript-dir "$OT_DIR/does-not-exist" \
-    >/dev/null 2>&1 || fail "OT-2: helper exit non-zero on missing dir"
-ot2_total_input=$(jq -r '.orchestrator_tokens.total_input' "$OT_DIR/artifact.json")
-ot2_turns=$(jq -r '.orchestrator_tokens.turn_count' "$OT_DIR/artifact.json")
-ot2_sessions=$(jq -c '.orchestrator_tokens.sessions' "$OT_DIR/artifact.json")
-if [[ "$ot2_total_input" == "0" && "$ot2_turns" == "0" && "$ot2_sessions" == "[]" ]] \
+    --since "2026-04-21T00:00:00.000Z" \
+    --transcript-file "$OT_DIR/does-not-exist.jsonl" 2>&1)
+ot2_explicit_code=$?
+ot2_field=$(jq -r '.orchestrator_tokens // "absent"' "$OT_DIR/artifact.json")
+if [[ $ot2_explicit_code -eq 1 \
+      && "$ot2_explicit" == *"explicit transcript file not found"* \
+      && "$ot2_explicit" == *"Action:"* \
+      && "$ot2_field" == "absent" ]] \
    && "$TOOLS/artifact-validate.sh" --path "$OT_DIR/artifact.json" >/dev/null 2>&1; then
-    pass "OT-2: missing transcript dir → zero rollup; schema-validates"
+    pass "OT-2: explicit missing transcript file fails; artifact stays absent"
 else
-    fail "OT-2: expected zeros + valid artifact; got input=$ot2_total_input turns=$ot2_turns sessions=$ot2_sessions"
+    fail "OT-2: explicit transcript guard mismatch" \
+      "explicit=$ot2_explicit_code:$ot2_explicit field=$ot2_field"
 fi
 
 # OT-3: one synthetic transcript, 3 in-window assistant turns with known
-# usage counts. Verify all four counters sum correctly, turn_count=3,
-# sessions[] has exactly one entry with the right ids and transcript_path.
+# usage counts. Verify all four counters, turn_count, and session audit row.
 OT3_DIR="$OT_DIR/t3"
 mkdir -p "$OT_DIR/art3" "$OT3_DIR"
 cp "$FIX/artifact-seed.json" "$OT_DIR/art3/artifact.json"
@@ -4496,8 +4774,8 @@ cat > "$OT3_DIR/sess-a.jsonl" <<'JSONL'
 JSONL
 "$TOOLS/orchestrator-tokens.sh" \
     --artifact "$OT_DIR/art3/artifact.json" \
-    --since    "2026-04-21T00:00:00.000Z" \
-    --transcript-dir "$OT3_DIR" \
+    --since "2026-04-21T00:00:00.000Z" \
+    --transcript-file "$OT3_DIR/sess-a.jsonl" \
     >/dev/null 2>&1 || fail "OT-3: helper exit non-zero on populated transcript"
 ot3_in=$(jq -r '.orchestrator_tokens.total_input' "$OT_DIR/art3/artifact.json")
 ot3_out=$(jq -r '.orchestrator_tokens.total_output' "$OT_DIR/art3/artifact.json")
@@ -4513,61 +4791,51 @@ else
     fail "OT-3: sum mismatch" "in=$ot3_in out=$ot3_out cr=$ot3_cr cc=$ot3_cc turns=$ot3_turns sid=$ot3_sid slen=$ot3_slen"
 fi
 
-# OT-4: cross-session merge — two transcripts in the same dir with
-# distinct sessionIds. Verify sessions[] has 2 entries sorted by
-# first_seen, and totals sum across both.
-cat > "$OT3_DIR/sess-b.jsonl" <<'JSONL'
+# OT-4: a malformed concatenated file can carry two session ids. Without an
+# explicit session filter, audit rows remain grouped and sorted deterministically.
+cat >> "$OT3_DIR/sess-a.jsonl" <<'JSONL'
 {"type":"assistant","timestamp":"2026-04-21T09:00:00.000Z","sessionId":"sess-b","message":{"usage":{"input_tokens":100,"output_tokens":200,"cache_read_input_tokens":300,"cache_creation_input_tokens":400}}}
 JSONL
 "$TOOLS/orchestrator-tokens.sh" \
     --artifact "$OT_DIR/art3/artifact.json" \
-    --since    "2026-04-21T00:00:00.000Z" \
-    --transcript-dir "$OT3_DIR" \
-    >/dev/null 2>&1 || fail "OT-4: helper exit non-zero on multi-transcript"
+    --since "2026-04-21T00:00:00.000Z" \
+    --transcript-file "$OT3_DIR/sess-a.jsonl" \
+    >/dev/null 2>&1 || fail "OT-4: helper exit non-zero on multi-session transcript"
 ot4_turns=$(jq -r '.orchestrator_tokens.turn_count' "$OT_DIR/art3/artifact.json")
 ot4_in=$(jq -r '.orchestrator_tokens.total_input' "$OT_DIR/art3/artifact.json")
 ot4_slen=$(jq -r '.orchestrator_tokens.sessions | length' "$OT_DIR/art3/artifact.json")
-# sort_by(.first_seen): sess-b (09:00) comes before sess-a (10:00).
 ot4_first=$(jq -r '.orchestrator_tokens.sessions[0].session_id' "$OT_DIR/art3/artifact.json")
 ot4_second=$(jq -r '.orchestrator_tokens.sessions[1].session_id' "$OT_DIR/art3/artifact.json")
 if [[ "$ot4_turns" == "4" && "$ot4_in" == "116" && "$ot4_slen" == "2" \
    && "$ot4_first" == "sess-b" && "$ot4_second" == "sess-a" ]]; then
-    pass "OT-4: cross-session merge — totals sum; sessions[] sorted by first_seen"
+    pass "OT-4: multi-session file → totals sum; sessions[] sorted by first_seen"
 else
-    fail "OT-4: merge mismatch" "turns=$ot4_turns in=$ot4_in slen=$ot4_slen first=$ot4_first second=$ot4_second"
+    fail "OT-4: grouping mismatch" "turns=$ot4_turns in=$ot4_in slen=$ot4_slen first=$ot4_first second=$ot4_second"
 fi
 
-# OT-5: time-window filter — --since in the future excludes all turns,
-# yielding zero rollup even though transcripts are populated. Also
-# verifies the partial-window case where only some turns survive.
+# OT-5: time-window filter excludes all future-window turns and keeps only the
+# two sess-a turns after a mid-window cutoff.
 "$TOOLS/orchestrator-tokens.sh" \
     --artifact "$OT_DIR/art3/artifact.json" \
-    --since    "2099-01-01T00:00:00.000Z" \
-    --transcript-dir "$OT3_DIR" \
+    --since "2099-01-01T00:00:00.000Z" \
+    --transcript-file "$OT3_DIR/sess-a.jsonl" \
     >/dev/null 2>&1 || fail "OT-5: helper exit non-zero on future --since"
 ot5_turns=$(jq -r '.orchestrator_tokens.turn_count' "$OT_DIR/art3/artifact.json")
 ot5_slen=$(jq -r '.orchestrator_tokens.sessions | length' "$OT_DIR/art3/artifact.json")
-# Partial window: cut between the two sess-a turns at 10:00 and 10:01.
 "$TOOLS/orchestrator-tokens.sh" \
     --artifact "$OT_DIR/art3/artifact.json" \
-    --since    "2026-04-21T10:00:30.000Z" \
-    --transcript-dir "$OT3_DIR" \
+    --since "2026-04-21T10:00:30.000Z" \
+    --transcript-file "$OT3_DIR/sess-a.jsonl" \
     >/dev/null 2>&1 || fail "OT-5: helper exit non-zero on partial window"
 ot5p_turns=$(jq -r '.orchestrator_tokens.turn_count' "$OT_DIR/art3/artifact.json")
 ot5p_in=$(jq -r '.orchestrator_tokens.total_input' "$OT_DIR/art3/artifact.json")
-# Surviving: two sess-a turns (10:01 and 10:02) — input = 5 + 1 = 6.
 if [[ "$ot5_turns" == "0" && "$ot5_slen" == "0" && "$ot5p_turns" == "2" && "$ot5p_in" == "6" ]]; then
     pass "OT-5: --since filter — future excludes all; partial window keeps only post-since turns"
 else
     fail "OT-5: window filter mismatch" "future_turns=$ot5_turns future_slen=$ot5_slen partial_turns=$ot5p_turns partial_in=$ot5p_in"
 fi
 
-# OT-7: --since at second precision (matching Phase 0's
-# `date -u +%Y-%m-%dT%H:%M:%SZ` format) correctly includes same-second
-# turns that carry millisecond-precision timestamps. Without the helper's
-# internal .000Z normalization, lexical `.500Z >= Z` evaluates FALSE
-# (because `.` < `Z`), and the helper would silently drop turns that
-# happened in the same wall-clock second as review_started_at.
+# OT-7: second-precision --since includes same-second millisecond turns.
 OT7_DIR="$OT_DIR/t7"
 mkdir -p "$OT_DIR/art7" "$OT7_DIR"
 cp "$FIX/artifact-seed.json" "$OT_DIR/art7/artifact.json"
@@ -4577,24 +4845,18 @@ cat > "$OT7_DIR/sess.jsonl" <<'JSONL'
 JSONL
 "$TOOLS/orchestrator-tokens.sh" \
     --artifact "$OT_DIR/art7/artifact.json" \
-    --since    "2026-04-21T10:00:00Z" \
-    --transcript-dir "$OT7_DIR" \
+    --since "2026-04-21T10:00:00Z" \
+    --transcript-file "$OT7_DIR/sess.jsonl" \
     >/dev/null 2>&1 || fail "OT-7: helper exit non-zero on second-precision since"
 ot7_turns=$(jq -r '.orchestrator_tokens.turn_count' "$OT_DIR/art7/artifact.json")
 ot7_in=$(jq -r '.orchestrator_tokens.total_input' "$OT_DIR/art7/artifact.json")
-# Both turns (10:00:00.500Z and 10:00:01.000Z) are AT or AFTER 10:00:00Z
-# and should be included. Without normalization we'd get turns=1 in=100.
 if [[ "$ot7_turns" == "2" && "$ot7_in" == "200" ]]; then
     pass "OT-7: second-precision --since includes same-second ms-precision turns (normalized to .000Z)"
 else
     fail "OT-7: expected turns=2 in=200 (normalization works); got turns=$ot7_turns in=$ot7_in"
 fi
 
-# OT-6: non-assistant lines (user messages, worktree-state snapshots, etc.)
-# are ignored. This guards the `type == "assistant"` filter specifically —
-# real Claude Code transcripts mix many line types and the helper must
-# not accidentally count `type == "user"` or `type == "worktree-state"`
-# lines that happen to have nested numeric fields.
+# OT-6: non-assistant lines are ignored.
 OT6_DIR="$OT_DIR/t6"
 mkdir -p "$OT_DIR/art6" "$OT6_DIR"
 cp "$FIX/artifact-seed.json" "$OT_DIR/art6/artifact.json"
@@ -4607,8 +4869,8 @@ cat > "$OT6_DIR/mix.jsonl" <<'JSONL'
 JSONL
 "$TOOLS/orchestrator-tokens.sh" \
     --artifact "$OT_DIR/art6/artifact.json" \
-    --since    "2026-04-21T00:00:00.000Z" \
-    --transcript-dir "$OT6_DIR" \
+    --since "2026-04-21T00:00:00.000Z" \
+    --transcript-file "$OT6_DIR/mix.jsonl" \
     >/dev/null 2>&1 || fail "OT-6: helper exit non-zero on mixed-types transcript"
 ot6_turns=$(jq -r '.orchestrator_tokens.turn_count' "$OT_DIR/art6/artifact.json")
 ot6_in=$(jq -r '.orchestrator_tokens.total_input' "$OT_DIR/art6/artifact.json")
@@ -4619,39 +4881,2450 @@ else
     fail "OT-6: filter let non-assistant lines through" "turns=$ot6_turns in=$ot6_in out=$ot6_out"
 fi
 
-# OT-8: opt-out skip path. With ADAMS_REVIEW_TALLY_ORCHESTRATOR unset
-# the helper must exit 0, print a one-line "skipped" notice, and leave
-# the artifact's orchestrator_tokens field absent (default opt-out is
-# the user-facing behavior since macOS Sequoia/Tahoe prompts for any
-# read of a transcript with the com.apple.provenance xattr). Use
-# `env -u` to scope the unset to this single invocation so the export
-# above keeps OT-1..OT-7 driving the populated path regardless of test
-# ordering. Also assert the artifact is still schema-valid (the field
-# stays absent — schema declares orchestrator_tokens optional).
+# OT-8: opt-out skips and leaves the optional field absent.
 OT8_DIR="$OT_DIR/t8"
 mkdir -p "$OT_DIR/art8" "$OT8_DIR"
 cp "$FIX/artifact-seed.json" "$OT_DIR/art8/artifact.json"
-ot8_stdout=$(env -u ADAMS_REVIEW_TALLY_ORCHESTRATOR \
+: > "$OT8_DIR/empty.jsonl"
+ot8_stdout=$(env -u MATTHEWS_REVIEW_TALLY_ORCHESTRATOR \
     "$TOOLS/orchestrator-tokens.sh" \
-        --artifact "$OT_DIR/art8/artifact.json" \
-        --since    "2026-04-21T00:00:00.000Z" \
-        --transcript-dir "$OT8_DIR" 2>&1)
+      --artifact "$OT_DIR/art8/artifact.json" \
+      --since "2026-04-21T00:00:00.000Z" \
+      --transcript-file "$OT8_DIR/empty.jsonl" 2>&1)
 ot8_exit=$?
 ot8_field=$(jq -r '.orchestrator_tokens // "absent"' "$OT_DIR/art8/artifact.json")
-if [[ $ot8_exit -eq 0 ]] \
-   && [[ "$ot8_stdout" == *"skipped"* ]] \
-   && [[ "$ot8_stdout" == *"ADAMS_REVIEW_TALLY_ORCHESTRATOR"* ]] \
-   && [[ "$ot8_field" == "absent" ]] \
+if [[ $ot8_exit -eq 0 && "$ot8_stdout" == *"skipped"* \
+      && "$ot8_stdout" == *"MATTHEWS_REVIEW_TALLY_ORCHESTRATOR"* \
+      && "$ot8_field" == "absent" ]] \
    && "$TOOLS/artifact-validate.sh" --path "$OT_DIR/art8/artifact.json" >/dev/null 2>&1; then
     pass "OT-8: opt-out (env unset) skips tally — exit 0, 'skipped' stdout, no artifact mutation, schema-valid"
 else
     fail "OT-8: opt-out skip mismatch" "exit=$ot8_exit field=$ot8_field stdout=$ot8_stdout"
 fi
 
-# Hygiene: drop the export so it doesn't leak into downstream test
-# blocks (none currently consume it, but future blocks shouldn't have
-# to know this one set it).
-unset ADAMS_REVIEW_TALLY_ORCHESTRATOR
+# OT-9: legacy ADAMS_REVIEW_TALLY_ORCHESTRATOR=1 opt-in still runs.
+OT9_DIR="$OT_DIR/t9"
+mkdir -p "$OT_DIR/art9" "$OT9_DIR"
+cp "$FIX/artifact-seed.json" "$OT_DIR/art9/artifact.json"
+: > "$OT9_DIR/empty.jsonl"
+ot9_stdout=$(env -u MATTHEWS_REVIEW_TALLY_ORCHESTRATOR ADAMS_REVIEW_TALLY_ORCHESTRATOR=1 \
+    "$TOOLS/orchestrator-tokens.sh" \
+      --artifact "$OT_DIR/art9/artifact.json" \
+      --since "2026-04-21T00:00:00.000Z" \
+      --transcript-file "$OT9_DIR/empty.jsonl" 2>&1)
+ot9_exit=$?
+if [[ $ot9_exit -eq 0 && "$ot9_stdout" != *"skipped"* ]]; then
+    pass "OT-9: legacy ADAMS_REVIEW_TALLY_ORCHESTRATOR=1 opt-in runs the tally (no skip)"
+else
+    fail "OT-9: legacy opt-in fallback mismatch" "exit=$ot9_exit stdout=$ot9_stdout"
+fi
+
+# OT-10: an explicit transcript file plus session id scopes the tally to the
+# active Claude Code session. Even if the file contains a stray assistant line
+# from another session, it must not be counted; sibling transcript files in the
+# same directory are never opened.
+OT10_DIR="$OT_DIR/t10"
+mkdir -p "$OT_DIR/art10" "$OT10_DIR"
+cp "$FIX/artifact-seed.json" "$OT_DIR/art10/artifact.json"
+cat > "$OT10_DIR/current.jsonl" <<'JSONL'
+{"type":"assistant","timestamp":"2026-04-21T10:00:00.000Z","sessionId":"current-session","message":{"usage":{"input_tokens":11,"output_tokens":12,"cache_read_input_tokens":13,"cache_creation_input_tokens":14}}}
+{"type":"assistant","timestamp":"2026-04-21T10:00:01.000Z","sessionId":"other-session","message":{"usage":{"input_tokens":100,"output_tokens":200,"cache_read_input_tokens":300,"cache_creation_input_tokens":400}}}
+JSONL
+cat > "$OT10_DIR/sibling.jsonl" <<'JSONL'
+{"type":"assistant","timestamp":"2026-04-21T10:00:02.000Z","sessionId":"sibling-session","message":{"usage":{"input_tokens":1000,"output_tokens":2000,"cache_read_input_tokens":3000,"cache_creation_input_tokens":4000}}}
+JSONL
+"$TOOLS/orchestrator-tokens.sh" \
+    --artifact "$OT_DIR/art10/artifact.json" \
+    --since "2026-04-21T00:00:00.000Z" \
+    --transcript-file "$OT10_DIR/current.jsonl" \
+    --session-id "current-session" \
+    >/dev/null 2>&1 || fail "OT-10: helper exit non-zero on session-scoped transcript"
+cp "$FIX/artifact-seed.json" "$OT_DIR/art10/artifact-env.json"
+env MATTHEWS_REVIEW_TRANSCRIPT_FILE="$OT10_DIR/current.jsonl" \
+    MATTHEWS_REVIEW_SESSION_ID="current-session" \
+    "$TOOLS/orchestrator-tokens.sh" \
+      --artifact "$OT_DIR/art10/artifact-env.json" \
+      --since "2026-04-21T00:00:00.000Z" \
+      >/dev/null 2>&1 || fail "OT-10: helper exit non-zero on SessionStart environment scope"
+ot10_env_in=$(jq -r '.orchestrator_tokens.total_input' "$OT_DIR/art10/artifact-env.json")
+ot10_in=$(jq -r '.orchestrator_tokens.total_input' "$OT_DIR/art10/artifact.json")
+ot10_out=$(jq -r '.orchestrator_tokens.total_output' "$OT_DIR/art10/artifact.json")
+ot10_turns=$(jq -r '.orchestrator_tokens.turn_count' "$OT_DIR/art10/artifact.json")
+ot10_sids=$(jq -r '.orchestrator_tokens.sessions | map(.session_id) | join(",")' "$OT_DIR/art10/artifact.json")
+if [[ "$ot10_in" == "11" && "$ot10_out" == "12" && "$ot10_turns" == "1" \
+      && "$ot10_sids" == "current-session" && "$ot10_env_in" == "11" ]]; then
+    pass "OT-10: explicit transcript + session id excludes sibling files and foreign-session lines"
+else
+    fail "OT-10: session-scoped tally mismatch" \
+      "in=$ot10_in out=$ot10_out turns=$ot10_turns sessions=$ot10_sids env_in=$ot10_env_in"
+fi
+
+# OT-11: Claude Code's SessionStart hook persists the exact current session id
+# and transcript path into CLAUDE_ENV_FILE. Values with spaces must round-trip
+# through the shell environment file without corruption.
+OT11_ENV="$OT_DIR/t11-env"
+: > "$OT11_ENV"
+printf '%s\n' \
+  '{"session_id":"session with spaces","transcript_path":"/tmp/transcript path/current.jsonl","cwd":"/tmp/work tree","hook_event_name":"SessionStart"}' \
+  | env CLAUDE_ENV_FILE="$OT11_ENV" "$REPO/hooks/dep-check.sh" \
+      >/dev/null 2>&1
+ot11_values=$(bash -c \
+  'source "$1"; printf "%s|%s" "$MATTHEWS_REVIEW_SESSION_ID" "$MATTHEWS_REVIEW_TRANSCRIPT_FILE"' \
+  _ "$OT11_ENV")
+if [[ "$ot11_values" == "session with spaces|/tmp/transcript path/current.jsonl" ]]; then
+    pass "OT-11: SessionStart hook exports current Claude session metadata safely"
+else
+    fail "OT-11: SessionStart metadata export mismatch" "$ot11_values"
+fi
+
+# OT-12: lifecycle commands may run in later Claude sessions. Retain the
+# already-recorded session totals without reopening old transcripts, and
+# replace (rather than add) a session when its growing transcript is retallied.
+OT12_DIR="$OT_DIR/t12"
+mkdir -p "$OT_DIR/art12" "$OT12_DIR"
+cp "$FIX/artifact-seed.json" "$OT_DIR/art12/artifact.json"
+cat > "$OT12_DIR/a.jsonl" <<'JSONL'
+{"type":"assistant","timestamp":"2026-04-21T10:00:00.000Z","sessionId":"lifecycle-a","message":{"usage":{"input_tokens":10,"output_tokens":1,"cache_read_input_tokens":2,"cache_creation_input_tokens":3}}}
+JSONL
+cat > "$OT12_DIR/b.jsonl" <<'JSONL'
+{"type":"assistant","timestamp":"2026-04-21T11:00:00.000Z","sessionId":"lifecycle-b","message":{"usage":{"input_tokens":20,"output_tokens":4,"cache_read_input_tokens":5,"cache_creation_input_tokens":6}}}
+JSONL
+"$TOOLS/orchestrator-tokens.sh" \
+    --artifact "$OT_DIR/art12/artifact.json" \
+    --since "2026-04-21T00:00:00.000Z" \
+    --transcript-file "$OT12_DIR/a.jsonl" \
+    --session-id "lifecycle-a" >/dev/null 2>&1 \
+    || fail "OT-12: first lifecycle session tally failed"
+"$TOOLS/orchestrator-tokens.sh" \
+    --artifact "$OT_DIR/art12/artifact.json" \
+    --since "2026-04-21T00:00:00.000Z" \
+    --transcript-file "$OT12_DIR/b.jsonl" \
+    --session-id "lifecycle-b" >/dev/null 2>&1 \
+    || fail "OT-12: second lifecycle session tally failed"
+cat >> "$OT12_DIR/a.jsonl" <<'JSONL'
+{"type":"assistant","timestamp":"2026-04-21T12:00:00.000Z","sessionId":"lifecycle-a","message":{"usage":{"input_tokens":5,"output_tokens":7,"cache_read_input_tokens":8,"cache_creation_input_tokens":9}}}
+JSONL
+"$TOOLS/orchestrator-tokens.sh" \
+    --artifact "$OT_DIR/art12/artifact.json" \
+    --since "2026-04-21T00:00:00.000Z" \
+    --transcript-file "$OT12_DIR/a.jsonl" \
+    --session-id "lifecycle-a" >/dev/null 2>&1 \
+    || fail "OT-12: repeated lifecycle session tally failed"
+ot12_summary=$(jq -r '
+  [
+    .orchestrator_tokens.total_input,
+    .orchestrator_tokens.total_output,
+    .orchestrator_tokens.cache_read,
+    .orchestrator_tokens.cache_creation,
+    .orchestrator_tokens.turn_count,
+    (.orchestrator_tokens.sessions | length),
+    .orchestrator_tokens.sessions[0].total_input,
+    .orchestrator_tokens.sessions[1].total_input
+  ] | map(tostring) | join("|")
+' "$OT_DIR/art12/artifact.json")
+if [[ "$ot12_summary" == "35|12|15|18|3|2|15|20" ]] \
+   && "$TOOLS/artifact-validate.sh" --path "$OT_DIR/art12/artifact.json" >/dev/null 2>&1; then
+    pass "OT-12: cross-session totals accumulate; repeated session tally replaces prior counters"
+else
+    fail "OT-12: lifecycle session accumulation mismatch" "$ot12_summary"
+fi
+
+# OT-13: hook-derived operation requires both metadata fields. A transcript
+# path without its session id must skip rather than silently broadening to every
+# sessionId present in that file.
+OT13_DIR="$OT_DIR/t13"
+mkdir -p "$OT_DIR/art13" "$OT13_DIR"
+cp "$FIX/artifact-seed.json" "$OT_DIR/art13/artifact.json"
+cat > "$OT13_DIR/current.jsonl" <<'JSONL'
+{"type":"assistant","timestamp":"2026-04-21T10:00:00.000Z","sessionId":"unscoped-session","message":{"usage":{"input_tokens":99,"output_tokens":99,"cache_read_input_tokens":99,"cache_creation_input_tokens":99}}}
+JSONL
+ot13_stdout=$(env -u MATTHEWS_REVIEW_SESSION_ID \
+    MATTHEWS_REVIEW_TRANSCRIPT_FILE="$OT13_DIR/current.jsonl" \
+    "$TOOLS/orchestrator-tokens.sh" \
+      --artifact "$OT_DIR/art13/artifact.json" \
+      --since "2026-04-21T00:00:00.000Z" 2>&1)
+ot13_exit=$?
+ot13_field=$(jq -r '.orchestrator_tokens // "absent"' "$OT_DIR/art13/artifact.json")
+if [[ $ot13_exit -eq 0 && "$ot13_stdout" == *"incomplete Claude SessionStart"* \
+      && "$ot13_field" == "absent" ]]; then
+    pass "OT-13: incomplete hook metadata skips instead of widening the session filter"
+else
+    fail "OT-13: incomplete hook metadata guard mismatch" \
+      "exit=$ot13_exit field=$ot13_field stdout=$ot13_stdout"
+fi
+
+unset MATTHEWS_REVIEW_TALLY_ORCHESTRATOR
+
+# ------------------------------------------------------------------
+# RC: review-config.sh — model-plan resolver (precedence, grammar, matrix)
+# Isolated HOME + repo so user/repo configs are fully controlled.
+RC_HOME="$WORK/rc-home"
+RC_REPO="$WORK/rc-repo"
+mkdir -p "$RC_HOME/.matthews-reviews" "$RC_REPO"
+cat > "$RC_HOME/.matthews-reviews/config.json" <<'EOF'
+{"tiers":{"utility":"claude:haiku"},"roles":{"scoring":"codex::medium"},"gates":{"phase3_gate":55},"profiles":{"max":{"tiers":{"light":"claude:opus"}}}}
+EOF
+cat > "$RC_REPO/.matthewsreview.json" <<'EOF'
+{"tiers":{"light":"claude:haiku"},"roles":{"scoring":"claude:sonnet"}}
+EOF
+git -C "$RC_REPO" init -q
+git -C "$RC_REPO" add .matthewsreview.json
+git -C "$RC_REPO" -c user.name=Smoke -c user.email=smoke@example.invalid \
+    -c commit.gpgsign=false commit --no-gpg-sign -qm "trusted repo config"
+RC_TRUSTED_REF=$(git -C "$RC_REPO" rev-parse HEAD)
+RC_BASE_BRANCH=$(git -C "$RC_REPO" symbolic-ref --short HEAD)
+git -C "$RC_REPO" checkout -qb worktree
+printf '%s\n' '{"roles":{"scoring":"claude:opus"}}' \
+    > "$RC_REPO/.matthewsreview.json"
+git -C "$RC_REPO" add .matthewsreview.json
+git -C "$RC_REPO" -c user.name=Smoke -c user.email=smoke@example.invalid \
+    -c commit.gpgsign=false commit --no-gpg-sign -qm "branch named worktree"
+git -C "$RC_REPO" checkout -q "$RC_BASE_BRANCH"
+RC_WORKTREE_CONFIG='{"roles":{"scoring":"claude:haiku"}}'
+printf '%s\n' "$RC_WORKTREE_CONFIG" > "$RC_REPO/.matthewsreview.json"
+rc_run() {
+    env -u MATTHEWS_REVIEW_REVIEWS_ROOT HOME="$RC_HOME" \
+        "$TOOLS/review-config.sh" --repo-root "$RC_REPO" \
+        --repo-config-ref "$RC_TRUSTED_REF" "$@"
+}
+rc_run_worktree() {
+    env -u MATTHEWS_REVIEW_REVIEWS_ROOT HOME="$RC_HOME" \
+        "$TOOLS/review-config.sh" --repo-root "$RC_REPO" \
+        --repo-config-worktree "$@"
+}
+
+# RC-1: defaults — deep role inherits claude:opus from default tier, gates default 45
+# (empty HOME → no user config; repo config moved aside → pure defaults)
+RC_EMPTY="$WORK/rc-empty"
+mkdir -p "$RC_EMPTY"
+mv "$RC_REPO/.matthewsreview.json" "$RC_REPO/.matthewsreview.json.hold"
+rc_out=$(env -u MATTHEWS_REVIEW_REVIEWS_ROOT HOME="$RC_EMPTY" "$TOOLS/review-config.sh" --repo-root "$RC_REPO" --orchestrator claude-code); code=$?
+mv "$RC_REPO/.matthewsreview.json.hold" "$RC_REPO/.matthewsreview.json"
+rc_deep=$(printf '%s' "$rc_out" | jq -r '.roles.deep_validate | "\(.engine):\(.model)|\(.source)"')
+rc_gate=$(printf '%s' "$rc_out" | jq -r '.gates.phase3_gate')
+if [[ $code -eq 0 && "$rc_deep" == "claude:opus|default (tier:deep)" && "$rc_gate" == "45" ]]; then
+    pass "RC-1: defaults resolve (deep=claude:opus via default tier; phase3_gate=45)"
+else
+    fail "RC-1: default resolution mismatch" "code=$code deep=$rc_deep gate=$rc_gate"
+fi
+
+# RC-2: user config + repo config precedence (repo wins role scoring; user wins tier utility)
+rc_out=$(rc_run --orchestrator claude-code)
+rc_scoring=$(printf '%s' "$rc_out" | jq -r '.roles.scoring | "\(.engine):\(.model)|\(.source)"')
+rc_util=$(printf '%s' "$rc_out" | jq -r '.roles.dedup | "\(.engine):\(.model)|\(.source)"')
+rc_gate=$(printf '%s' "$rc_out" | jq -r '.gates.phase3_gate')
+if [[ "$rc_scoring" == "claude:sonnet|repo-config" && "$rc_util" == "claude:haiku|user-config (tier:utility)" && "$rc_gate" == "55" ]]; then
+    pass "RC-2: user < repo precedence (role from repo, tier from user, gate merged)"
+else
+    fail "RC-2: precedence mismatch" "scoring=$rc_scoring util=$rc_util gate=$rc_gate"
+fi
+
+# RCT-1: a repo config is executable policy, so normal resolution reads only
+# the selected trusted commit. A Git branch literally named "worktree" remains
+# an ordinary ref, while the dirty file is available solely through the
+# separate diagnostic flag. Omission, bad refs, and selector conflicts emit no
+# plan.
+rct_trusted_out=$(rc_run --orchestrator claude-code)
+rct_trusted_scoring=$(printf '%s' "$rct_trusted_out" | jq -r \
+    '.roles.scoring | "\(.engine):\(.model)|\(.source)"')
+rct_branch_out=$(env -u MATTHEWS_REVIEW_REVIEWS_ROOT HOME="$RC_HOME" \
+    "$TOOLS/review-config.sh" --repo-root "$RC_REPO" \
+    --repo-config-ref worktree --orchestrator claude-code)
+rct_branch_code=$?
+rct_branch_scoring=$(printf '%s' "$rct_branch_out" | jq -r \
+    '.roles.scoring | "\(.engine):\(.model)|\(.source)"')
+rct_worktree_out=$(rc_run_worktree --orchestrator claude-code)
+rct_worktree_scoring=$(printf '%s' "$rct_worktree_out" | jq -r \
+    '.roles.scoring | "\(.engine):\(.model)|\(.source)"')
+rct_omit_out=$(env -u MATTHEWS_REVIEW_REVIEWS_ROOT HOME="$RC_HOME" \
+    "$TOOLS/review-config.sh" --repo-root "$RC_REPO" \
+    --orchestrator claude-code 2>"$WORK/rct-omit.err")
+rct_omit_code=$?
+rct_bad_out=$(env -u MATTHEWS_REVIEW_REVIEWS_ROOT HOME="$RC_HOME" \
+    "$TOOLS/review-config.sh" --repo-root "$RC_REPO" \
+    --repo-config-ref refs/heads/does-not-exist \
+    --orchestrator claude-code 2>"$WORK/rct-bad.err")
+rct_bad_code=$?
+rct_mutex_out=$(env -u MATTHEWS_REVIEW_REVIEWS_ROOT HOME="$RC_HOME" \
+    "$TOOLS/review-config.sh" --repo-root "$RC_REPO" \
+    --repo-config-ref "$RC_TRUSTED_REF" --repo-config-worktree \
+    --orchestrator claude-code 2>"$WORK/rct-mutex.err")
+rct_mutex_code=$?
+if [[ "$rct_trusted_scoring" == "claude:sonnet|repo-config" \
+   && $rct_branch_code -eq 0 \
+   && "$rct_branch_scoring" == "claude:opus|repo-config" \
+   && "$rct_worktree_scoring" == "claude:haiku|repo-config" \
+   && $rct_omit_code -eq 1 && -z "$rct_omit_out" \
+   && "$(cat "$WORK/rct-omit.err")" == *"no trusted repo config source was selected"* \
+   && "$(cat "$WORK/rct-omit.err")" == *"Action: pass --repo-config-ref"* \
+   && $rct_bad_code -eq 1 && -z "$rct_bad_out" \
+   && "$(cat "$WORK/rct-bad.err")" == *"does not resolve to a commit"* \
+   && $rct_mutex_code -eq 64 && -z "$rct_mutex_out" \
+   && "$(cat "$WORK/rct-mutex.err")" == *"cannot combine with --repo-config-worktree"* ]]; then
+    pass "RCT-1: base ref/branch/diagnostic worktree are distinct; omission/bad ref/conflict emit no plan"
+else
+    fail "RCT-1: repo-config trust boundary mismatch" \
+      "trusted=$rct_trusted_scoring branch=$rct_branch_code:$rct_branch_scoring worktree=$rct_worktree_scoring omit=$rct_omit_code:$rct_omit_out:$(cat "$WORK/rct-omit.err") bad=$rct_bad_code:$rct_bad_out:$(cat "$WORK/rct-bad.err") mutex=$rct_mutex_code:$rct_mutex_out:$(cat "$WORK/rct-mutex.err")"
+fi
+
+# RC-3: --models CLI beats repo config; tier override flows to inheriting roles
+rc_out=$(rc_run --orchestrator claude-code --models "scoring=claude:haiku,utility=claude:opus")
+rc_scoring=$(printf '%s' "$rc_out" | jq -r '.roles.scoring | "\(.engine):\(.model)|\(.source)"')
+rc_util=$(printf '%s' "$rc_out" | jq -r '.roles.dedup | "\(.engine):\(.model)|\(.source)"')
+if [[ "$rc_scoring" == "claude:haiku|cli" && "$rc_util" == "claude:opus|cli (tier:utility)" ]]; then
+    pass "RC-3: --models CLI override wins (role + tier)"
+else
+    fail "RC-3: CLI override mismatch" "scoring=$rc_scoring util=$rc_util"
+fi
+
+# RC-4: a selected user profile beats the conflicting trusted-repo base tier;
+# --models still beats that selected profile.
+rc_out=$(rc_run --orchestrator claude-code --profile max)
+rc_light=$(printf '%s' "$rc_out" | jq -r '.roles.light_lens | "\(.engine):\(.model)|\(.source)"')
+rc_out2=$(rc_run --orchestrator claude-code --profile max --models "light=claude:sonnet")
+rc_light2=$(printf '%s' "$rc_out2" | jq -r '.roles.light_lens | "\(.engine):\(.model)|\(.source)"')
+if [[ "$rc_light" == "claude:opus|profile(max) (tier:light)" \
+   && "$rc_light2" == "claude:sonnet|cli (tier:light)" ]]; then
+    pass "RC-4: selected user profile beats trusted repo base; CLI beats profile"
+else
+    fail "RC-4: profile/CLI precedence mismatch" "light=$rc_light light2=$rc_light2"
+fi
+
+# RCT-3: pin the complete precedence ladder with distinct values/sources.
+rct_default_deep=$(printf '%s' "$rct_trusted_out" | jq -r \
+    '.roles.deep_validate | "\(.engine):\(.model)|\(.source)"')
+rct_repo_light=$(printf '%s' "$rct_trusted_out" | jq -r \
+    '.roles.light_lens | "\(.engine):\(.model)|\(.source)"')
+rct_user_utility=$(printf '%s' "$rct_trusted_out" | jq -r \
+    '.roles.dedup | "\(.engine):\(.model)|\(.source)"')
+if [[ "$rct_default_deep" == "claude:opus|default (tier:deep)" \
+   && "$rct_user_utility" == "claude:haiku|user-config (tier:utility)" \
+   && "$rct_trusted_scoring" == "claude:sonnet|repo-config" \
+   && "$rct_repo_light" == "claude:haiku|repo-config (tier:light)" \
+   && "$rc_light" == "claude:opus|profile(max) (tier:light)" \
+   && "$rc_light2" == "claude:sonnet|cli (tier:light)" ]]; then
+    pass "RCT-3: precedence is CLI > selected profile > trusted repo > user base > defaults"
+else
+    fail "RCT-3: config precedence ladder drifted" \
+      "default=$rct_default_deep user=$rct_user_utility repo-role=$rct_trusted_scoring repo-tier=$rct_repo_light profile=$rc_light cli=$rc_light2"
+fi
+
+# RC-5: unknown --models key → exit 1 with valid-key list
+rc_err=$(rc_run --orchestrator claude-code --models "bogus=claude:opus" 2>&1); code=$?
+if [[ $code -eq 1 && "$rc_err" == *"unknown --models key 'bogus'"* && "$rc_err" == *"Valid keys:"* ]]; then
+    pass "RC-5: unknown --models key rejected with valid-key list"
+else
+    fail "RC-5: unknown-key rejection mismatch" "code=$code err=$rc_err"
+fi
+
+# RC-6: Claude role strings reject every non-empty third segment.
+rc_err=$(rc_run --orchestrator claude-code --models "deep=claude:opus:high" 2>&1); code=$?
+if [[ $code -eq 1 && "$rc_err" == *"Claude roles do not accept a third segment"* ]]; then
+    pass "RC-6: third segment rejected on claude: role string"
+else
+    fail "RC-6: Claude third-segment rejection mismatch" "code=$code err=$rc_err"
+fi
+
+# RC-7: omp: role on claude-code orchestrator → exit 1 (matrix)
+rc_err=$(rc_run --orchestrator claude-code --models "deep=omp:openai/gpt-5.3-codex" 2>&1); code=$?
+if [[ $code -eq 1 && "$rc_err" == *"wants omp:... but the orchestrator is Claude Code"* ]]; then
+    pass "RC-7: omp: engine rejected on claude-code orchestrator"
+else
+    fail "RC-7: matrix rejection mismatch" "code=$code err=$rc_err"
+fi
+
+# RC-8: omp orchestrator accepts omp: engine; codex effort validates
+rc_out=$(rc_run --orchestrator omp --models "deep=omp:openai/gpt-5.3-codex,ensemble_detect=codex::ultra")
+rc_deep=$(printf '%s' "$rc_out" | jq -r '.roles.deep_validate | "\(.engine):\(.model)"')
+rc_ens=$(printf '%s' "$rc_out" | jq -r '.roles.ensemble_detect.effort')
+if [[ "$rc_deep" == "omp:openai/gpt-5.3-codex" && "$rc_ens" == "ultra" ]]; then
+    pass "RC-8: omp orchestrator accepts omp: engine; codex effort=ultra validates"
+else
+    fail "RC-8: omp orchestrator resolution mismatch" "deep=$rc_deep ens=$rc_ens"
+fi
+
+# RC-9: missing profile → exit 1
+rc_err=$(rc_run --orchestrator claude-code --profile nope 2>&1); code=$?
+if [[ $code -eq 1 && "$rc_err" == *"profile 'nope' not found"* ]]; then
+    pass "RC-9: missing profile rejected with define-it action"
+else
+    fail "RC-9: missing-profile rejection mismatch" "code=$code err=$rc_err"
+fi
+
+# RC-10: malformed worktree config is visible only in explicit diagnostics.
+echo '{broken' > "$RC_REPO/.matthewsreview.json"
+rc_err=$(rc_run_worktree --orchestrator claude-code 2>&1); code=$?
+if [[ $code -eq 1 && "$rc_err" == *"not valid JSON"* && "$rc_err" == *".matthewsreview.json"* ]]; then
+    pass "RC-10: diagnostic worktree config rejects malformed JSON and names the file"
+else
+    fail "RC-10: malformed diagnostic config mismatch" "code=$code err=$rc_err"
+fi
+printf '%s\n' "$RC_WORKTREE_CONFIG" > "$RC_REPO/.matthewsreview.json"
+
+# RC-11: every value-taking option rejects a dangling flag cleanly. This
+# guards `shift 2` under set -u from surfacing an unstructured shell error.
+rc11_problems=""
+for rc11_flag in --repo-root --repo-config-ref --orchestrator --profile --models; do
+    rc11_err=$(rc_run "$rc11_flag" 2>&1); rc11_code=$?
+    if [[ $rc11_code -ne 64 || "$rc11_err" != *"requires a value"* ]]; then
+        rc11_problems="$rc11_problems $rc11_flag=$rc11_code:$rc11_err"
+    fi
+done
+if [[ -z "$rc11_problems" ]]; then
+    pass "RC-11: dangling value-taking options exit 64 with structured usage errors"
+else
+    fail "RC-11: dangling option handling mismatch" "$rc11_problems"
+fi
+
+# RCT-2: argument validation precedes dependency probing, while a valid
+# invocation in a jq-less environment fails with the dependency exit code and
+# a structured recovery action (never an unstructured command-not-found).
+RC_NOJQ_BIN="$WORK/rc-nojq-bin"
+mkdir -p "$RC_NOJQ_BIN"
+ln -s /bin/bash "$RC_NOJQ_BIN/bash"
+ln -s /usr/bin/dirname "$RC_NOJQ_BIN/dirname"
+rct_nojq_out=$(PATH="$RC_NOJQ_BIN" HOME="$RC_HOME" \
+    "$TOOLS/review-config.sh" --repo-root "$RC_REPO" \
+    --repo-config-ref "$RC_TRUSTED_REF" --orchestrator claude-code \
+    2>"$WORK/rct-nojq.err")
+rct_nojq_code=$?
+rct_usage_out=$(PATH="$RC_NOJQ_BIN" HOME="$RC_HOME" \
+    "$TOOLS/review-config.sh" --repo-root "$RC_REPO" \
+    --repo-config-ref "$RC_TRUSTED_REF" --orchestrator \
+    2>"$WORK/rct-usage.err")
+rct_usage_code=$?
+if [[ $rct_nojq_code -eq 5 && -z "$rct_nojq_out" \
+   && "$(cat "$WORK/rct-nojq.err")" == *"ERROR: required dependency 'jq' is not available"* \
+   && "$(cat "$WORK/rct-nojq.err")" == *"Action: install jq, then rerun review-config.sh"* \
+   && "$(cat "$WORK/rct-nojq.err")" != *"command not found"* \
+   && $rct_usage_code -eq 64 && -z "$rct_usage_out" \
+   && "$(cat "$WORK/rct-usage.err")" == *"--orchestrator requires a value"* \
+   && "$(cat "$WORK/rct-usage.err")" != *"required dependency 'jq'"* ]]; then
+    pass "RCT-2: usage validates before jq probing; valid jq-less invocation exits 5 with ERROR/Action and no plan"
+else
+    fail "RCT-2: jq dependency/usage ordering mismatch" \
+      "dependency=$rct_nojq_code:$rct_nojq_out:$(cat "$WORK/rct-nojq.err") usage=$rct_usage_code:$rct_usage_out:$(cat "$WORK/rct-usage.err")"
+fi
+
+# RC-12: doctor validates config semantics, not only JSON syntax.
+RC_DOCTOR_HOME="$WORK/doctor-config"
+mkdir -p "$RC_DOCTOR_HOME/.matthews-reviews"
+cat > "$RC_DOCTOR_HOME/.matthews-reviews/config.json" <<'EOF'
+{"roles":{"deep_validate":"unknown-engine:model"}}
+EOF
+rc12_out=$(HOME="$RC_DOCTOR_HOME" "$TOOLS/doctor.sh" --quiet 2>&1)
+rc12_code=$?
+if [[ $rc12_code -eq 5 && "$rc12_out" == *"semantic validation failed"* ]]; then
+    pass "RC-12: doctor rejects semantically invalid model config"
+else
+    fail "RC-12: doctor accepted invalid role semantics" "code=$rc12_code out=$rc12_out"
+fi
+
+# RC-12b: an omp-native model string is not "available" merely because the
+# config resolver accepts its syntax. Doctor must compare every resolved omp
+# selector with the live `omp models --json` registry.
+RC27_HOME="$WORK/doctor-omp-registry"
+RC27_BIN="$RC27_HOME/bin"
+mkdir -p "$RC27_HOME/.matthews-reviews" "$RC27_BIN"
+cat > "$RC27_HOME/.matthews-reviews/config.json" <<'EOF'
+{"roles":{"deep_validate":"omp:vendor/missing-model:max"}}
+EOF
+cat > "$RC27_BIN/omp" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "models" && "${2:-}" == "--json" ]]; then
+    printf '%s\n' '{"models":[{"selector":"vendor/available-model"}]}'
+    exit 0
+fi
+exit 0
+EOF
+chmod +x "$RC27_BIN/omp"
+rc12b_out=$(HOME="$RC27_HOME" PATH="$RC27_BIN:$PATH" \
+    "$TOOLS/doctor.sh" --quiet 2>&1)
+rc12b_code=$?
+if [[ $rc12b_code -eq 0 && "$rc12b_out" == *"vendor/missing-model"* \
+      && "$rc12b_out" == *"not present in \`omp models\`"* ]]; then
+    pass "RC-12b: doctor warns when a resolved omp model is absent from the live registry"
+else
+    fail "RC-12b: doctor treated a nonexistent omp model as available" \
+      "code=$rc12b_code out=$rc12b_out"
+fi
+
+# AS-1: the optional v1.0 artifact extensions validate at their real shape.
+AS_DIR="$WORK/artifact-schema"
+mkdir -p "$AS_DIR"
+as_plan=$(rc_run --orchestrator claude-code)
+jq --argjson plan "$as_plan" \
+    '.model_plan=$plan | .gates=$plan.gates
+     | .degraded={"lens_dispatch_failures":2,"candidate_drop_failures":1,"finalization_failures":1}' \
+    "$FIX/artifact-seed.json" > "$AS_DIR/valid.json"
+if "$TOOLS/artifact-validate.sh" --path "$AS_DIR/valid.json" >/dev/null 2>&1; then
+    pass "AS-1: resolved model_plan + gates + complete degraded extension shape is schema-valid"
+else
+    fail "AS-1: valid artifact extensions rejected"
+fi
+
+# AS-2: extension objects are closed and a degraded object must contain at
+# least one positive failure count.
+jq '.model_plan.roles.deep_lens.typo=true' "$AS_DIR/valid.json" > "$AS_DIR/extra.json"
+jq '.degraded={"lens_dispatch_failures":0,"candidate_drop_failures":0,"finalization_failures":0}' \
+    "$AS_DIR/valid.json" > "$AS_DIR/degraded-zero.json"
+as_extra_code=$(rc "$TOOLS/artifact-validate.sh" --path "$AS_DIR/extra.json")
+as_zero_code=$(rc "$TOOLS/artifact-validate.sh" --path "$AS_DIR/degraded-zero.json")
+if [[ "$as_extra_code" == "1" && "$as_zero_code" == "1" ]]; then
+    pass "AS-2: schema rejects unknown model-role fields and all-zero degraded counts"
+else
+    fail "AS-2: extension schema accepted malformed state" "extra=$as_extra_code degraded_zero=$as_zero_code"
+fi
+
+# AS-3: degraded coverage remains backward compatible with old lens-only
+# artifacts while allowing candidate-loss and finalization-only failures.
+jq '.degraded={"lens_dispatch_failures":2}' "$AS_DIR/valid.json" > "$AS_DIR/degraded-lens.json"
+jq '.degraded={"candidate_drop_failures":2}' "$AS_DIR/valid.json" > "$AS_DIR/degraded-candidate.json"
+jq '.degraded={"finalization_failures":2}' "$AS_DIR/valid.json" > "$AS_DIR/degraded-finalize.json"
+as_lens_code=$(rc "$TOOLS/artifact-validate.sh" --path "$AS_DIR/degraded-lens.json")
+as_candidate_code=$(rc "$TOOLS/artifact-validate.sh" --path "$AS_DIR/degraded-candidate.json")
+as_finalize_code=$(rc "$TOOLS/artifact-validate.sh" --path "$AS_DIR/degraded-finalize.json")
+if [[ "$as_lens_code" == "0" && "$as_candidate_code" == "0" && "$as_finalize_code" == "0" ]]; then
+    pass "AS-3: degraded schema accepts lens, candidate-loss, and finalization failure classes independently"
+else
+    fail "AS-3: degraded failure classes rejected" \
+      "lens=$as_lens_code candidate=$as_candidate_code finalize=$as_finalize_code"
+fi
+
+# AS-4: unknown source lines stay null rather than becoming a fabricated
+# line 1 citation. The renderer must omit a range when location is unknown.
+jq '(.findings[] | select(.id=="F001") | .line_range)=null' \
+    "$FIX/artifact-seed.json" > "$AS_DIR/unknown-line.json"
+as_unknown_code=$(rc "$TOOLS/artifact-validate.sh" --path "$AS_DIR/unknown-line.json")
+"$TOOLS/artifact-render.py" --input "$AS_DIR/unknown-line.json" \
+    --output "$AS_DIR/unknown-line.md" >/dev/null 2>&1
+if [[ "$as_unknown_code" == "0" ]] \
+   && grep -qF '`src/auth/session.ts`' "$AS_DIR/unknown-line.md" \
+   && ! grep -qF '`src/auth/session.ts:1`' "$AS_DIR/unknown-line.md"; then
+    pass "AS-4: unknown line range validates and renders without a fabricated :1 citation"
+else
+    fail "AS-4: unknown line range was rejected or rendered as line 1" \
+      "code=$as_unknown_code"
+fi
+
+# AS-5: current_state is authoritative for completed work. A resolved
+# finding whose historical disposition remains partial renders done and
+# cannot inflate the engage queue.
+jq '(.findings[] | select(.id=="F001")) |=
+      (.current_state="resolved" | .disposition="partial")' \
+    "$FIX/artifact-seed.json" > "$AS_DIR/resolved-partial.json"
+as_resolved=$("$TOOLS/artifact-render.py" \
+    --input "$AS_DIR/resolved-partial.json" --format dispositions)
+as_resolved_row=$(printf '%s\n' "$as_resolved" | grep '^| F001 |')
+if [[ "$as_resolved_row" == *"| resolved | done |"* ]]; then
+    pass "AS-5: resolved state overrides stale partial disposition in work-queue routing"
+else
+    fail "AS-5: resolved finding remained actionable" "$as_resolved_row"
+fi
+
+# AS-6: provenance arrays are non-empty/unique, and an inclusive source
+# range cannot run backwards.
+jq '(.findings[] | select(.id=="F001") | .sources)=[]' \
+    "$FIX/artifact-seed.json" > "$AS_DIR/empty-sources.json"
+jq '(.findings[] | select(.id=="F001") | .source_families)=["code-review","code-review"]' \
+    "$FIX/artifact-seed.json" > "$AS_DIR/duplicate-families.json"
+jq '(.findings[] | select(.id=="F001") | .line_range)=[20,10]' \
+    "$FIX/artifact-seed.json" > "$AS_DIR/reversed-range.json"
+as_empty_code=$(rc "$TOOLS/artifact-validate.sh" --path "$AS_DIR/empty-sources.json")
+as_duplicate_code=$(rc "$TOOLS/artifact-validate.sh" --path "$AS_DIR/duplicate-families.json")
+as_reversed_code=$(rc "$TOOLS/artifact-validate.sh" --path "$AS_DIR/reversed-range.json")
+if [[ "$as_empty_code" == "1" && "$as_duplicate_code" == "1" \
+      && "$as_reversed_code" == "1" ]]; then
+    pass "AS-6: schema/runtime reject empty provenance, duplicate families, and reversed ranges"
+else
+    fail "AS-6: malformed finding provenance/range accepted" \
+      "empty=$as_empty_code duplicate=$as_duplicate_code reversed=$as_reversed_code"
+fi
+
+# GB-1: --apply-decisions honors artifact gates.phase4_bands over the
+# 45/60/75 defaults. Bands [50,70,90] → score 65 lands in the uncertain
+# band (default would call it confirmed_* and demand actionability).
+GB_DIR="$WORK/gb"
+mkdir -p "$GB_DIR"
+cp "$FIX/artifact-seed.json" "$GB_DIR/art.json"
+"$TOOLS/artifact-patch.py" --path "$GB_DIR/art.json" \
+    --set-json 'gates={"phase3_gate":45,"phase4_bands":[50,70,90],"fix_threshold":60,"walkthrough_threshold":60}' >/dev/null
+gb_err=$("$TOOLS/artifact-patch.py" --path "$GB_DIR/art.json" \
+    --apply-decisions '[{"id":"F001","score_phase4":65,"validation_result":null}]' 2>&1); code=$?
+gb_disp=$(jq -r '.findings[] | select(.id=="F001") | .disposition' "$GB_DIR/art.json")
+if [[ $code -eq 0 && "$gb_disp" == "uncertain" ]]; then
+    pass "GB-1: --apply-decisions uses artifact gates.phase4_bands (65 with bands [50,70,90] → uncertain)"
+else
+    fail "GB-1: gates-band override mismatch" "code=$code disp=$gb_disp err=$gb_err"
+fi
+
+# GB-1b: strength is also derived from the resolved bands. Score 75 is
+# moderate under [50,70,90], even if a legacy tuple supplies "strong"
+# (which would match the default [45,60,75] bands).
+cp "$FIX/artifact-seed.json" "$GB_DIR/art-strength.json"
+"$TOOLS/artifact-patch.py" --path "$GB_DIR/art-strength.json" \
+    --set-json 'gates={"phase3_gate":45,"phase4_bands":[50,70,90],"fix_threshold":60,"walkthrough_threshold":60}' >/dev/null
+gb_err=$("$TOOLS/artifact-patch.py" --path "$GB_DIR/art-strength.json" \
+    --apply-decisions '[{"id":"F001","score_phase4":75,"actionability":"auto_fixable","confirmed_strength":"strong"}]' 2>&1); code=$?
+gb_strength=$(jq -r '.findings[] | select(.id=="F001") | .confirmed_strength' "$GB_DIR/art-strength.json")
+if [[ $code -eq 0 && "$gb_strength" == "moderate" ]]; then
+    pass "GB-1b: --apply-decisions derives strength from resolved bands and ignores legacy hints"
+else
+    fail "GB-1b: strength used stale/default bands" "code=$code strength=$gb_strength err=$gb_err"
+fi
+
+# GB-2: malformed persisted bands are never interpreted with fallback
+# thresholds. Duplicate and descending triples are rejected at both canonical
+# locations by the validator and renderer.
+gb_invalid_problems=""
+for gb_scope in top model-plan; do
+    for gb_shape in duplicate descending; do
+        case "$gb_shape" in
+            duplicate) gb_bands='[45,60,60]' ;;
+            descending) gb_bands='[45,75,60]' ;;
+        esac
+        gb_bad="$GB_DIR/$gb_scope-$gb_shape.json"
+        case "$gb_scope" in
+            top)
+                jq --argjson bands "$gb_bands" \
+                    '.gates.phase4_bands=$bands' "$AS_DIR/valid.json" > "$gb_bad"
+                gb_path='$gates'
+                ;;
+            model-plan)
+                jq --argjson bands "$gb_bands" \
+                    '.model_plan.gates.phase4_bands=$bands' \
+                    "$AS_DIR/valid.json" > "$gb_bad"
+                gb_path='$model_plan.gates'
+                ;;
+        esac
+        "$TOOLS/artifact-validate.sh" --path "$gb_bad" \
+            >/dev/null 2>"$gb_bad.validate.err"
+        gb_validate_code=$?
+        "$TOOLS/artifact-render.py" --input "$gb_bad" \
+            >/dev/null 2>"$gb_bad.render.err"
+        gb_render_code=$?
+        if [[ $gb_validate_code -ne 1 || $gb_render_code -ne 1 \
+           || "$(cat "$gb_bad.validate.err")" != *"$gb_path"* \
+           || "$(cat "$gb_bad.validate.err")" != *"phase4_bands"* \
+           || "$(cat "$gb_bad.render.err")" != *"$gb_path"* \
+           || "$(cat "$gb_bad.render.err")" != *"phase4_bands"* \
+           || "$(cat "$gb_bad.validate.err")$(cat "$gb_bad.render.err")" == *"Traceback"* ]]; then
+            gb_invalid_problems="$gb_invalid_problems $gb_scope/$gb_shape=validate:$gb_validate_code:$(cat "$gb_bad.validate.err");render:$gb_render_code:$(cat "$gb_bad.render.err")"
+        fi
+    done
+done
+if [[ -z "$gb_invalid_problems" ]]; then
+    pass "GB-2: duplicate/descending phase4_bands reject canonically at gates and model_plan.gates"
+else
+    fail "GB-2: malformed persisted bands escaped canonical rejection" "$gb_invalid_problems"
+fi
+
+# GB-3: compatibility controls are intentionally narrow. Fully valid gates,
+# absent/null top-level gates, an absent model_plan, and model_plan.gates=null
+# all remain renderable. A present gates object is not weakened by this test.
+gb_control_problems=""
+for gb_control in valid top-absent top-null plan-absent plan-gates-null; do
+    gb_control_art="$GB_DIR/control-$gb_control.json"
+    case "$gb_control" in
+        valid) cp "$AS_DIR/valid.json" "$gb_control_art" ;;
+        top-absent) jq 'del(.gates)' "$AS_DIR/valid.json" > "$gb_control_art" ;;
+        top-null) jq '.gates=null' "$AS_DIR/valid.json" > "$gb_control_art" ;;
+        plan-absent) jq 'del(.model_plan)' "$AS_DIR/valid.json" > "$gb_control_art" ;;
+        plan-gates-null)
+            jq '.model_plan.gates=null' "$AS_DIR/valid.json" > "$gb_control_art"
+            ;;
+    esac
+    "$TOOLS/artifact-validate.sh" --path "$gb_control_art" \
+        >/dev/null 2>"$gb_control_art.validate.err"
+    gb_control_validate=$?
+    "$TOOLS/artifact-render.py" --input "$gb_control_art" \
+        >/dev/null 2>"$gb_control_art.render.err"
+    gb_control_render=$?
+    if [[ $gb_control_validate -ne 0 || $gb_control_render -ne 0 ]]; then
+        gb_control_problems="$gb_control_problems $gb_control=validate:$gb_control_validate:$(cat "$gb_control_art.validate.err");render:$gb_control_render:$(cat "$gb_control_art.render.err")"
+    fi
+done
+if [[ -z "$gb_control_problems" ]]; then
+    pass "GB-3: valid/absent/null canonical gate controls remain renderable"
+else
+    fail "GB-3: canonical gate compatibility control regressed" "$gb_control_problems"
+fi
+
+# GB-4: mutation is atomic too: proposing a descending top-level band object
+# fails validation without changing a byte on disk.
+cp "$AS_DIR/valid.json" "$GB_DIR/atomic-invalid.json"
+gb_atomic_before=$(sha_of "$GB_DIR/atomic-invalid.json")
+gb_atomic_err=$("$TOOLS/artifact-patch.py" \
+    --path "$GB_DIR/atomic-invalid.json" \
+    --set-json 'gates={"phase3_gate":45,"phase4_bands":[45,75,60],"fix_threshold":60,"walkthrough_threshold":60}' \
+    2>&1 >/dev/null)
+gb_atomic_code=$?
+gb_atomic_after=$(sha_of "$GB_DIR/atomic-invalid.json")
+if [[ $gb_atomic_code -eq 1 && "$gb_atomic_before" == "$gb_atomic_after" \
+   && "$gb_atomic_err" == *"phase4_bands"* ]]; then
+    pass "GB-4: artifact-patch rejects descending bands atomically"
+else
+    fail "GB-4: invalid gate mutation changed bytes or escaped validation" \
+      "code=$gb_atomic_code unchanged=$([[ "$gb_atomic_before" == "$gb_atomic_after" ]] && echo yes || echo no) err=$gb_atomic_err"
+fi
+
+# CLI-1: every malformed artifact-patch / renderer invocation uses the shared
+# usage boundary: rc64, no stdout payload, and anchored ERROR/Action guidance.
+CLI_DIR="$WORK/cli-contract"
+mkdir -p "$CLI_DIR"
+cli_usage_problems=""
+cli_usage_probe() {
+    local cli_label="$1"
+    shift
+    "$@" >"$CLI_DIR/$cli_label.out" 2>"$CLI_DIR/$cli_label.err"
+    local cli_code=$?
+    local cli_errors cli_actions
+    cli_errors=$(grep -c '^ERROR:' "$CLI_DIR/$cli_label.err")
+    cli_actions=$(grep -c '^Action:' "$CLI_DIR/$cli_label.err")
+    if [[ $cli_code -ne 64 || -s "$CLI_DIR/$cli_label.out" \
+       || $cli_errors -ne 1 || $cli_actions -ne 1 ]]; then
+        cli_usage_problems="$cli_usage_problems $cli_label=$cli_code:out=$(cat "$CLI_DIR/$cli_label.out"):err=$(cat "$CLI_DIR/$cli_label.err")"
+    fi
+}
+cli_usage_probe patch-missing "$TOOLS/artifact-patch.py"
+cli_usage_probe patch-unknown "$TOOLS/artifact-patch.py" \
+    --path "$FIX/artifact-seed.json" --unknown-option
+cli_usage_probe patch-expected-missing "$TOOLS/artifact-patch.py" \
+    --path "$FIX/artifact-seed.json" --set-scores '[]'
+cli_usage_probe patch-expected-zero "$TOOLS/artifact-patch.py" \
+    --path "$FIX/artifact-seed.json" --set-scores '[]' --expected 0
+cli_usage_probe patch-expected-negative "$TOOLS/artifact-patch.py" \
+    --path "$FIX/artifact-seed.json" --set-scores '[]' --expected -1
+cli_usage_probe patch-expected-nonint "$TOOLS/artifact-patch.py" \
+    --path "$FIX/artifact-seed.json" --set-scores '[]' --expected nope
+cli_usage_probe patch-conflict "$TOOLS/artifact-patch.py" \
+    --path "$FIX/artifact-seed.json" --set-scores '[]' --expected 1 \
+    --finding-id F001
+cli_usage_probe patch-dry-run "$TOOLS/artifact-patch.py" \
+    --path "$FIX/artifact-seed.json" --set-scores '[]' --expected 1 --dry-run
+cli_usage_probe render-missing "$TOOLS/artifact-render.py"
+cli_usage_probe render-unknown "$TOOLS/artifact-render.py" \
+    --input "$FIX/artifact-seed.json" --unknown-option
+cli_usage_probe render-dangling "$TOOLS/artifact-render.py" \
+    --input "$FIX/artifact-seed.json" --format
+cli_usage_probe render-typo "$TOOLS/artifact-render.py" \
+    --input "$FIX/artifact-seed.json" --format markdwon
+if [[ -z "$cli_usage_problems" ]]; then
+    pass "CLI-1: artifact-patch and renderer usage failures are rc64 + one ERROR/Action block"
+else
+    fail "CLI-1: usage exit/stream contract mismatch" "$cli_usage_problems"
+fi
+
+# CLI-2: format typos carry an exact enum and nearest correction.
+if grep -qF 'Valid values: markdown, dispositions, pr-comment' \
+      "$CLI_DIR/render-typo.err" \
+   && grep -qF "Did you mean 'markdown'?" "$CLI_DIR/render-typo.err"; then
+    pass "CLI-2: renderer format typo lists exact values and suggests markdown"
+else
+    fail "CLI-2: renderer typo guidance drifted" "$(cat "$CLI_DIR/render-typo.err")"
+fi
+
+# CLI-3: help is informational rather than a usage failure.
+"$TOOLS/artifact-patch.py" --help \
+    >"$CLI_DIR/patch-help.out" 2>"$CLI_DIR/patch-help.err"
+cli_patch_help_code=$?
+"$TOOLS/artifact-render.py" --help \
+    >"$CLI_DIR/render-help.out" 2>"$CLI_DIR/render-help.err"
+cli_render_help_code=$?
+if [[ $cli_patch_help_code -eq 0 && $cli_render_help_code -eq 0 \
+   && -s "$CLI_DIR/patch-help.out" && -s "$CLI_DIR/render-help.out" \
+   && ! -s "$CLI_DIR/patch-help.err" && ! -s "$CLI_DIR/render-help.err" ]]; then
+    pass "CLI-3: artifact-patch and renderer --help exit 0 on stdout"
+else
+    fail "CLI-3: help treated as failure" \
+      "patch=$cli_patch_help_code:$(cat "$CLI_DIR/patch-help.err") render=$cli_render_help_code:$(cat "$CLI_DIR/render-help.err")"
+fi
+
+# CLI-4: usage normalization must not collapse operational statuses.
+cp "$FIX/artifact-seed.json" "$CLI_DIR/status.json"
+cli_status_before=$(sha_of "$CLI_DIR/status.json")
+"$TOOLS/artifact-patch.py" --path "$CLI_DIR/status.json" \
+    --finding-id F001 --set current_state=resolved \
+    >/dev/null 2>"$CLI_DIR/transition.err"
+cli_transition_code=$?
+"$TOOLS/artifact-patch.py" --path "$CLI_DIR/status.json" \
+    --set-scores '[{"id":"F001","score_phase3":1}]' --expected 2 \
+    >/dev/null 2>"$CLI_DIR/mismatch.err"
+cli_mismatch_code=$?
+cli_status_after=$(sha_of "$CLI_DIR/status.json")
+if [[ $cli_transition_code -eq 2 && $cli_mismatch_code -eq 6 \
+   && "$cli_status_before" == "$cli_status_after" ]]; then
+    pass "CLI-4: invalid transition remains rc2; expected-count mismatch remains rc6"
+else
+    fail "CLI-4: operational statuses collapsed into usage/validation" \
+      "transition=$cli_transition_code mismatch=$cli_mismatch_code unchanged=$([[ "$cli_status_before" == "$cli_status_after" ]] && echo yes || echo no)"
+fi
+
+# ------------------------------------------------------------------
+# AD: agent-dispatch.sh — harness-neutral engine dispatch (stubbed engines)
+AD_HOME="$WORK/ad"
+mkdir -p "$AD_HOME/bin" "$AD_HOME/scratch"
+cat > "$AD_HOME/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$(dirname "$0")/claude.args"
+cat >/dev/null
+echo '{"type":"result","result":"claude done","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":25,"cache_creation_input_tokens":10}}'
+EOF
+cat > "$AD_HOME/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "login" && "${2:-}" == "status" ]]; then
+    exit 0
+fi
+printf '%s\n' "$@" > "$(dirname "$0")/codex.args"
+cat >/dev/null
+out=""
+while [[ $# -gt 0 ]]; do case "$1" in -o) out="$2"; shift 2;; *) shift;; esac; done
+# real codex exec JSONL terminal event shape (CLI 0.145.x)
+echo '{"type":"turn.completed","usage":{"input_tokens":700,"cached_input_tokens":300,"output_tokens":77}}'
+[[ -n "$out" ]] && echo "codex done" > "$out"
+EOF
+cat > "$AD_HOME/bin/omp" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$(dirname "$0")/omp.args"
+printf 'omp done args=%s\n' "$*"
+EOF
+cat > "$AD_HOME/bin/claude-fail" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null; echo "boom: overloaded" >&2; exit 2
+EOF
+chmod +x "$AD_HOME/bin/"*
+echo "test prompt" > "$AD_HOME/prompt.md"
+AD="$TOOLS/agent-dispatch.sh"
+ad_path() { PATH="$AD_HOME/bin:/usr/bin:/bin" "$@"; }
+ad_arg_pair() {
+    awk -v first="$2" -v second="$3" '
+      previous == first && $0 == second { found=1 }
+      { previous=$0 }
+      END { exit(found ? 0 : 1) }
+    ' "$1"
+}
+
+# AD-1: claude engine completes with tokens summed across all usage buckets
+ad_j=$(ad_path "$AD" start --engine claude --model opus --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+sleep 1
+ad_out=$(ad_path "$AD" poll --job "$ad_j" --scratch-dir "$AD_HOME/scratch")
+if [[ $(printf '%s' "$ad_out" | jq -r '.verdict') == "completed" ]] \
+   && [[ $(printf '%s' "$ad_out" | jq -r '.tokens') == "185" ]] \
+   && [[ $(printf '%s' "$ad_out" | jq -r '.raw_output') == "claude done" ]]; then
+    pass "AD-1: claude engine start/poll → completed, tokens=185 (all usage buckets), raw_output from .result"
+else
+    fail "AD-1: claude dispatch mismatch" "$ad_out"
+fi
+
+# AD-2: codex engine extracts last-message file + token_count JSONL
+ad_j=$(ad_path "$AD" start --engine codex --effort high --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+sleep 1
+ad_out=$(ad_path "$AD" poll --job "$ad_j" --scratch-dir "$AD_HOME/scratch")
+if [[ $(printf '%s' "$ad_out" | jq -r '.verdict') == "completed" ]] \
+   && [[ $(printf '%s' "$ad_out" | jq -r '.tokens') == "777" ]] \
+   && [[ $(printf '%s' "$ad_out" | jq -r '.raw_output') == "codex done" ]]; then
+    pass "AD-2: codex engine start/poll → completed, tokens=777 (token_count event), raw_output from -o file"
+else
+    fail "AD-2: codex dispatch mismatch" "$ad_out"
+fi
+
+# AD-3: omp engine passes model and thinking as separate CLI options and
+# completes with tokens null (no usage surface).
+ad_j=$(ad_path "$AD" start --engine omp --model "openai-codex/gpt-5.6-sol" --effort max --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+sleep 1
+ad_out=$(ad_path "$AD" poll --job "$ad_j" --scratch-dir "$AD_HOME/scratch")
+if [[ $(printf '%s' "$ad_out" | jq -r '.verdict') == "completed" ]] \
+   && [[ $(printf '%s' "$ad_out" | jq -r '.tokens') == "null" ]] \
+   && [[ $(printf '%s' "$ad_out" | jq -r '.raw_output') == *"--model openai-codex/gpt-5.6-sol --thinking max @"* ]]; then
+    pass "AD-3: omp engine passes explicit --model + --thinking options, tokens=null"
+else
+    fail "AD-3: omp dispatch/thinking mismatch" "$ad_out"
+fi
+
+# AD-3b: read roles preserve exact argv boundaries and never inherit a write
+# capability: Claude plan mode without Bash, Codex read-only, omp always-ask.
+ad3b_claude_args=$(cat "$AD_HOME/bin/claude.args")
+ad3b_codex_args=$(cat "$AD_HOME/bin/codex.args")
+ad3b_omp_args=$(cat "$AD_HOME/bin/omp.args")
+if ad_arg_pair "$AD_HOME/bin/claude.args" --permission-mode plan \
+   && ! grep -qxF -- Bash "$AD_HOME/bin/claude.args" \
+   && ad_arg_pair "$AD_HOME/bin/codex.args" --sandbox read-only \
+   && ad_arg_pair "$AD_HOME/bin/omp.args" --approval-mode always-ask; then
+    pass "AD-3b: Claude, Codex, and omp read argv boundaries stay constrained"
+else
+    fail "AD-3b: read-role permission/argv contract drifted" \
+      "claude=$ad3b_claude_args codex=$ad3b_codex_args omp=$ad3b_omp_args"
+fi
+
+# AD-3c: --write opens each engine's documented write lane.
+ad3c_c=$(ad_path "$AD" start --engine claude --write \
+    --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+ad3c_x=$(ad_path "$AD" start --engine codex --write \
+    --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+ad3c_o=$(ad_path "$AD" start --engine omp --write \
+    --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+sleep 1
+ad3c_o_out=$(ad_path "$AD" poll --job "$ad3c_o" --scratch-dir "$AD_HOME/scratch")
+ad_path "$AD" poll --job "$ad3c_c" --scratch-dir "$AD_HOME/scratch" >/dev/null
+ad_path "$AD" poll --job "$ad3c_x" --scratch-dir "$AD_HOME/scratch" >/dev/null
+ad3c_claude_args=$(cat "$AD_HOME/bin/claude.args")
+ad3c_codex_args=$(cat "$AD_HOME/bin/codex.args")
+ad3c_omp_args=$(cat "$AD_HOME/bin/omp.args")
+if ad_arg_pair "$AD_HOME/bin/claude.args" --permission-mode acceptEdits \
+   && ad_arg_pair "$AD_HOME/bin/claude.args" --allowedTools Bash \
+   && ad_arg_pair "$AD_HOME/bin/codex.args" --sandbox workspace-write \
+   && ad_arg_pair "$AD_HOME/bin/omp.args" --approval-mode yolo; then
+    pass "AD-3c: write argv opens Claude Bash, Codex workspace, and omp yolo as separate arguments"
+else
+    fail "AD-3c: write-role permission/argv contract drifted" \
+      "claude=$ad3c_claude_args codex=$ad3c_codex_args omp=$ad3c_omp_args"
+fi
+
+# AD-4: failed engine → failed_terminal with exit code + error tail
+PATH="$AD_HOME/bin:/usr/bin:/bin" "$AD" start --engine claude-fail --model x --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" >/dev/null 2>&1
+# start requires a KNOWN engine; claude-fail is not one — use claude with a failing stub instead
+mv "$AD_HOME/bin/claude" "$AD_HOME/bin/claude-ok"
+cp "$AD_HOME/bin/claude-fail" "$AD_HOME/bin/claude"
+ad_j=$(ad_path "$AD" start --engine claude --model opus --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+sleep 1
+ad_out=$(ad_path "$AD" poll --job "$ad_j" --scratch-dir "$AD_HOME/scratch")
+mv "$AD_HOME/bin/claude-ok" "$AD_HOME/bin/claude"
+if [[ $(printf '%s' "$ad_out" | jq -r '.verdict') == "failed_terminal" ]] \
+   && [[ $(printf '%s' "$ad_out" | jq -r '.exit_code') == "2" ]] \
+   && [[ $(printf '%s' "$ad_out" | jq -r '.error_tail') == *"overloaded"* ]]; then
+    pass "AD-4: failing engine → failed_terminal with exit_code + error_tail"
+else
+    fail "AD-4: failed-terminal path mismatch" "$ad_out"
+fi
+
+# AD-5: start returns immediately (background child must not hold the
+# caller's stdout pipe), stop terminates the actual engine process, and
+# poll reports an explicit cancelled terminal state.
+cat > "$AD_HOME/bin/sleeper-engine.sh" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "login" && "${2:-}" == "status" ]]; then
+    exit 0
+fi
+cat >/dev/null
+exec /bin/sleep 30
+EOF
+chmod +x "$AD_HOME/bin/sleeper-engine.sh"
+cp "$AD_HOME/bin/sleeper-engine.sh" "$AD_HOME/bin/codex.sav"
+mv "$AD_HOME/bin/codex" "$AD_HOME/bin/codex.fast"
+cp "$AD_HOME/bin/sleeper-engine.sh" "$AD_HOME/bin/codex"
+ad_t0=$(date +%s)
+ad_j=$(ad_path "$AD" start --engine codex --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+ad_engine_pid=""
+ad_wait=0
+while [[ -z "$ad_engine_pid" && $ad_wait -lt 50 ]]; do
+    [[ -s "$AD_HOME/scratch/$ad_j/child_pid" ]] \
+        && ad_engine_pid=$(cat "$AD_HOME/scratch/$ad_j/child_pid")
+    [[ -n "$ad_engine_pid" ]] || sleep 0.1
+    ad_wait=$((ad_wait + 1))
+done
+ad_elapsed=$(( $(date +%s) - ad_t0 ))
+ad_v1=$(ad_path "$AD" poll --job "$ad_j" --scratch-dir "$AD_HOME/scratch" | jq -r .verdict)
+ad_path "$AD" stop --job "$ad_j" --scratch-dir "$AD_HOME/scratch" >/dev/null
+ad_v2=$(ad_path "$AD" poll --job "$ad_j" --scratch-dir "$AD_HOME/scratch" | jq -r '.verdict + ":" + .status')
+mv "$AD_HOME/bin/codex.fast" "$AD_HOME/bin/codex"
+if [[ $ad_elapsed -lt 5 && "$ad_v1" == "alive" && "$ad_v2" == "cancelled:cancelled" ]] \
+   && [[ -n "$ad_engine_pid" ]] && ! kill -0 "$ad_engine_pid" 2>/dev/null; then
+    pass "AD-5: non-blocking start; alive → stop → cancelled; engine process terminated"
+else
+    fail "AD-5: lifecycle/process cleanup mismatch" "elapsed=${ad_elapsed}s v1=$ad_v1 v2=$ad_v2 child=$ad_engine_pid"
+fi
+
+# AD-5b: start is not observable until the engine PID + identity are durable.
+# Delay only the child identity probe so the old parent/child race is
+# deterministic: without the ready handshake, start returns before these
+# files exist and an immediate stop can orphan the engine.
+ad_real_ps=$(PATH="/usr/bin:/bin" command -v ps)
+cat > "$AD_HOME/bin/identity-engine.sh" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "login" && "\${2:-}" == "status" ]]; then
+    exit 0
+fi
+printf '%s\n' "\$\$" > "$AD_HOME/engine.pid"
+cat >/dev/null
+exec /bin/sleep 30
+EOF
+cat > "$AD_HOME/bin/ps" <<EOF
+#!/usr/bin/env bash
+target=""
+previous=""
+for arg in "\$@"; do
+    if [[ "\$previous" == "-p" ]]; then target="\$arg"; fi
+    previous="\$arg"
+done
+if [[ "\$*" == *"lstart="* && -s "$AD_HOME/engine.pid" ]] \
+   && [[ "\$target" == "\$(cat "$AD_HOME/engine.pid")" ]]; then
+    /bin/sleep 2
+fi
+exec "$ad_real_ps" "\$@"
+EOF
+chmod +x "$AD_HOME/bin/identity-engine.sh" "$AD_HOME/bin/ps"
+mv "$AD_HOME/bin/codex" "$AD_HOME/bin/codex.fast"
+cp "$AD_HOME/bin/identity-engine.sh" "$AD_HOME/bin/codex"
+ad5b_out=$(ad_path "$AD" start --engine codex \
+    --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch")
+ad5b_job=$(printf '%s' "$ad5b_out" | jq -r '.job_id // empty')
+ad5b_ready=false
+if [[ -n "$ad5b_job" && -s "$AD_HOME/scratch/$ad5b_job/child_identity" \
+      && -f "$AD_HOME/scratch/$ad5b_job/ready" ]]; then
+    ad5b_ready=true
+fi
+# Wait by condition before cleanup even on the intentionally failing old path,
+# so this regression test never leaves its sleeper behind.
+ad5b_wait=0
+while [[ -n "$ad5b_job" && ! -f "$AD_HOME/scratch/$ad5b_job/ready" \
+         && $ad5b_wait -lt 40 ]]; do
+    sleep 0.1
+    ad5b_wait=$((ad5b_wait + 1))
+done
+[[ -z "$ad5b_job" ]] || \
+    ad_path "$AD" stop --job "$ad5b_job" --scratch-dir "$AD_HOME/scratch" >/dev/null
+mv "$AD_HOME/bin/codex.fast" "$AD_HOME/bin/codex"
+rm -f "$AD_HOME/bin/ps"
+if [[ "$ad5b_ready" == "true" ]]; then
+    pass "AD-5b: start waits for durable child PID/identity readiness"
+else
+    fail "AD-5b: start exposed a job before child identity was durable" \
+      "job=$ad5b_job out=$ad5b_out"
+fi
+
+# AD-5c: setup failures are terminal. A scratch path that is a regular file
+# must not produce a plausible job id or launch an untracked child.
+printf 'not a directory\n' > "$AD_HOME/not-a-directory"
+ad5c_out=$(ad_path "$AD" start --engine claude \
+    --prompt-file "$AD_HOME/prompt.md" \
+    --scratch-dir "$AD_HOME/not-a-directory" 2>&1)
+ad5c_code=$?
+if [[ $ad5c_code -ne 0 && "$ad5c_out" == *"Action:"* \
+      && "$ad5c_out" != *'"job_id"'* ]]; then
+    pass "AD-5c: setup write failure aborts before dispatch and names recovery"
+else
+    fail "AD-5c: setup failure emitted a plausible dispatch" \
+      "code=$ad5c_code out=$ad5c_out"
+fi
+
+# AD-6: missing engine CLI → exit 5 with install action
+ad_err=$(PATH="/usr/bin:/bin" "$AD" start --engine omp --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" 2>&1); code=$?
+if [[ $code -eq 5 && "$ad_err" == *"not on PATH"* && "$ad_err" == *"Action:"* ]]; then
+    pass "AD-6: missing engine CLI → exit 5 with install action"
+else
+    fail "AD-6: missing-CLI path mismatch" "code=$code err=$ad_err"
+fi
+
+# AD-7: malformed prompt/job paths keep the shared error-as-prompt recovery
+# contract instead of emitting a bare terminal error.
+ad_prompt_err=$(ad_path "$AD" start --engine claude --model opus --prompt-file "$AD_HOME/missing.md" --scratch-dir "$AD_HOME/scratch" 2>&1); ad_prompt_code=$?
+ad_poll_err=$(ad_path "$AD" poll --job ad_20260720T000000Z_123 --scratch-dir "$AD_HOME/scratch" 2>&1); ad_poll_code=$?
+ad_stop_err=$(ad_path "$AD" stop --job ad_20260720T000000Z_123 --scratch-dir "$AD_HOME/scratch" 2>&1); ad_stop_code=$?
+if [[ $ad_prompt_code -eq 1 && "$ad_prompt_err" == *"Action:"* \
+   && $ad_poll_code -eq 1 && "$ad_poll_err" == *"Action:"* \
+   && $ad_stop_code -eq 1 && "$ad_stop_err" == *"Action:"* ]]; then
+    pass "AD-7: missing prompt/job paths include recovery actions"
+else
+    fail "AD-7: structured path errors missing" "prompt=$ad_prompt_err poll=$ad_poll_err stop=$ad_stop_err"
+fi
+
+# AD-7b: job IDs are path components; traversal or arbitrary names are
+# rejected before any scratch path is constructed.
+ad7b_poll=$(ad_path "$AD" poll --job ../../tmp --scratch-dir "$AD_HOME/scratch" 2>&1)
+ad7b_poll_code=$?
+ad7b_stop=$(ad_path "$AD" stop --job not-a-dispatch-id --scratch-dir "$AD_HOME/scratch" 2>&1)
+ad7b_stop_code=$?
+if [[ $ad7b_poll_code -eq 64 && "$ad7b_poll" == *"invalid job id"* \
+   && $ad7b_stop_code -eq 64 && "$ad7b_stop" == *"invalid job id"* ]]; then
+    pass "AD-7b: poll/stop reject untrusted job path components"
+else
+    fail "AD-7b: malformed job id escaped validation" \
+      "poll=$ad7b_poll_code:$ad7b_poll stop=$ad7b_stop_code:$ad7b_stop"
+fi
+
+# AD-7c: a missing/corrupt identity is unverifiable, not evidence that the
+# PID is safe to signal or gone. Stop fails closed without a terminal marker.
+/bin/sleep 30 &
+ad7c_pid=$!
+ad7c_job=ad_20260720T000001Z_456
+ad7c_dir="$AD_HOME/scratch/$ad7c_job"
+mkdir -p "$ad7c_dir"
+printf '%s' "$ad7c_pid" > "$ad7c_dir/pid"
+printf '%s' "definitely-not-a-v1-identity" > "$ad7c_dir/pid_identity"
+ad7c_out=$(ad_path "$AD" stop --job "$ad7c_job" \
+    --scratch-dir "$AD_HOME/scratch" 2>/dev/null)
+ad7c_code=$?
+if [[ $ad7c_code -ne 0 ]] && kill -0 "$ad7c_pid" 2>/dev/null \
+   && printf '%s' "$ad7c_out" | jq -e --arg job "$ad7c_job" '
+        keys == [
+          "engine_alive", "engine_state", "job_id", "reason", "status",
+          "verdict", "wrapper_alive", "wrapper_state"
+        ]
+        and .verdict == "stop_failed" and .status == "stop_failed"
+        and .job_id == $job
+        and (.reason | type == "string" and length > 0)
+        and (.wrapper_alive | type == "boolean")
+        and (.engine_alive | type == "boolean")
+        and .wrapper_state == "unverifiable"
+      ' >/dev/null \
+   && [[ ! -e "$ad7c_dir/terminal/ready" ]]; then
+    pass "AD-7c: unverifiable identity yields full stop_failed schema and no cancellation record"
+else
+    fail "AD-7c: stop trusted or sealed an unverifiable PID" \
+      "code=$ad7c_code out=$ad7c_out terminal=$([[ -e "$ad7c_dir/terminal/ready" ]] && echo yes || echo no)"
+fi
+kill "$ad7c_pid" 2>/dev/null || true
+wait "$ad7c_pid" 2>/dev/null || true
+
+# AD-8: every value-taking option rejects a dangling flag with usage exit 64.
+ad8_problems=""
+for ad8_flag in --engine --model --effort --prompt-file --scratch-dir --job \
+        --stall-threshold-sec --wall-clock-ceiling-sec; do
+    ad8_err=$(ad_path "$AD" start "$ad8_flag" 2>&1); ad8_code=$?
+    if [[ $ad8_code -ne 64 || "$ad8_err" != *"requires a value"* ]]; then
+        ad8_problems="$ad8_problems $ad8_flag=$ad8_code:$ad8_err"
+    fi
+done
+if [[ -z "$ad8_problems" ]]; then
+    pass "AD-8: dangling value-taking options exit 64 with structured usage errors"
+else
+    fail "AD-8: dangling option handling mismatch" "$ad8_problems"
+fi
+
+# AD-9: jq is an explicit dependency, not a late command-not-found failure.
+ad9_err=$(PATH="$AD_HOME/bin" /bin/bash "$AD" start --engine claude \
+    --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" 2>&1)
+ad9_code=$?
+if [[ $ad9_code -eq 5 && "$ad9_err" == *"requires jq"* && "$ad9_err" == *"Action:"* ]]; then
+    pass "AD-9: missing jq exits 5 with an install action before dispatch"
+else
+    fail "AD-9: missing-jq contract mismatch" "code=$ad9_code err=$ad9_err"
+fi
+
+# AD-10: large omp prompts are passed by @file reference, not copied into
+# argv (which exceeds Darwin/Linux argument limits on realistic reviews).
+AD_LARGE="$AD_HOME/large-prompt.md"
+awk 'BEGIN { s="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"; for (i=0; i<16384; i++) printf "%s", s }' > "$AD_LARGE"
+ad_j=$(ad_path "$AD" start --engine omp --model "openai-codex/gpt-5.6-sol" \
+    --effort high --prompt-file "$AD_LARGE" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+sleep 1
+ad_out=$(ad_path "$AD" poll --job "$ad_j" --scratch-dir "$AD_HOME/scratch")
+ad_large_raw=$(printf '%s' "$ad_out" | jq -r '.raw_output')
+if [[ $(printf '%s' "$ad_out" | jq -r '.verdict') == "completed" ]] \
+   && [[ "$ad_large_raw" == *"@$AD_HOME/scratch/$ad_j/prompt.md"* ]] \
+   && [[ ${#ad_large_raw} -lt 500 ]]; then
+    pass "AD-10: 1 MiB omp prompt dispatches via compact @file argument"
+else
+    fail "AD-10: large omp prompt was not file-backed" "$ad_out"
+fi
+
+# CG-1: generated Codex skills preserve thematic `---` lines after command
+# frontmatter; only the first frontmatter pair is stripped.
+CG_REPO="$WORK/codex-gen"
+mkdir -p "$CG_REPO/commands"
+cat > "$CG_REPO/commands/example.md" <<'EOF'
+---
+description: Frontmatter parser fixture
+---
+# Example command
+
+Before thematic break.
+
+---
+
+After thematic break.
+
+Read `fragments/nested.md`.
+EOF
+if "$REPO/scripts/build-codex-skills.sh" "$CG_REPO" >/dev/null \
+   && grep -qF -- '---' "$CG_REPO/dist/codex-skills/matthewsreview-example/SKILL.md" \
+   && grep -qF 'After thematic break.' "$CG_REPO/dist/codex-skills/matthewsreview-example/SKILL.md"; then
+    pass "CG-1: Codex generator strips only frontmatter and preserves later --- content"
+else
+    fail "CG-1: generated skill truncated content after a thematic break"
+fi
+
+# CG-2: generation is atomic. A later source failure cannot destroy the
+# previously complete output tree that installed symlinks target.
+cg_skill="$CG_REPO/dist/codex-skills/matthewsreview-example/SKILL.md"
+cg_before=$(sha_of "$cg_skill")
+ln -s "$CG_REPO/does-not-exist" "$CG_REPO/commands/zbad.md"
+"$REPO/scripts/build-codex-skills.sh" "$CG_REPO" >/dev/null 2>&1
+cg_code=$?
+cg_after=$(sha_of "$cg_skill")
+if [[ $cg_code -ne 0 && "$cg_before" == "$cg_after" \
+      && ! -e "$CG_REPO/dist/codex-skills/matthewsreview-zbad" ]]; then
+    pass "CG-2: failed Codex generation preserves the previous complete output"
+else
+    fail "CG-2: failed generation exposed a partial output tree" "code=$cg_code before=$cg_before after=$cg_after"
+fi
+
+# CG-3: an output-swap failure restores the previous complete tree instead
+# of deleting the install target before the replacement can land.
+CG_BIN="$WORK/codex-gen-bin"
+mkdir -p "$CG_BIN"
+cat > "$CG_BIN/mv" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == *"/.codex-skills.tmp."* && "${2:-}" == */dist/codex-skills ]]; then
+    exit 70
+fi
+exec /bin/mv "$@"
+EOF
+chmod +x "$CG_BIN/mv"
+cg_before=$(sha_of "$cg_skill")
+rm "$CG_REPO/commands/zbad.md"
+PATH="$CG_BIN:$PATH" "$REPO/scripts/build-codex-skills.sh" "$CG_REPO" >/dev/null 2>&1
+cg_code=$?
+cg_after=$(sha_of "$cg_skill")
+if [[ $cg_code -ne 0 && "$cg_before" == "$cg_after" ]]; then
+    pass "CG-3: failed output swap restores the previous generated tree"
+else
+    fail "CG-3: failed output swap destroyed the previous generated tree" "code=$cg_code before=$cg_before after=$cg_after"
+fi
+
+# CG-5: every shipped generated skill carries the same canonical plugin
+# root and rooted nested-fragment rule.
+cg5_bad=""
+if ! "$REPO/scripts/build-codex-skills.sh" "$REPO" >/dev/null; then
+    cg5_bad=" generator-failed"
+else
+    for cg5_skill in "$REPO"/dist/codex-skills/*/SKILL.md; do
+        if ! grep -qF "MREVIEW_ROOT=$REPO" "$cg5_skill" \
+           || ! grep -qF "\`$REPO/fragments/_prelude-shared.md\`" "$cg5_skill"; then
+            cg5_bad="$cg5_bad $(basename "$(dirname "$cg5_skill")")"
+        fi
+    done
+fi
+if [[ -z "$cg5_bad" ]]; then
+    pass "CG-5: every shipped Codex skill roots top-level and nested fragments"
+else
+    fail "CG-5: generated skills missing canonical fragment roots" "$cg5_bad"
+fi
+
+# CG-4: a relative repo argument is canonicalized before it is baked into
+# generated skills, and every nested fragment read is rooted there.
+(cd "$WORK" && "$REPO/scripts/build-codex-skills.sh" codex-gen >/dev/null)
+cg_code=$?
+if [[ $cg_code -eq 0 ]] \
+   && grep -qF "MREVIEW_ROOT=$CG_REPO" "$cg_skill" \
+   && grep -qF "\`$CG_REPO/fragments/nested.md\`" "$cg_skill"; then
+    pass "CG-4: generated skills bake a canonical root for every fragment read"
+else
+    fail "CG-4: generated skill fragment root is missing or relative"
+fi
+
+# CG-6: every readable command must have a line-1 frontmatter opener, a later
+# closer, and a nonblank description inside that first pair. A malformed later
+# command must report its path/reason without replacing the prior complete tree.
+CG_VALIDATE_REPO="$WORK/codex-frontmatter"
+mkdir -p "$CG_VALIDATE_REPO/commands"
+cat > "$CG_VALIDATE_REPO/commands/good.md" <<'EOF'
+---
+description: Known-good command
+---
+# Good
+EOF
+if "$REPO/scripts/build-codex-skills.sh" "$CG_VALIDATE_REPO" >/dev/null; then
+    cg6_skill="$CG_VALIDATE_REPO/dist/codex-skills/matthewsreview-good/SKILL.md"
+    cg6_before=$(sha_of "$cg6_skill")
+    # Simulate a skill produced by a command that was removed after the prior
+    # complete publication. Any partial tree replacement would drop this path
+    # even if the regenerated good/SKILL.md happened to be byte-identical.
+    cg6_prior_skill="$CG_VALIDATE_REPO/dist/codex-skills/matthewsreview-removed/SKILL.md"
+    mkdir -p "$(dirname "$cg6_prior_skill")"
+    printf 'prior complete tree marker\n' > "$cg6_prior_skill"
+    cg6_prior_before=$(sha_of "$cg6_prior_skill")
+    # Change an existing source after the baseline. A flawed builder that
+    # writes valid commands directly into the live tree before a later failure
+    # would now alter cg6_skill even if it preserved the removed-skill marker.
+    cat > "$CG_VALIDATE_REPO/commands/good.md" <<'EOF'
+---
+description: Changed after the prior complete publication
+---
+# Changed good command
+EOF
+    cg6_failures=""
+    for cg6_case in missing-opener missing-closer missing-description blank-description; do
+        case "$cg6_case" in
+            missing-opener)
+                cat > "$CG_VALIDATE_REPO/commands/zbad.md" <<'EOF'
+# Not frontmatter
+---
+description: Too late
+---
+EOF
+                cg6_reason="line 1 must be ---"
+                ;;
+            missing-closer)
+                cat > "$CG_VALIDATE_REPO/commands/zbad.md" <<'EOF'
+---
+description: No closing delimiter
+# Body starts without a closer
+EOF
+                cg6_reason="missing closing ---"
+                ;;
+            missing-description)
+                cat > "$CG_VALIDATE_REPO/commands/zbad.md" <<'EOF'
+---
+argument-hint: "[--full]"
+---
+description: Too late for the first frontmatter pair
+# Missing in-pair description
+EOF
+                cg6_reason="description must be present and nonblank"
+                ;;
+            blank-description)
+                cat > "$CG_VALIDATE_REPO/commands/zbad.md" <<'EOF'
+---
+description:    
+---
+# Blank description
+EOF
+                cg6_reason="description must be present and nonblank"
+                ;;
+        esac
+        cg6_err=$("$REPO/scripts/build-codex-skills.sh" "$CG_VALIDATE_REPO" 2>&1)
+        cg6_code=$?
+        cg6_after=$(sha_of "$cg6_skill")
+        if [[ -f "$cg6_prior_skill" ]]; then
+            cg6_prior_after=$(sha_of "$cg6_prior_skill")
+        else
+            cg6_prior_after="<missing>"
+        fi
+        if [[ $cg6_code -eq 0 \
+              || "$cg6_err" != *"$CG_VALIDATE_REPO/commands/zbad.md"* \
+              || "$cg6_err" != *"$cg6_reason"* \
+              || "$cg6_before" != "$cg6_after" \
+              || "$cg6_prior_before" != "$cg6_prior_after" \
+              || -e "$CG_VALIDATE_REPO/dist/codex-skills/matthewsreview-zbad" ]]; then
+            cg6_failures="$cg6_failures $cg6_case(code=$cg6_code)"
+        fi
+        rm "$CG_VALIDATE_REPO/commands/zbad.md"
+    done
+    if [[ -z "$cg6_failures" ]]; then
+        pass "CG-6: malformed frontmatter reports path/reason and preserves prior generated tree"
+    else
+        fail "CG-6: malformed frontmatter validation/atomicity mismatch" "$cg6_failures"
+    fi
+else
+    fail "CG-6: baseline Codex generation failed"
+fi
+
+
+# CI-1: reinstall removes stale generated matthewsreview links even when
+# they point at a checkout that moved, then refreshes current links.
+CI_HOME="$WORK/codex-install-home"
+mkdir -p "$CI_HOME/.agents/skills" \
+    "$WORK/old-checkout/dist/codex-skills/matthewsreview-obsolete"
+ln -s "$WORK/old-checkout/dist/codex-skills/matthewsreview-obsolete" \
+    "$CI_HOME/.agents/skills/matthewsreview-obsolete"
+if HOME="$CI_HOME" "$REPO/install.sh" --codex >/dev/null \
+   && [[ ! -L "$CI_HOME/.agents/skills/matthewsreview-obsolete" ]] \
+   && [[ -L "$CI_HOME/.agents/skills/matthewsreview-review" ]]; then
+    pass "CI-1: Codex reinstall prunes stale owned links and refreshes current skills"
+else
+    fail "CI-1: Codex reinstall did not converge generated symlinks"
+fi
+
+# CI-2: a real skill directory is user data, never recursively replaced.
+CI_COLLIDE_HOME="$WORK/codex-install-collision"
+mkdir -p "$CI_COLLIDE_HOME/.agents/skills/matthewsreview-review"
+printf 'keep\n' > "$CI_COLLIDE_HOME/.agents/skills/matthewsreview-review/sentinel"
+ci_err=$(HOME="$CI_COLLIDE_HOME" "$REPO/install.sh" --codex 2>&1)
+ci_code=$?
+if [[ $ci_code -ne 0 && "$ci_err" == *"refusing to replace existing skill directory"* \
+      && $(cat "$CI_COLLIDE_HOME/.agents/skills/matthewsreview-review/sentinel") == "keep" ]]; then
+    pass "CI-2: Codex installer refuses real-directory collisions without data loss"
+else
+    fail "CI-2: Codex installer collision safety mismatch" "code=$ci_code err=$ci_err"
+fi
+
+# CI-3: destination preflight derives every desired skill from commands/*.md,
+# so a newly added command collision aborts before rebuilding the live
+# dist/codex-skills tree targeted by already-installed symlinks.
+CI_PREFLIGHT_REPO="$WORK/codex-install-preflight"
+CI_PREFLIGHT_HOME="$WORK/codex-install-preflight-home"
+mkdir -p "$CI_PREFLIGHT_REPO/commands" \
+    "$CI_PREFLIGHT_REPO/scripts" \
+    "$CI_PREFLIGHT_REPO/skills/matthewsreview" \
+    "$CI_PREFLIGHT_REPO/dist/codex-skills/matthewsreview-existing" \
+    "$CI_PREFLIGHT_HOME/.agents/skills"
+cp "$REPO/install.sh" "$CI_PREFLIGHT_REPO/install.sh"
+cp "$REPO/scripts/build-codex-skills.sh" "$CI_PREFLIGHT_REPO/scripts/build-codex-skills.sh"
+chmod +x "$CI_PREFLIGHT_REPO/install.sh" "$CI_PREFLIGHT_REPO/scripts/build-codex-skills.sh"
+cat > "$CI_PREFLIGHT_REPO/commands/existing.md" <<'EOF'
+---
+description: Rebuilt content must stay hidden on collision
+---
+# Existing replacement
+EOF
+cat > "$CI_PREFLIGHT_REPO/commands/new-command.md" <<'EOF'
+---
+description: Newly added command
+---
+# New command
+EOF
+printf 'keep regular-file collision\n' \
+    > "$CI_PREFLIGHT_HOME/.agents/skills/matthewsreview-new-command"
+printf 'installed-before-collision\n' \
+    > "$CI_PREFLIGHT_REPO/dist/codex-skills/matthewsreview-existing/SKILL.md"
+ln -s "$CI_PREFLIGHT_REPO/dist/codex-skills/matthewsreview-existing" \
+    "$CI_PREFLIGHT_HOME/.agents/skills/matthewsreview-existing"
+ci3_before=$(sha_of "$CI_PREFLIGHT_HOME/.agents/skills/matthewsreview-existing/SKILL.md")
+ci3_err=$(HOME="$CI_PREFLIGHT_HOME" "$CI_PREFLIGHT_REPO/install.sh" --codex 2>&1)
+ci3_code=$?
+ci3_after=$(sha_of "$CI_PREFLIGHT_HOME/.agents/skills/matthewsreview-existing/SKILL.md")
+if [[ $ci3_code -ne 0 \
+      && "$ci3_err" == *"matthewsreview-new-command"* \
+      && "$ci3_before" == "$ci3_after" \
+      && $(cat "$CI_PREFLIGHT_HOME/.agents/skills/matthewsreview-new-command") == "keep regular-file collision" \
+      && ! -e "$CI_PREFLIGHT_REPO/dist/codex-skills/matthewsreview-new-command" ]]; then
+    pass "CI-3: new-command regular-file collision aborts before rebuilding installed symlink targets"
+else
+    fail "CI-3: desired-command preflight ran after generated-tree rebuild" \
+        "code=$ci3_code before=$ci3_before after=$ci3_after err=$ci3_err"
+fi
+
+# CI-4: the workflow front-door destination is part of the same preflight.
+# Its collision must likewise leave every installed generated target unchanged.
+rm -rf "$CI_PREFLIGHT_REPO/dist/codex-skills" \
+    "$CI_PREFLIGHT_HOME/.agents/skills/matthewsreview-new-command"
+mkdir -p "$CI_PREFLIGHT_REPO/dist/codex-skills/matthewsreview-existing" \
+    "$CI_PREFLIGHT_HOME/.agents/skills/matthewsreview"
+printf 'installed-before-front-door-collision\n' \
+    > "$CI_PREFLIGHT_REPO/dist/codex-skills/matthewsreview-existing/SKILL.md"
+ci4_before=$(sha_of "$CI_PREFLIGHT_HOME/.agents/skills/matthewsreview-existing/SKILL.md")
+ci4_err=$(HOME="$CI_PREFLIGHT_HOME" "$CI_PREFLIGHT_REPO/install.sh" --codex 2>&1)
+ci4_code=$?
+ci4_after=$(sha_of "$CI_PREFLIGHT_HOME/.agents/skills/matthewsreview-existing/SKILL.md")
+if [[ $ci4_code -ne 0 \
+      && "$ci4_err" == *"$CI_PREFLIGHT_HOME/.agents/skills/matthewsreview"* \
+      && "$ci4_before" == "$ci4_after" \
+      && ! -e "$CI_PREFLIGHT_REPO/dist/codex-skills/matthewsreview-new-command" ]]; then
+    pass "CI-4: front-door collision aborts before rebuilding installed symlink targets"
+else
+    fail "CI-4: front-door preflight ran after generated-tree rebuild" \
+        "code=$ci4_code before=$ci4_before after=$ci4_after err=$ci4_err"
+fi
+
+# PKG-DOC-1: every schema-defined degraded counter is documented, along with
+# the optional/nonnegative and at-least-one-positive semantics. Deriving the
+# key set prevents the schema/docs drift this assertion is meant to catch.
+pkg_missing_degraded=""
+while IFS= read -r pkg_degraded_key; do
+    if ! grep -qF "\`$pkg_degraded_key\`" "$REPO/docs/state-and-gates.md"; then
+        pkg_missing_degraded="${pkg_missing_degraded}${pkg_degraded_key} "
+    fi
+done < <(jq -r '.["$defs"].degraded.properties | keys[]' "$TOOLS/schema-v1.json")
+if [[ -z "$pkg_missing_degraded" ]] \
+   && grep -qF 'All degraded counters are optional' "$REPO/docs/state-and-gates.md" \
+   && grep -qF 'at least one present counter must be positive' "$REPO/docs/state-and-gates.md" \
+   && grep -qF 'incomplete review coverage' "$REPO/docs/state-and-gates.md" \
+   && grep -qF 'incomplete finalization' "$REPO/docs/state-and-gates.md"; then
+    pass "PKG-DOC-1: degraded metadata docs cover every schema counter and invariant"
+else
+    fail "PKG-DOC-1: degraded metadata docs are incomplete" \
+        "missing_schema_keys=$pkg_missing_degraded"
+fi
+
+# PKG-DOC-2: :review documents the supported model-plan override rather than
+# advertising the rejected --codex-review-effort flag.
+if ! grep -qF -- '--codex-review-effort' "$REPO/docs/pipeline.md" \
+   && grep -qF -- "--models 'ensemble_detect=codex::<effort>'" "$REPO/docs/pipeline.md"; then
+    pass "PKG-DOC-2: pipeline docs use the supported Codex ensemble effort override"
+else
+    fail "PKG-DOC-2: pipeline docs advertise a nonexistent review effort flag"
+fi
+
+# PKG-WF-1: validate permissions and checkout credentials in their YAML
+# structure. A nested job override, comment, or unrelated step must not satisfy
+# the contract.
+pkg_workflow_shape=$(python3 - "$REPO/.github/workflows/smoke.yml" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+lines = Path(sys.argv[1]).read_text().splitlines()
+permissions = [
+    (index, len(line) - len(line.lstrip()))
+    for index, line in enumerate(lines)
+    if re.match(r"^\s*permissions\s*:", line)
+]
+if permissions != [(next((i for i, line in enumerate(lines) if line == "permissions:"), -1), 0)]:
+    print("bad-permissions-count-or-depth")
+    raise SystemExit
+
+permission_index = permissions[0][0]
+permission_body = []
+for line in lines[permission_index + 1:]:
+    if line and not line[0].isspace() and not line.lstrip().startswith("#"):
+        break
+    if line.strip() and not line.lstrip().startswith("#"):
+        permission_body.append(line)
+if permission_body != ["  contents: read"]:
+    print("bad-permissions-body")
+    raise SystemExit
+
+checkout = [
+    index for index, line in enumerate(lines)
+    if re.match(r"^\s*-\s+uses:\s*actions/checkout@", line)
+]
+if len(checkout) != 1:
+    print("bad-checkout-count")
+    raise SystemExit
+start = checkout[0]
+step_indent = len(lines[start]) - len(lines[start].lstrip())
+end = len(lines)
+for index in range(start + 1, len(lines)):
+    stripped = lines[index].lstrip()
+    indent = len(lines[index]) - len(stripped)
+    if stripped.startswith("- ") and indent == step_indent:
+        end = index
+        break
+segment = lines[start:end]
+with_rows = [
+    (index, len(line) - len(line.lstrip()))
+    for index, line in enumerate(segment)
+    if line.strip() == "with:"
+]
+credential_rows = [
+    (index, len(line) - len(line.lstrip()))
+    for index, line in enumerate(segment)
+    if line.strip() == "persist-credentials: false"
+]
+if len(with_rows) != 1 or len(credential_rows) != 1:
+    print("bad-checkout-with-shape")
+elif credential_rows[0][0] <= with_rows[0][0] or credential_rows[0][1] <= with_rows[0][1]:
+    print("misnested-checkout-credentials")
+else:
+    print("ok")
+PY
+)
+if [[ "$pkg_workflow_shape" == "ok" ]]; then
+    pass "PKG-WF-1: smoke workflow has exact top-level contents:read permissions and credentialless checkout"
+else
+    fail "PKG-WF-1: smoke workflow permission/checkout contract drifted" \
+        "shape=$pkg_workflow_shape"
+fi
+
+# DP-1: artifact-render.py --format dispositions emits one row per finding
+# plus a totals line; suggested actions follow the disposition mapping.
+dp_out=$("$TOOLS/artifact-render.py" --input "$FIX/artifact-seed.json" --format dispositions)
+dp_rows=$(printf '%s\n' "$dp_out" | grep -c '^| F0')
+dp_findings=$(jq '.findings | length' "$FIX/artifact-seed.json")
+if [[ "$dp_rows" == "$dp_findings" ]] \
+   && printf '%s\n' "$dp_out" | grep -qE '\*\*[0-9]+ engage / [0-9]+ skip\*\*'; then
+    pass "DP-1: dispositions export row count == findings count + totals line present"
+else
+    fail "DP-1: dispositions export mismatch" "rows=$dp_rows findings=$dp_findings"
+fi
+
+# DP-2: claim text is inert Markdown table content. Truncation remains based
+# on the plain claim, then HTML-significant characters are escaped.
+DP_ART="$WORK/dp-art.json"
+jq '(.findings[] | select(.id == "F001") | .claim) = "<details>|unsafe"' \
+    "$FIX/artifact-seed.json" > "$DP_ART"
+dp_escaped=$("$TOOLS/artifact-render.py" --input "$DP_ART" --format dispositions)
+if [[ "$dp_escaped" == *"&lt;details&gt;\\|unsafe"* && "$dp_escaped" != *"<details>"* ]]; then
+    pass "DP-2: dispositions escape HTML-significant claim text"
+else
+    fail "DP-2: dispositions claim escaping mismatch" "$dp_escaped"
+fi
+
+# DP-3: an interrupted fix is recovery work, regardless of whether the
+# finding was mechanical or manual. It must not inflate the executable engage
+# queue; ordinary open/resolved rows remain walkthrough/done controls.
+DP_ROUTE_ART="$WORK/dp-route.json"
+jq '
+  .findings |= map(select(.id == "F001" or .id == "F002" or .id == "F004" or .id == "F005"))
+  | (.findings[] | select(.id == "F001" or .id == "F002") | .current_state) = "attempted"
+  | (.findings[] | select(.id == "F005")) |=
+      (.current_state = "resolved" | .disposition = "resolved" | .is_actionable = false)
+' "$FIX/artifact-seed.json" > "$DP_ROUTE_ART"
+dp_route=$("$TOOLS/artifact-render.py" \
+    --input "$DP_ROUTE_ART" --format dispositions)
+dp_attempted_mechanical=$(printf '%s\n' "$dp_route" | grep '^| F001 |')
+dp_attempted_manual=$(printf '%s\n' "$dp_route" | grep '^| F002 |')
+dp_open_control=$(printf '%s\n' "$dp_route" | grep '^| F004 |')
+dp_resolved_control=$(printf '%s\n' "$dp_route" | grep '^| F005 |')
+if [[ "$dp_attempted_mechanical" == *"| attempted | recover |"* \
+   && "$dp_attempted_manual" == *"| attempted | recover |"* \
+   && "$dp_open_control" == *"| open | walkthrough |"* \
+   && "$dp_resolved_control" == *"| resolved | done |"* \
+   && "$dp_route" == *"**1 engage / 3 skip**"* \
+   && "$dp_route" == *"recover → finish or reset the interrupted fix before fix/walkthrough"* ]]; then
+    pass "DP-3: attempted mechanical/manual findings recover without engaging; open/resolved controls remain"
+else
+    fail "DP-3: interrupted-fix disposition routing mismatch" \
+      "mechanical=$dp_attempted_mechanical manual=$dp_attempted_manual open=$dp_open_control resolved=$dp_resolved_control totals=$(printf '%s\n' "$dp_route" | grep 'engage /')"
+fi
+
+# CAL-1: calibration-report.py aggregates a synthetic history — demote
+# median, waste basis (disproven+uncertain)/total, band matrix row.
+CAL_HOME="$WORK/cal"
+mkdir -p "$CAL_HOME/slug-a/branch-x/rev_001" "$CAL_HOME/slug-b/nested/branch-y/rev_002"
+cp "$FIX/artifact-seed.json" "$CAL_HOME/slug-a/branch-x/rev_001/artifact.json"
+cp "$FIX/artifact-seed.json" "$CAL_HOME/slug-b/nested/branch-y/rev_002/artifact.json"
+cal_tmp="$CAL_HOME/slug-b/nested/branch-y/rev_002/artifact.tmp"
+jq '.gates={"phase3_gate":12,"phase4_bands":[10,20,30],"fix_threshold":25,"walkthrough_threshold":25}' \
+    "$CAL_HOME/slug-b/nested/branch-y/rev_002/artifact.json" > "$cal_tmp"
+mv "$cal_tmp" "$CAL_HOME/slug-b/nested/branch-y/rev_002/artifact.json"
+printf '%s\n' '{"name":"scoring-gate","demote_rate":0.5}' > "$CAL_HOME/slug-a/branch-x/rev_001/phases.jsonl"
+printf '%s\n' '{"phase":"phase_1","tokens":1000}' > "$CAL_HOME/slug-a/branch-x/rev_001/tokens.jsonl"
+cal_out=$("$TOOLS/calibration-report.py" "$CAL_HOME")
+cal_findings=$(jq '[.findings[] | select(.disposition=="disproven" or .disposition=="uncertain")] | length' "$FIX/artifact-seed.json")
+cal_total=$(jq '.findings | length' "$FIX/artifact-seed.json")
+if printf '%s' "$cal_out" | grep -q 'Runs analyzed: \*\*2\*\*' \
+   && printf '%s' "$cal_out" | grep -q 'median \*\*0.500\*\*' \
+   && printf '%s' "$cal_out" | grep -qF "$(python3 -c "print(f'{$cal_findings/$cal_total:.1%}')")" \
+   && printf '%s' "$cal_out" | grep -qF 'Phase 4 bands: **45 / 60 / 75** (1 run)' \
+   && printf '%s' "$cal_out" | grep -qF 'Phase 4 bands: **10 / 20 / 30** (1 run)' \
+   && printf '%s' "$cal_out" | grep -qF '| 20–<30 |'; then
+    pass "CAL-1: calibration groups score matrices by each run's resolved bands"
+else
+    fail "CAL-1: calibration aggregation mismatch" "$(printf '%s' "$cal_out" | head -12)"
+fi
+
+# CAL-2: no-argument calibration honors the explicit review-root override.
+cal_env_out=$(MATTHEWS_REVIEW_REVIEWS_ROOT="$CAL_HOME" "$TOOLS/calibration-report.py")
+if printf '%s' "$cal_env_out" | grep -q 'Runs analyzed: \*\*2\*\*'; then
+    pass "CAL-2: calibration honors MATTHEWS_REVIEW_REVIEWS_ROOT"
+else
+    fail "CAL-2: configured review root ignored" "$cal_env_out"
+fi
+
+# CAL-3: usage and invalid-root failures follow the shared exit/error contract.
+cal_usage_err=$("$TOOLS/calibration-report.py" one two 2>&1); cal_usage_code=$?
+cal_root_err=$(MATTHEWS_REVIEW_REVIEWS_ROOT="$WORK/cal-missing" "$TOOLS/calibration-report.py" 2>&1); cal_root_code=$?
+if [[ $cal_usage_code -eq 64 && "$cal_usage_err" == *"Action:"* \
+   && $cal_root_code -eq 1 && "$cal_root_err" == *"Action:"* ]]; then
+    pass "CAL-3: calibration usage/root errors are structured with shared exits"
+else
+    fail "CAL-3: calibration error contract mismatch" "usage=$cal_usage_code:$cal_usage_err root=$cal_root_code:$cal_root_err"
+fi
+
+# CAL-4/CAL-5: mixed historical telemetry is row-isolated. Parseable invalid
+# artifacts and malformed JSONL rows warn and skip, valid neighbors still
+# aggregate, nullable tokens remain quiet, and huge integers use exact medians
+# without float conversion or traceback.
+CAL_MIX="$WORK/cal-mixed"
+CAL_MIX_R1="$CAL_MIX/slug-a/branch/rev_001"
+CAL_MIX_R2="$CAL_MIX/slug-b/branch/rev_002"
+CAL_MIX_BAD1="$CAL_MIX/slug-c/branch/rev_003"
+CAL_MIX_BAD2="$CAL_MIX/slug-d/branch/rev_004"
+mkdir -p "$CAL_MIX_R1" "$CAL_MIX_R2" "$CAL_MIX_BAD1" "$CAL_MIX_BAD2"
+cp "$FIX/artifact-seed.json" "$CAL_MIX_R1/artifact.json"
+jq '.gates=null' "$FIX/artifact-seed.json" > "$CAL_MIX_R2/artifact.json"
+printf '%s\n' '[]' > "$CAL_MIX_BAD1/artifact.json"
+printf '%s\n' '{"schema_version":"1.0"}' > "$CAL_MIX_BAD2/artifact.json"
+cat > "$CAL_MIX_R1/phases.jsonl" <<'JSONL'
+{"name":"scoring-gate","demote_rate":0.25}
+{bad
+[]
+true
+{"name":"scoring-gate","demote_rate":1.25}
+{"name":"scoring-gate","demote_rate":-0.1}
+{"name":"scoring-gate","demote_rate":true}
+{"name":"scoring-gate","demote_rate":0.5}
+JSONL
+cal_huge_a=$(printf '1%0400d' 0)
+cal_huge_b=$(printf '3%0400d' 0)
+cat > "$CAL_MIX_R1/tokens.jsonl" <<JSONL
+{"phase":"phase_1","tokens":1000}
+{bad
+[]
+true
+{"phase":"","tokens":2}
+{"phase":3,"tokens":2}
+{"phase":"phase_1"}
+{"phase":"phase_1","tokens":null}
+{"phase":"phase_1","tokens":-1}
+{"phase":"phase_1","tokens":1.5}
+{"phase":"phase_1","tokens":true}
+{"phase":"phase_huge","tokens":$cal_huge_a}
+{"phase":"phase_1","tokens":500}
+JSONL
+cat > "$CAL_MIX_R2/tokens.jsonl" <<JSONL
+{"phase":"phase_huge","tokens":$cal_huge_b}
+JSONL
+cal_mix_out=$("$TOOLS/calibration-report.py" "$CAL_MIX" \
+    2>"$CAL_MIX/warnings.err")
+cal_mix_code=$?
+cal_mix_err=$(cat "$CAL_MIX/warnings.err")
+cal_bad_artifacts=$(printf '%s\n' "$cal_mix_err" \
+    | grep -c 'invalid artifact; skipping run')
+if [[ $cal_mix_code -eq 0 && "$cal_mix_out" == \#\ Calibration\ report* \
+   && "$cal_mix_out" == *"Runs analyzed: **2**"* \
+   && "$cal_mix_out" == *"median **0.500**"* \
+   && "$cal_mix_out" == *"| phase_1 | 1 | 1,500 | 1,500 |"* \
+   && $cal_bad_artifacts -eq 2 \
+   && "$cal_mix_err" == *"$CAL_MIX_R1/phases.jsonl:2: invalid JSON"* \
+   && "$cal_mix_err" == *"$CAL_MIX_R1/phases.jsonl:3: expected a JSON object"* \
+   && "$cal_mix_err" == *"$CAL_MIX_R1/tokens.jsonl:2: invalid JSON"* \
+   && "$cal_mix_err" == *"$CAL_MIX_R1/tokens.jsonl:5: phase must be a non-empty string"* \
+   && "$cal_mix_err" == *"$CAL_MIX_R1/tokens.jsonl:7: tokens is required"* \
+   && "$cal_mix_out$cal_mix_err" != *"Traceback"* \
+   && "$cal_mix_out$cal_mix_err" != *"OverflowError"* \
+   && "$cal_mix_out" != *"WARNING:"* ]]; then
+    pass "CAL-4: invalid artifacts/rows warn and skip while valid neighboring telemetry survives"
+else
+    fail "CAL-4: mixed-history isolation/diagnostics mismatch" \
+      "code=$cal_mix_code bad_artifacts=$cal_bad_artifacts out=$cal_mix_out err=$cal_mix_err"
+fi
+cal_token_type_warnings=$(printf '%s\n' "$cal_mix_err" \
+    | grep -c 'tokens must be a nonnegative integer or null')
+cal_demote_warnings=$(printf '%s\n' "$cal_mix_err" \
+    | grep -c 'demote_rate must be a finite number from 0 through 1')
+if [[ $cal_token_type_warnings -eq 3 && $cal_demote_warnings -eq 3 \
+   && "$cal_mix_out" == *"| phase_huge | 2 |"* \
+   && "$cal_mix_err" != *"$CAL_MIX_R1/tokens.jsonl:8:"* \
+   && "$cal_mix_err" != *"$CAL_MIX_R1/tokens.jsonl:12:"* \
+   && "$cal_mix_out$cal_mix_err" != *"Traceback"* \
+   && "$cal_mix_out$cal_mix_err" != *"OverflowError"* ]]; then
+    pass "CAL-5: negative/fraction/bool tokens and out-of-range demotes warn; null/huge integers remain safe"
+else
+    fail "CAL-5: calibration numeric boundaries regressed" \
+      "token_warnings=$cal_token_type_warnings demote_warnings=$cal_demote_warnings err=$cal_mix_err"
+fi
+
+# SS-1: --set-scores batch — one call writes N scores, appends score_history
+SS_DIR="$WORK/ss"
+mkdir -p "$SS_DIR"
+cp "$FIX/artifact-seed.json" "$SS_DIR/art.json"
+"$TOOLS/artifact-patch.py" --path "$SS_DIR/art.json" \
+    --set-scores '[{"id":"F001","score_phase3":72,"reason":"r1"},{"id":"F002","score_phase3":null}]' \
+    --expected 2 >/dev/null
+ss_s1=$(jq -r '.findings[] | select(.id=="F001") | .score_phase3' "$SS_DIR/art.json")
+ss_h1=$(jq '[.findings[] | select(.id=="F001") | .score_history[] | select(.phase=="phase_3")] | length' "$SS_DIR/art.json")
+ss_s2=$(jq -r '.findings[] | select(.id=="F002") | .score_phase3' "$SS_DIR/art.json")
+if [[ "$ss_s1" == "72" && "$ss_h1" -ge 2 && "$ss_s2" == "null" ]] \
+   && "$TOOLS/artifact-validate.sh" --path "$SS_DIR/art.json" >/dev/null 2>&1; then
+    pass "SS-1: --set-scores batch writes scores + appends history + schema-valid"
+else
+    fail "SS-1: batch score write mismatch" "s1=$ss_s1 h1=$ss_h1 s2=$ss_s2"
+fi
+
+# SS-2: --set-scores duplicate id rejected before any write
+cp "$FIX/artifact-seed.json" "$SS_DIR/art2.json"
+ss_err=$("$TOOLS/artifact-patch.py" --path "$SS_DIR/art2.json" \
+    --set-scores '[{"id":"F001","score_phase3":1},{"id":"F001","score_phase3":2}]' \
+    --expected 2 2>&1); code=$?
+ss_unchanged=$(jq -r '.findings[] | select(.id=="F001") | .score_phase3' "$SS_DIR/art2.json")
+if [[ $code -ne 0 && "$ss_err" == *"duplicate id 'F001'"* && "$ss_unchanged" == "85" ]]; then
+    pass "SS-2: --set-scores duplicate id rejected first-fail-halt (artifact untouched)"
+else
+    fail "SS-2: duplicate rejection mismatch" "code=$code unchanged=$ss_unchanged err=$ss_err"
+fi
+
+# SS-3: a short scoring batch is rejected before any score mutation.
+cp "$FIX/artifact-seed.json" "$SS_DIR/art3.json"
+ss_short_err=$("$TOOLS/artifact-patch.py" --path "$SS_DIR/art3.json" \
+    --set-scores '[{"id":"F001","score_phase3":1}]' \
+    --expected 2 2>&1); ss_short_code=$?
+ss_short_unchanged=$(jq -r \
+    '.findings[] | select(.id=="F001") | .score_phase3' "$SS_DIR/art3.json")
+if [[ $ss_short_code -eq 6 \
+   && "$ss_short_err" == *"expected 2 tuple(s) but received 1"* \
+   && "$ss_short_unchanged" == "85" ]]; then
+    pass "SS-3: --set-scores count mismatch exits 6 before any write"
+else
+    fail "SS-3: score count guard mismatch" \
+      "code=$ss_short_code unchanged=$ss_short_unchanged err=$ss_short_err"
+fi
+
+# SS-4: score_phase3 is nullable but required. Omission is a validation error,
+# not an implicit null, and cannot change any artifact bytes.
+cp "$FIX/artifact-seed.json" "$SS_DIR/required-phase3.json"
+ss_required_before=$(sha_of "$SS_DIR/required-phase3.json")
+ss_required_out=$("$TOOLS/artifact-patch.py" \
+    --path "$SS_DIR/required-phase3.json" \
+    --set-scores '[{"id":"F001"}]' --expected 1 \
+    2>"$SS_DIR/required-phase3.err")
+ss_required_code=$?
+ss_required_after=$(sha_of "$SS_DIR/required-phase3.json")
+if [[ $ss_required_code -eq 1 && -z "$ss_required_out" \
+   && "$ss_required_before" == "$ss_required_after" \
+   && "$(cat "$SS_DIR/required-phase3.err")" == *"'score_phase3' is required"* \
+   && "$(cat "$SS_DIR/required-phase3.err")" == *"Action:"* ]]; then
+    pass "SS-4: omitted required nullable score_phase3 rejects with bytes unchanged"
+else
+    fail "SS-4: omitted score_phase3 was defaulted or mutated bytes" \
+      "code=$ss_required_code unchanged=$([[ "$ss_required_before" == "$ss_required_after" ]] && echo yes || echo no) out=$ss_required_out err=$(cat "$SS_DIR/required-phase3.err")"
+fi
+
+# SS-5: explicit null remains distinct from zero. Null clears the score
+# without fabricating history; zero is stored and appended verbatim.
+cp "$FIX/artifact-seed.json" "$SS_DIR/null-zero-phase3.json"
+"$TOOLS/artifact-patch.py" --path "$SS_DIR/null-zero-phase3.json" \
+    --set-scores '[{"id":"F001","score_phase3":null},{"id":"F002","score_phase3":0}]' \
+    --expected 2 >/dev/null 2>"$SS_DIR/null-zero-phase3.err"
+ss_null_zero_code=$?
+ss_phase3_shape=$(jq -r '
+  [
+    (.findings[] | select(.id=="F001")
+      | [.score_phase3, ([.score_history[] | select(.phase=="phase_3")] | length)]
+      | map(tostring) | join("|")),
+    (.findings[] | select(.id=="F002")
+      | [.score_phase3, .score_history[-1].phase, .score_history[-1].score]
+      | map(tostring) | join("|"))
+  ] | join(";")
+' "$SS_DIR/null-zero-phase3.json")
+if [[ $ss_null_zero_code -eq 0 && "$ss_phase3_shape" == "null|1;0|phase_3|0" ]]; then
+    pass "SS-5: explicit null score_phase3 succeeds without history; numeric zero is preserved"
+else
+    fail "SS-5: nullable/zero Phase-3 score semantics collapsed" \
+      "code=$ss_null_zero_code shape=$ss_phase3_shape err=$(cat "$SS_DIR/null-zero-phase3.err")"
+fi
+
+# ADN-1: the Phase-4 batch contract mirrors Phase 3: score_phase4 must be
+# present even though null is valid, and omission leaves the file byte-exact.
+cp "$FIX/artifact-seed.json" "$SS_DIR/required-phase4.json"
+adn_required_before=$(sha_of "$SS_DIR/required-phase4.json")
+adn_required_out=$("$TOOLS/artifact-patch.py" \
+    --path "$SS_DIR/required-phase4.json" \
+    --apply-decisions '[{"id":"F001"}]' --expected 1 \
+    2>"$SS_DIR/required-phase4.err")
+adn_required_code=$?
+adn_required_after=$(sha_of "$SS_DIR/required-phase4.json")
+if [[ $adn_required_code -eq 1 && -z "$adn_required_out" \
+   && "$adn_required_before" == "$adn_required_after" \
+   && "$(cat "$SS_DIR/required-phase4.err")" == *"'score_phase4' is required"* \
+   && "$(cat "$SS_DIR/required-phase4.err")" == *"Action:"* ]]; then
+    pass "ADN-1: omitted required nullable score_phase4 rejects with bytes unchanged"
+else
+    fail "ADN-1: omitted score_phase4 was defaulted or mutated bytes" \
+      "code=$adn_required_code unchanged=$([[ "$adn_required_before" == "$adn_required_after" ]] && echo yes || echo no) out=$adn_required_out err=$(cat "$SS_DIR/required-phase4.err")"
+fi
+
+# ADN-2: explicit Phase-4 null succeeds without history and zero survives
+# routing as an actual score (disproven), rather than becoming missing.
+cp "$FIX/artifact-seed.json" "$SS_DIR/null-zero-phase4.json"
+"$TOOLS/artifact-patch.py" --path "$SS_DIR/null-zero-phase4.json" \
+    --apply-decisions '[{"id":"F001","score_phase4":null},{"id":"F002","score_phase4":0}]' \
+    --expected 2 >/dev/null 2>"$SS_DIR/null-zero-phase4.err"
+adn_null_zero_code=$?
+adn_phase4_shape=$(jq -r '
+  [
+    (.findings[] | select(.id=="F001")
+      | [.score_phase4, .disposition,
+         ([.score_history[] | select(.phase=="phase_4")] | length)]
+      | map(tostring) | join("|")),
+    (.findings[] | select(.id=="F002")
+      | [.score_phase4, .disposition,
+         .score_history[-1].phase, .score_history[-1].score]
+      | map(tostring) | join("|"))
+  ] | join(";")
+' "$SS_DIR/null-zero-phase4.json")
+if [[ $adn_null_zero_code -eq 0 \
+   && "$adn_phase4_shape" == "null|uncertain|0;0|disproven|phase_4|0" ]]; then
+    pass "ADN-2: explicit null score_phase4 succeeds without history; numeric zero is preserved"
+else
+    fail "ADN-2: nullable/zero Phase-4 decision semantics collapsed" \
+      "code=$adn_null_zero_code shape=$adn_phase4_shape err=$(cat "$SS_DIR/null-zero-phase4.err")"
+fi
+
+# RC-11: orchestrator_defaults.omp.tiers apply between defaults and user
+# tiers (omp harness gets omp-native models without per-run flags)
+cat > "$RC_HOME/.matthews-reviews/config.json" <<'EOF'
+{"orchestrator_defaults":{"omp":{"tiers":{"deep":"omp:moonshot/kimi-k3","light":"omp:moonshot/kimi-k3"}}}}
+EOF
+rc_out=$(rc_run --orchestrator omp)
+rc_deep=$(printf '%s' "$rc_out" | jq -r '.roles.deep_validate | "\(.engine):\(.model)|\(.source)"')
+rc_util=$(printf '%s' "$rc_out" | jq -r '.roles.dedup | "\(.engine):\(.model)|\(.source)"')
+if [[ "$rc_deep" == "omp:moonshot/kimi-k3|orchestrator-default(omp) (tier:deep)" \
+   && "$rc_util" == "claude:sonnet|default (tier:utility)" ]]; then
+    pass "RC-11: orchestrator_defaults.omp.tiers override defaults only (utility untouched)"
+else
+    fail "RC-11: orchestrator_defaults mismatch" "deep=$rc_deep util=$rc_util"
+fi
+
+# RC-12: omp orchestrator + claude:* roles → availability warning names the
+# roles + the orchestrator_defaults fix; claude-code orchestrator warns never
+cat > "$RC_HOME/.matthews-reviews/config.json" <<'EOF'
+{}
+EOF
+rc_out=$(rc_run --orchestrator omp)
+rc_warn=$(printf '%s' "$rc_out" | jq -r '.warnings[0]')
+rc_out2=$(rc_run --orchestrator claude-code)
+rc_warn2=$(printf '%s' "$rc_out2" | jq -r '.warnings | length')
+if [[ "$rc_warn" == *"require Anthropic auth in omp"* && "$rc_warn" == *"orchestrator_defaults.omp.tiers"* && "$rc_warn2" == "0" ]]; then
+    pass "RC-12: omp+claude roles produce availability warning; claude-code clean"
+else
+    fail "RC-12: availability warning mismatch" "warn=$rc_warn warn2=$rc_warn2"
+fi
+
+# RC-13: the canonical review-root override controls both user model config
+# resolution and doctor config diagnostics.
+RC_CUSTOM="$WORK/rc-custom-root"
+mkdir -p "$RC_CUSTOM"
+cat > "$RC_CUSTOM/config.json" <<'EOF'
+{"tiers":{"deep":"claude:sonnet"}}
+EOF
+rc_custom_out=$(MATTHEWS_REVIEW_REVIEWS_ROOT="$RC_CUSTOM" HOME="$RC_HOME" \
+    "$TOOLS/review-config.sh" --repo-root "$RC_REPO" \
+    --repo-config-ref "$RC_TRUSTED_REF" --orchestrator claude-code)
+rc_custom_deep=$(printf '%s' "$rc_custom_out" | jq -r \
+    '.roles.deep_validate | "\(.engine):\(.model)|\(.source)"')
+printf '{\n' > "$RC_CUSTOM/config.json"
+rc_custom_doctor=$(MATTHEWS_REVIEW_REVIEWS_ROOT="$RC_CUSTOM" HOME="$RC_HOME" \
+    "$TOOLS/doctor.sh" --quiet 2>&1); rc_custom_doctor_code=$?
+if [[ "$rc_custom_deep" == "claude:sonnet|user-config (tier:deep)" \
+   && $rc_custom_doctor_code -eq 5 \
+   && "$rc_custom_doctor" == *"$RC_CUSTOM/config.json is not valid JSON"* ]]; then
+    pass "RC-13: custom reviews root governs model config and doctor checks"
+else
+    fail "RC-13: custom reviews root ignored" \
+      "deep=$rc_custom_deep doctor=$rc_custom_doctor_code:$rc_custom_doctor"
+fi
+rm -f "$RC_HOME/.matthews-reviews/config.json"
+
+# DG-1: degraded field → renderer emits the REVIEW DEGRADED banner at the
+# top of artifact.md (the published-comment loud-failure surface)
+DG_DIR="$WORK/dg"
+mkdir -p "$DG_DIR"
+cp "$FIX/artifact-seed.json" "$DG_DIR/art.json"
+"$TOOLS/artifact-patch.py" --path "$DG_DIR/art.json" \
+    --set-json 'degraded={"lens_dispatch_failures":6}' >/dev/null
+dg_md=$("$TOOLS/artifact-render.py" --input "$DG_DIR/art.json")
+if printf '%s' "$dg_md" | head -5 | grep -q 'REVIEW DEGRADED — 6 lens dispatch' \
+   && "$TOOLS/artifact-validate.sh" --path "$DG_DIR/art.json" >/dev/null 2>&1; then
+    pass "DG-1: degraded field renders top-of-report banner + schema-valid"
+else
+    fail "DG-1: degraded banner mismatch" "$(printf '%s' "$dg_md" | head -5)"
+fi
+
+# DG-2: no banner without the field
+dg_md2=$("$TOOLS/artifact-render.py" --input "$FIX/artifact-seed.json")
+if ! printf '%s' "$dg_md2" | grep -q 'REVIEW DEGRADED'; then
+    pass "DG-2: no banner when degraded field absent"
+else
+    fail "DG-2: unexpected banner on clean artifact"
+fi
+
+# DG-2b: candidate loss alone must still render a degraded warning.
+cp "$FIX/artifact-seed.json" "$DG_DIR/candidate-only.json"
+"$TOOLS/artifact-patch.py" --path "$DG_DIR/candidate-only.json" \
+    --set-json 'degraded={"candidate_drop_failures":2}' >/dev/null
+dg_candidate_md=$("$TOOLS/artifact-render.py" --input "$DG_DIR/candidate-only.json")
+if printf '%s' "$dg_candidate_md" | grep -q \
+    'REVIEW DEGRADED — 2 candidate output(s) dropped'; then
+    pass "DG-2b: candidate-only degradation renders top-of-report banner"
+else
+    fail "DG-2b: candidate-only degradation rendered as clean" "$dg_candidate_md"
+fi
+
+# DG-2c: persisted reports and dispositions use Codex skill names when the
+# artifact records the Codex orchestrator.
+dg_codex_plan=$("$TOOLS/review-config.sh" \
+    --repo-root "$REPO" --orchestrator codex)
+jq --argjson plan "$dg_codex_plan" \
+    '.model_plan=$plan | .gates=$plan.gates' \
+    "$FIX/artifact-seed.json" > "$DG_DIR/codex.json"
+dg_codex_md=$("$TOOLS/artifact-render.py" --input "$DG_DIR/codex.json")
+dg_codex_dispositions=$("$TOOLS/artifact-render.py" \
+    --input "$DG_DIR/codex.json" --format dispositions)
+if printf '%s\n%s' "$dg_codex_md" "$dg_codex_dispositions" \
+      | grep -q '\$matthewsreview-fix' \
+   && ! printf '%s\n%s' "$dg_codex_md" "$dg_codex_dispositions" \
+      | grep -q '/matthewsreview:'; then
+    pass "DG-2c: Codex artifacts render only Codex skill command names"
+else
+    fail "DG-2c: Codex artifact leaked slash-command names" \
+      "$dg_codex_md
+$dg_codex_dispositions"
+fi
+
+# DG-3: Phase 6.4b aggregates each structured degradation class.
+printf '%s\n' \
+  '{"name":"detection","elapsed_sec":10,"lens_dispatch_failures":2,"candidate_drop_failures":3}' \
+  '{"name":"finalize","elapsed_sec":2,"finalization_failures":1}' \
+  > "$DG_DIR/phases.jsonl"
+dg_counts=$(jq -cs '{
+  lens: ([.[].lens_dispatch_failures // 0] | add // 0),
+  candidate: ([.[].candidate_drop_failures // 0] | add // 0),
+  finalization: ([.[].finalization_failures // 0] | add // 0)
+}' "$DG_DIR/phases.jsonl")
+if [[ $(printf '%s' "$dg_counts" | jq -r '[.lens,.candidate,.finalization] | join(",")') == "2,3,1" ]]; then
+    pass "DG-3: 6.4b aggregation retains all degradation classes"
+else
+    fail "DG-3: degradation aggregation mismatch" "counts=$dg_counts"
+fi
+
+# DG-4: the fragments wire the failure path end-to-end (tag write site,
+# Phase-1 counters/record fields, and the Phase-6 atomic sync helper).
+dg_frag="$REPO/fragments/01-detection.md"
+dg_fin="$REPO/fragments/07-finalize.md"
+if grep -Fq 'lens_dropped_dispatch_failed: lens=<lens-tag>' "$dg_frag" \
+   && grep -Fq "grep -c '^lens_dropped_dispatch_failed:'" "$dg_frag" \
+   && grep -Fq 'lens_dispatch_failures:$lens_dispatch_failures' "$dg_frag" \
+   && grep -Fq 'candidate_drop_failures:$candidate_drop_failures' "$dg_frag" \
+   && grep -Fq 'sync-degraded.py' "$dg_fin" \
+   && grep -Fq -- '--phases-log "$phases_log_path"' "$dg_fin"; then
+    pass "DG-4: fragments wire dispatch and candidate failures through final aggregation"
+else
+    fail "DG-4: fragment degradation wiring incomplete"
+fi
+
+# RC-13: built-in defaults are harness-invariant. A Codex orchestrator
+# still uses the canonical Claude Opus/Sonnet stages unless the user
+# explicitly selects Codex through --models/profile/config.
+rc_out=$(env -u MATTHEWS_REVIEW_REVIEWS_ROOT HOME="$RC_EMPTY" \
+    "$TOOLS/review-config.sh" --repo-root "$RC_REPO" \
+    --repo-config-ref "$RC_TRUSTED_REF" --orchestrator codex)
+rc_deep=$(printf '%s' "$rc_out" | jq -r '.roles.deep_validate | "\(.engine):\(.model)|\(.source)"')
+rc_util=$(printf '%s' "$rc_out" | jq -r '.roles.dedup | "\(.engine):\(.model)"')
+rc_out2=$(env -u MATTHEWS_REVIEW_REVIEWS_ROOT HOME="$RC_EMPTY" \
+    "$TOOLS/review-config.sh" --repo-root "$RC_REPO" \
+    --repo-config-ref "$RC_TRUSTED_REF" --orchestrator codex \
+    --models "deep=codex::high")
+rc_deep2=$(printf '%s' "$rc_out2" | jq -r '.roles.deep_validate | "\(.engine):\(.model):\(.effort)"')
+if [[ "$rc_deep" == "claude:opus|default (tier:deep)" \
+   && "$rc_util" == "claude:sonnet" && "$rc_deep2" == "codex::high" ]]; then
+    pass "RC-13: Codex keeps canonical defaults; explicit Codex override wins"
+else
+    fail "RC-13: harness-invariant defaults mismatch" "deep=$rc_deep util=$rc_util deep2=$rc_deep2"
+fi
+
+# RC-14: omp roles accept an omp-native thinking suffix so per-stage model
+# selection can request models such as GPT-5.6-Sol Max.
+rc_out=$(env -u MATTHEWS_REVIEW_REVIEWS_ROOT HOME="$RC_EMPTY" \
+    "$TOOLS/review-config.sh" --repo-root "$RC_REPO" \
+    --repo-config-ref "$RC_TRUSTED_REF" --orchestrator omp \
+    --models "deep=omp:openai-codex/gpt-5.6-sol:max" 2>&1); code=$?
+if [[ $code -eq 0 ]] \
+   && [[ $(printf '%s' "$rc_out" | jq -r '.roles.deep_validate | "\(.engine):\(.model):\(.effort)"') == "omp:openai-codex/gpt-5.6-sol:max" ]]; then
+    pass "RC-14: omp role accepts model thinking suffix (:max)"
+else
+    fail "RC-14: omp thinking suffix rejected or misparsed" "code=$code out=$rc_out"
+fi
+
+# RC-15: profiles reject misspelled tier names instead of silently ignoring
+# the requested model override.
+cat > "$RC_HOME/.matthews-reviews/config.json" <<'EOF'
+{"profiles":{"broken":{"tiers":{"deap":"claude:opus"}}}}
+EOF
+rc_err=$(rc_run --orchestrator claude-code --profile broken 2>&1); code=$?
+if [[ $code -eq 1 && "$rc_err" == *"unknown tier 'deap'"* && "$rc_err" == *"profile 'broken'"* ]]; then
+    pass "RC-15: unknown profile tier rejected"
+else
+    fail "RC-15: unknown profile tier accepted or misreported" "code=$code err=$rc_err"
+fi
+
+# RC-16: resolver-side and persisted-artifact gate validation are both loud
+# (GB-2/GB-3 above cover canonical artifact rejection).
+cat > "$RC_HOME/.matthews-reviews/config.json" <<'EOF'
+{"gates":{"phase4_bands":[70,50,90]}}
+EOF
+rc_gate_order=$(rc_run --orchestrator claude-code 2>&1); rc_gate_order_code=$?
+cat > "$RC_HOME/.matthews-reviews/config.json" <<'EOF'
+{"gates":{"phase4_bands":[45,60]}}
+EOF
+rc_gate_len=$(rc_run --orchestrator claude-code 2>&1); rc_gate_len_code=$?
+cat > "$RC_HOME/.matthews-reviews/config.json" <<'EOF'
+{"gates":{"phase3_gate":"45"}}
+EOF
+rc_gate_type=$(rc_run --orchestrator claude-code 2>&1); rc_gate_type_code=$?
+cat > "$RC_HOME/.matthews-reviews/config.json" <<'EOF'
+{"gates":{"phase3_gait":45}}
+EOF
+rc_gate_key=$(rc_run --orchestrator claude-code 2>&1); rc_gate_key_code=$?
+rm -f "$RC_HOME/.matthews-reviews/config.json"
+if [[ $rc_gate_order_code -eq 1 && "$rc_gate_order" == *"strictly ascending"* \
+   && $rc_gate_len_code -eq 1 && "$rc_gate_len" == *"exactly 3"* \
+   && $rc_gate_type_code -eq 1 && "$rc_gate_type" == *"number"* \
+   && $rc_gate_key_code -eq 1 && "$rc_gate_key" == *"unknown gate"* ]]; then
+    pass "RC-16: malformed gate keys/types/bands rejected at config resolution"
+else
+    fail "RC-16: malformed gates accepted or misreported" "order=$rc_gate_order_code:$rc_gate_order len=$rc_gate_len_code:$rc_gate_len type=$rc_gate_type_code:$rc_gate_type key=$rc_gate_key_code:$rc_gate_key"
+fi
+
+# RC-17: every canonical role key is accepted through the same config path;
+# an unknown key still fails loudly. This catches role-set drift between
+# validation and emission.
+rc_role_keys='[
+  "deep_lens","deep_validate","cross_cutting","fix","post_fix_review","reconcile",
+  "light_lens","light_validate",
+  "classifier","normalizer","dedup","scoring","fix_hint","briefer","drafter",
+  "ensemble_detect","codex_detect","codex_validate","codex_crosscut"
+]'
+jq -n --argjson keys "$rc_role_keys" '
+  def codex_only: IN("ensemble_detect","codex_detect","codex_validate","codex_crosscut");
+  {roles: ($keys | map({key:., value:(if codex_only then "codex::high" else "claude:sonnet" end)}) | from_entries)}
+' > "$RC_HOME/.matthews-reviews/config.json"
+rc_roles_out=$(rc_run --orchestrator claude-code 2>&1); rc_roles_code=$?
+rc_roles_count=$(printf '%s' "$rc_roles_out" | jq '.roles | length' 2>/dev/null || echo 0)
+rc_roles_overridden=$(printf '%s' "$rc_roles_out" \
+  | jq '[.roles[] | select(.engine == "claude" and .model == "sonnet")] | length' \
+    2>/dev/null || echo 0)
+rc_roles_repo_light=$(printf '%s' "$rc_roles_out" \
+  | jq '[.roles[] | select(.engine == "claude" and .model == "haiku")] | length' \
+    2>/dev/null || echo 0)
+rc_roles_codex=$(printf '%s' "$rc_roles_out" \
+  | jq '[.roles[] | select(.engine == "codex" and .effort == "high")] | length' \
+    2>/dev/null || echo 0)
+cat > "$RC_HOME/.matthews-reviews/config.json" <<'EOF'
+{"roles":{"future_typo":"claude:sonnet"}}
+EOF
+rc_unknown_role=$(rc_run --orchestrator claude-code 2>&1); rc_unknown_role_code=$?
+rm -f "$RC_HOME/.matthews-reviews/config.json"
+if [[ $rc_roles_code -eq 0 && "$rc_roles_count" == "19" \
+   && "$rc_roles_overridden" == "13" && "$rc_roles_repo_light" == "2" \
+   && "$rc_roles_codex" == "4" \
+   && $rc_unknown_role_code -eq 1 && "$rc_unknown_role" == *"unknown role 'future_typo'"* ]]; then
+    pass "RC-17: canonical role set validates and emits through one path"
+else
+    fail "RC-17: role-set validation/emission drift" "valid=$rc_roles_code count=$rc_roles_count claude=$rc_roles_overridden repo_light=$rc_roles_repo_light codex=$rc_roles_codex unknown=$rc_unknown_role_code:$rc_unknown_role"
+fi
+
+# RCG-1: accepted suffixes are exact enums, not prefix/substring matches.
+rc_enum_problems=""
+for rc_effort in low medium high xhigh max ultra; do
+    rc_enum_out=$(rc_run --orchestrator claude-code \
+        --models "deep=codex:model:$rc_effort" \
+        2>"$WORK/rc-enum-codex-$rc_effort.err")
+    rc_enum_code=$?
+    rc_enum_got=$(printf '%s' "$rc_enum_out" | jq -r \
+        '.roles.deep_validate.effort // "missing"' 2>/dev/null)
+    if [[ $rc_enum_code -ne 0 || "$rc_enum_got" != "$rc_effort" ]]; then
+        rc_enum_problems="$rc_enum_problems codex:$rc_effort=$rc_enum_code:$rc_enum_got:$(cat "$WORK/rc-enum-codex-$rc_effort.err")"
+    fi
+done
+for rc_thinking in off minimal low medium high xhigh max; do
+    rc_enum_out=$(rc_run --orchestrator omp \
+        --models "deep=omp:vendor/model:$rc_thinking" \
+        2>"$WORK/rc-enum-omp-$rc_thinking.err")
+    rc_enum_code=$?
+    rc_enum_got=$(printf '%s' "$rc_enum_out" | jq -r \
+        '.roles.deep_validate.effort // "missing"' 2>/dev/null)
+    if [[ $rc_enum_code -ne 0 || "$rc_enum_got" != "$rc_thinking" ]]; then
+        rc_enum_problems="$rc_enum_problems omp:$rc_thinking=$rc_enum_code:$rc_enum_got:$(cat "$WORK/rc-enum-omp-$rc_thinking.err")"
+    fi
+done
+rc_empty_model=$(rc_run --orchestrator claude-code \
+    --models 'deep=codex::high' 2>"$WORK/rc-enum-empty-model.err")
+rc_empty_model_code=$?
+rc_empty_model_shape=$(printf '%s' "$rc_empty_model" | jq -r \
+    '.roles.deep_validate | "\(.engine)|\(.model)|\(.effort)"' 2>/dev/null)
+if [[ -z "$rc_enum_problems" && $rc_empty_model_code -eq 0 \
+   && "$rc_empty_model_shape" == "codex||high" ]]; then
+    pass "RCG-1: exact Codex effort/OMP thinking enums and codex::high resolve"
+else
+    fail "RCG-1: accepted role-string enum drift" \
+      "problems=$rc_enum_problems empty=$rc_empty_model_code:$rc_empty_model_shape:$(cat "$WORK/rc-enum-empty-model.err")"
+fi
+
+# RCG-2: every explicit-but-empty third segment is malformed, even where an
+# empty Codex model itself would otherwise be legal.
+rc_empty_suffix_problems=""
+rc_empty_suffix_n=0
+for rc_empty_suffix in 'claude:opus:' 'codex:model:' 'codex::' 'omp:model:'; do
+    rc_empty_suffix_n=$((rc_empty_suffix_n + 1))
+    rc_empty_suffix_out=$(rc_run --orchestrator claude-code \
+        --models "deep=$rc_empty_suffix" \
+        2>"$WORK/rc-empty-suffix-$rc_empty_suffix_n.err")
+    rc_empty_suffix_code=$?
+    if [[ $rc_empty_suffix_code -ne 1 || -n "$rc_empty_suffix_out" \
+       || "$(cat "$WORK/rc-empty-suffix-$rc_empty_suffix_n.err")" != *"has an empty third segment"* ]]; then
+        rc_empty_suffix_problems="$rc_empty_suffix_problems $rc_empty_suffix=$rc_empty_suffix_code:$rc_empty_suffix_out:$(cat "$WORK/rc-empty-suffix-$rc_empty_suffix_n.err")"
+    fi
+done
+if [[ -z "$rc_empty_suffix_problems" ]]; then
+    pass "RCG-2: Claude/Codex/OMP empty third segments reject without plan output"
+else
+    fail "RCG-2: empty suffix accepted or misreported" "$rc_empty_suffix_problems"
+fi
+
+# RCG-3: joined and whitespace-padded near misses do not pass exact enums.
+rc_bad_enum_problems=""
+for rc_bad_enum_case in codex-joined codex-space omp-joined omp-space; do
+    case "$rc_bad_enum_case" in
+        codex-joined)
+            rc_bad_enum_orch=claude-code
+            rc_bad_enum_spec='codex:model:highest'
+            rc_bad_enum_needle="unknown codex effort 'highest'"
+            ;;
+        codex-space)
+            rc_bad_enum_orch=claude-code
+            rc_bad_enum_spec='codex:model:high '
+            rc_bad_enum_needle="unknown codex effort 'high '"
+            ;;
+        omp-joined)
+            rc_bad_enum_orch=omp
+            rc_bad_enum_spec='omp:vendor/model:maximal'
+            rc_bad_enum_needle="unknown omp thinking level 'maximal'"
+            ;;
+        omp-space)
+            rc_bad_enum_orch=omp
+            rc_bad_enum_spec='omp:vendor/model:max '
+            rc_bad_enum_needle="unknown omp thinking level 'max '"
+            ;;
+    esac
+    rc_bad_enum_out=$(rc_run --orchestrator "$rc_bad_enum_orch" \
+        --models "deep=$rc_bad_enum_spec" \
+        2>"$WORK/rc-$rc_bad_enum_case.err")
+    rc_bad_enum_code=$?
+    if [[ $rc_bad_enum_code -ne 1 || -n "$rc_bad_enum_out" \
+       || "$(cat "$WORK/rc-$rc_bad_enum_case.err")" != *"$rc_bad_enum_needle"* ]]; then
+        rc_bad_enum_problems="$rc_bad_enum_problems $rc_bad_enum_case=$rc_bad_enum_code:$rc_bad_enum_out:$(cat "$WORK/rc-$rc_bad_enum_case.err")"
+    fi
+done
+if [[ -z "$rc_bad_enum_problems" ]]; then
+    pass "RCG-3: joined/whitespace Codex and OMP suffix near-misses reject exactly"
+else
+    fail "RCG-3: suffix enum matching is permissive" "$rc_bad_enum_problems"
+fi
+
+# RCG-4: malformed values are rejected even when dormant in an unselected
+# profile/inactive harness default or masked by a higher-precedence repo value.
+rc_dormant_bad_problems=""
+for rc_dormant_case in profile inactive-default masked-user; do
+    case "$rc_dormant_case" in
+        profile)
+            rc_dormant_json='{"profiles":{"later":{"roles":{"deep_validate":"unknown:model"}}}}'
+            ;;
+        inactive-default)
+            rc_dormant_json='{"orchestrator_defaults":{"omp":{"tiers":{"deep":"unknown:model"}}}}'
+            ;;
+        masked-user)
+            rc_dormant_json='{"roles":{"scoring":"unknown:model"}}'
+            ;;
+    esac
+    printf '%s\n' "$rc_dormant_json" \
+        > "$RC_HOME/.matthews-reviews/config.json"
+    rc_dormant_out=$(rc_run --orchestrator claude-code \
+        2>"$WORK/rc-dormant-$rc_dormant_case.err")
+    rc_dormant_code=$?
+    if [[ $rc_dormant_code -ne 1 || -n "$rc_dormant_out" \
+       || "$(cat "$WORK/rc-dormant-$rc_dormant_case.err")" != *"unknown engine 'unknown'"* ]]; then
+        rc_dormant_bad_problems="$rc_dormant_bad_problems $rc_dormant_case=$rc_dormant_code:$rc_dormant_out:$(cat "$WORK/rc-dormant-$rc_dormant_case.err")"
+    fi
+done
+if [[ -z "$rc_dormant_bad_problems" ]]; then
+    pass "RCG-4: malformed dormant/masked role values reject before plan emission"
+else
+    fail "RCG-4: dormant malformed role escaped validation" "$rc_dormant_bad_problems"
+fi
+
+# RCG-5: syntactically valid cross-harness roles remain dormant until selected
+# or effective. This keeps portable profiles/configs storable without weakening
+# the effective harness compatibility gate.
+cat > "$RC_HOME/.matthews-reviews/config.json" <<'EOF'
+{"profiles":{"later":{"tiers":{"deep":"omp:vendor/model:max"}}},"orchestrator_defaults":{"omp":{"tiers":{"light":"omp:vendor/model:high"}}}}
+EOF
+rc_dormant_claude=$(rc_run --orchestrator claude-code \
+    2>"$WORK/rc-dormant-valid-claude.err")
+rc_dormant_claude_code=$?
+rc_dormant_codex=$(rc_run --orchestrator codex \
+    2>"$WORK/rc-dormant-valid-codex.err")
+rc_dormant_codex_code=$?
+rc_selected_cross=$(rc_run --orchestrator claude-code --profile later \
+    2>"$WORK/rc-selected-cross.err")
+rc_selected_cross_code=$?
+cat > "$RC_HOME/.matthews-reviews/config.json" <<'EOF'
+{"roles":{"deep_validate":"omp:vendor/model:max"}}
+EOF
+rc_masked_cross=$(rc_run --orchestrator claude-code \
+    --models 'deep_validate=claude:opus' 2>"$WORK/rc-masked-cross.err")
+rc_masked_cross_code=$?
+rc_effective_cross=$(rc_run --orchestrator claude-code \
+    2>"$WORK/rc-effective-cross.err")
+rc_effective_cross_code=$?
+if [[ $rc_dormant_claude_code -eq 0 && -n "$rc_dormant_claude" \
+   && $rc_dormant_codex_code -eq 0 && -n "$rc_dormant_codex" \
+   && $rc_selected_cross_code -eq 1 && -z "$rc_selected_cross" \
+   && "$(cat "$WORK/rc-selected-cross.err")" == *"wants omp:... but the orchestrator is Claude Code"* \
+   && $rc_masked_cross_code -eq 0 && -n "$rc_masked_cross" \
+   && $rc_effective_cross_code -eq 1 && -z "$rc_effective_cross" \
+   && "$(cat "$WORK/rc-effective-cross.err")" == *"wants omp:... but the orchestrator is Claude Code"* ]]; then
+    pass "RCG-5: valid cross-harness roles are storable when dormant/masked and reject when effective"
+else
+    fail "RCG-5: dormant/effective cross-harness boundary mismatch" \
+      "dormant-claude=$rc_dormant_claude_code:$(cat "$WORK/rc-dormant-valid-claude.err") dormant-codex=$rc_dormant_codex_code:$(cat "$WORK/rc-dormant-valid-codex.err") selected=$rc_selected_cross_code:$rc_selected_cross:$(cat "$WORK/rc-selected-cross.err") masked=$rc_masked_cross_code:$(cat "$WORK/rc-masked-cross.err") effective=$rc_effective_cross_code:$rc_effective_cross:$(cat "$WORK/rc-effective-cross.err")"
+fi
+
+# RCG-6: pipe, C0/C1 controls, and Unicode line/paragraph separators are
+# rejected in persisted user/repo specs and CLI model specs, always before a
+# plan reaches stdout.
+rc_unsafe_problems=""
+for rc_unsafe_case in pipe c0 c1 u2028 u2029; do
+    case "$rc_unsafe_case" in
+        pipe)
+            rc_unsafe_json='{"profiles":{"later":{"tiers":{"deep":"claude:op|us"}}}}'
+            rc_unsafe_cli='deep=claude:op|us'
+            ;;
+        c0)
+            rc_unsafe_json='{"profiles":{"later":{"tiers":{"deep":"claude:op\u0001us"}}}}'
+            rc_unsafe_cli=$(printf 'deep=claude:op\001us')
+            ;;
+        c1)
+            rc_unsafe_json='{"profiles":{"later":{"tiers":{"deep":"claude:op\u0085us"}}}}'
+            rc_unsafe_cli=$(printf 'deep=claude:op\302\205us')
+            ;;
+        u2028)
+            rc_unsafe_json='{"profiles":{"later":{"tiers":{"deep":"claude:op\u2028us"}}}}'
+            rc_unsafe_cli=$(printf 'deep=claude:op\342\200\250us')
+            ;;
+        u2029)
+            rc_unsafe_json='{"profiles":{"later":{"tiers":{"deep":"claude:op\u2029us"}}}}'
+            rc_unsafe_cli=$(printf 'deep=claude:op\342\200\251us')
+            ;;
+    esac
+    printf '%s\n' "$rc_unsafe_json" \
+        > "$RC_HOME/.matthews-reviews/config.json"
+    rc_unsafe_user_out=$(rc_run --orchestrator claude-code \
+        2>"$WORK/rc-unsafe-user-$rc_unsafe_case.err")
+    rc_unsafe_user_code=$?
+    printf '%s\n' "$rc_unsafe_json" > "$RC_REPO/.matthewsreview.json"
+    printf '%s\n' '{}' > "$RC_HOME/.matthews-reviews/config.json"
+    rc_unsafe_repo_out=$(rc_run_worktree --orchestrator claude-code \
+        2>"$WORK/rc-unsafe-repo-$rc_unsafe_case.err")
+    rc_unsafe_repo_code=$?
+    printf '%s\n' "$RC_WORKTREE_CONFIG" > "$RC_REPO/.matthewsreview.json"
+    rc_unsafe_cli_out=$(rc_run --orchestrator claude-code \
+        --models "$rc_unsafe_cli" \
+        2>"$WORK/rc-unsafe-cli-$rc_unsafe_case.err")
+    rc_unsafe_cli_code=$?
+    if [[ $rc_unsafe_user_code -ne 1 || -n "$rc_unsafe_user_out" \
+       || "$(cat "$WORK/rc-unsafe-user-$rc_unsafe_case.err")" != *"reserved delimiter or control character"* \
+       || $rc_unsafe_repo_code -ne 1 || -n "$rc_unsafe_repo_out" \
+       || "$(cat "$WORK/rc-unsafe-repo-$rc_unsafe_case.err")" != *"reserved delimiter or control character"* \
+       || $rc_unsafe_cli_code -ne 1 || -n "$rc_unsafe_cli_out" \
+       || "$(cat "$WORK/rc-unsafe-cli-$rc_unsafe_case.err")" != *"reserved delimiter or control character"* ]]; then
+        rc_unsafe_problems="$rc_unsafe_problems $rc_unsafe_case=user:$rc_unsafe_user_code:$rc_unsafe_user_out:$(cat "$WORK/rc-unsafe-user-$rc_unsafe_case.err");repo:$rc_unsafe_repo_code:$rc_unsafe_repo_out:$(cat "$WORK/rc-unsafe-repo-$rc_unsafe_case.err");cli:$rc_unsafe_cli_code:$rc_unsafe_cli_out:$(cat "$WORK/rc-unsafe-cli-$rc_unsafe_case.err")"
+    fi
+done
+rm -f "$RC_HOME/.matthews-reviews/config.json"
+printf '%s\n' "$RC_WORKTREE_CONFIG" > "$RC_REPO/.matthewsreview.json"
+if [[ -z "$rc_unsafe_problems" ]]; then
+    pass "RCG-6: persisted/CLI pipe, C0, C1, U+2028, and U+2029 specs emit no plan"
+else
+    fail "RCG-6: unsafe internal delimiter escaped config validation" "$rc_unsafe_problems"
+fi
+
+# RCP-1: present config paths must be readable regular files before any JSON
+# reader touches them. Cover a user-config directory and an explicit-worktree
+# broken symlink; both fail structured with no plan output.
+RC_SHAPE_ROOT="$WORK/rc-shape-root"
+mkdir -p "$RC_SHAPE_ROOT/config.json"
+RC_SHAPE_ROOT_CANON=$(cd "$RC_SHAPE_ROOT" && pwd -P)
+rc_shape_user_out=$(MATTHEWS_REVIEW_REVIEWS_ROOT="$RC_SHAPE_ROOT" \
+    HOME="$RC_HOME" "$TOOLS/review-config.sh" --repo-root "$RC_REPO" \
+    --repo-config-ref "$RC_TRUSTED_REF" --orchestrator claude-code \
+    2>"$WORK/rc-shape-user.err")
+rc_shape_user_code=$?
+rm -f "$RC_REPO/.matthewsreview.json"
+ln -s "$WORK/does-not-exist.json" "$RC_REPO/.matthewsreview.json"
+rc_shape_worktree_out=$(rc_run_worktree --orchestrator claude-code \
+    2>"$WORK/rc-shape-worktree.err")
+rc_shape_worktree_code=$?
+rm -f "$RC_REPO/.matthewsreview.json"
+printf '%s\n' "$RC_WORKTREE_CONFIG" > "$RC_REPO/.matthewsreview.json"
+if [[ $rc_shape_user_code -eq 1 && -z "$rc_shape_user_out" \
+   && "$(cat "$WORK/rc-shape-user.err")" == *"config path $RC_SHAPE_ROOT_CANON/config.json is not a readable regular file"* \
+   && "$(cat "$WORK/rc-shape-user.err")" == *"Action:"* \
+   && $rc_shape_worktree_code -eq 1 && -z "$rc_shape_worktree_out" \
+   && "$(cat "$WORK/rc-shape-worktree.err")" == *"config path $RC_REPO/.matthewsreview.json is not a readable regular file"* \
+   && "$(cat "$WORK/rc-shape-worktree.err")" == *"Action:"* ]]; then
+    pass "RCP-1: user directory and worktree broken-symlink configs reject before read"
+else
+    fail "RCP-1: non-regular config path was read or emitted a plan" \
+      "user=$rc_shape_user_code:$rc_shape_user_out:$(cat "$WORK/rc-shape-user.err") worktree=$rc_shape_worktree_code:$rc_shape_worktree_out:$(cat "$WORK/rc-shape-worktree.err")"
+fi
+
+# DOC-1: repository settings are rooted at git top-level even when doctor is
+# launched deep below it.
+DOC_DIR="$WORK/doctor-streams"
+DOC_REPO="$DOC_DIR/repo"
+DOC_HOME="$DOC_DIR/home"
+DOC_REVIEWS="$DOC_HOME/reviews"
+DOC_BIN_OK="$DOC_DIR/bin-ok"
+DOC_BIN_FAIL="$DOC_DIR/bin-fail"
+mkdir -p "$DOC_REPO/nested/deeper" "$DOC_REPO/.claude" "$DOC_REVIEWS" \
+    "$DOC_BIN_OK" "$DOC_BIN_FAIL"
+git -C "$DOC_REPO" init -q
+printf '%s\n' '{"enabledPlugins":{"adamsreview@adamsreview":true}}' \
+    > "$DOC_REPO/.claude/settings.json"
+printf '%s\n' '{"permissions":{"allow":["plugins/cache/adamsreview/1/bin"]}}' \
+    > "$DOC_REPO/.claude/settings.local.json"
+ln -s /bin/bash "$DOC_BIN_OK/bash"
+ln -s /bin/bash "$DOC_BIN_FAIL/bash"
+for doc_tool in dirname jq gh git uname env grep cut tr sed head; do
+    doc_tool_path=$(type -P "$doc_tool")
+    ln -s "$doc_tool_path" "$DOC_BIN_OK/$doc_tool"
+    ln -s "$doc_tool_path" "$DOC_BIN_FAIL/$doc_tool"
+done
+ln -s "$(type -P uv)" "$DOC_BIN_OK/uv"
+(
+    cd "$DOC_REPO/nested/deeper" || exit 1
+    HOME="$DOC_HOME" MATTHEWS_REVIEW_REVIEWS_ROOT="$DOC_REVIEWS" \
+        PATH="$DOC_BIN_OK" "$TOOLS/doctor.sh" --quiet
+) >"$DOC_DIR/nested.out" 2>"$DOC_DIR/nested.err"
+doc_nested_code=$?
+doc_nested_out=$(cat "$DOC_DIR/nested.out")
+if [[ $doc_nested_code -eq 0 && ! -s "$DOC_DIR/nested.err" \
+   && "$doc_nested_out" == *"$DOC_REPO/.claude/settings.json enables adamsreview@adamsreview"* \
+   && "$doc_nested_out" == *"$DOC_REPO/.claude/settings.local.json allowlists a versioned adamsreview cache path"* \
+   && "$doc_nested_out" != *"$DOC_REPO/nested/deeper/.claude/"* ]]; then
+    pass "DOC-1: nested-cwd doctor inspects repo-root settings and settings.local"
+else
+    fail "DOC-1: doctor derived settings paths from nested cwd" \
+      "code=$doc_nested_code out=$doc_nested_out err=$(cat "$DOC_DIR/nested.err")"
+fi
+
+# DOC-2: detailed FAIL/fix guidance is stdout; stderr contains exactly one
+# aggregate ERROR/Action block for hook-safe failure reporting.
+(
+    cd "$DOC_REPO/nested/deeper" || exit 1
+    HOME="$DOC_HOME" MATTHEWS_REVIEW_REVIEWS_ROOT="$DOC_REVIEWS" \
+        PATH="$DOC_BIN_FAIL" "$TOOLS/doctor.sh" --quiet
+) >"$DOC_DIR/fail.out" 2>"$DOC_DIR/fail.err"
+doc_fail_code=$?
+doc_error_count=$(grep -c \
+    '^ERROR: doctor found one or more required dependency or configuration failures\.$' \
+    "$DOC_DIR/fail.err")
+doc_action_count=$(grep -c \
+    '^Action: apply each FAIL/fix item above, then rerun doctor\.sh\.$' \
+    "$DOC_DIR/fail.err")
+doc_stderr_lines=$(wc -l < "$DOC_DIR/fail.err")
+if [[ $doc_fail_code -eq 5 && $doc_error_count -eq 1 \
+   && $doc_action_count -eq 1 && $doc_stderr_lines -eq 2 \
+   && $(grep -c '^FAIL dep: uv missing$' "$DOC_DIR/fail.out") -eq 1 \
+   && $(grep -c '^      fix:' "$DOC_DIR/fail.out") -ge 1 \
+   && $(grep -c '^ERROR:\|^Action:' "$DOC_DIR/fail.out") -eq 0 \
+   && $(grep -c '^FAIL\|^      fix:' "$DOC_DIR/fail.err") -eq 0 ]]; then
+    pass "DOC-2: doctor details stay stdout; stderr is one aggregate ERROR/Action block"
+else
+    fail "DOC-2: doctor failure streams/counts regressed" \
+      "code=$doc_fail_code errors=$doc_error_count actions=$doc_action_count stderr_lines=$doc_stderr_lines out=$(cat "$DOC_DIR/fail.out") err=$(cat "$DOC_DIR/fail.err")"
+fi
+
+# DOC-3: doctor performs its own path-shape check before semantic resolution.
+# A directory at config.json cannot block a reader and still aggregates as rc5.
+DOC_BAD_REVIEWS="$DOC_HOME/bad-reviews"
+mkdir -p "$DOC_BAD_REVIEWS/config.json"
+DOC_BAD_REVIEWS_CANON=$(cd "$DOC_BAD_REVIEWS" && pwd -P)
+(
+    cd "$DOC_REPO/nested/deeper" || exit 1
+    HOME="$DOC_HOME" MATTHEWS_REVIEW_REVIEWS_ROOT="$DOC_BAD_REVIEWS" \
+        PATH="$DOC_BIN_OK" "$TOOLS/doctor.sh" --quiet
+) >"$DOC_DIR/path-shape.out" 2>"$DOC_DIR/path-shape.err"
+doc_path_code=$?
+doc_path_errors=$(grep -c \
+    '^ERROR: doctor found one or more required dependency or configuration failures\.$' \
+    "$DOC_DIR/path-shape.err")
+doc_path_actions=$(grep -c \
+    '^Action: apply each FAIL/fix item above, then rerun doctor\.sh\.$' \
+    "$DOC_DIR/path-shape.err")
+if [[ $doc_path_code -eq 5 && $doc_path_errors -eq 1 \
+   && $doc_path_actions -eq 1 \
+   && "$(cat "$DOC_DIR/path-shape.out")" == *"FAIL config: $DOC_BAD_REVIEWS_CANON/config.json is not a readable regular file"* \
+   && "$(cat "$DOC_DIR/path-shape.out")" == *"fix: replace $DOC_BAD_REVIEWS_CANON/config.json with a readable JSON configuration file"* \
+   && $(wc -l < "$DOC_DIR/path-shape.err") -eq 2 ]]; then
+    pass "DOC-3: non-regular config is checked without blocking and aggregates rc5"
+else
+    fail "DOC-3: doctor path-shape check/aggregate regressed" \
+      "code=$doc_path_code errors=$doc_path_errors actions=$doc_path_actions out=$(cat "$DOC_DIR/path-shape.out") err=$(cat "$DOC_DIR/path-shape.err")"
+fi
 
 # ------------------------------------------------------------------ Project F: LLM output normalization
 #
@@ -4707,11 +7380,13 @@ fi
 # --- VR-* parse-validator-result.py
 
 # VR-1: canonical shape — {score_phase4, actionability} passes through.
+# confirmed_strength is deliberately absent: artifact-patch derives it from
+# the run's resolved phase4_bands, not the normalizer's default bands.
 vr1_out=$(echo '{"score_phase4": 72, "actionability": "auto_fixable", "decision": "confirmed"}' \
     | "$TOOLS/parse-validator-result.py" --lane deep 2>&1)
 if [[ $? -eq 0 ]] \
-    && echo "$vr1_out" | jq -e '.score_phase4 == 72 and .actionability == "auto_fixable" and .confirmed_strength == "moderate"' >/dev/null; then
-    pass "VR-1: canonical {score_phase4,actionability} pass-through + strength derivation"
+    && printf '%s\n' "$vr1_out" | jq -e '.score_phase4 == 72 and .actionability == "auto_fixable" and (has("confirmed_strength") | not)' >/dev/null; then
+    pass "VR-1: canonical {score_phase4,actionability} pass-through without derived strength"
 else
     fail "VR-1: canonical shape failed" "$vr1_out"
 fi
@@ -4720,8 +7395,8 @@ fi
 vr2_out=$(echo '{"score": {"correctness": 55}, "actionability": "manual"}' \
     | "$TOOLS/parse-validator-result.py" --lane deep 2>&1)
 if [[ $? -eq 0 ]] \
-    && echo "$vr2_out" | jq -e '.score_phase4 == 55 and .actionability == "manual" and .confirmed_strength == "weak"' >/dev/null; then
-    pass "VR-2: nested score.correctness extracted"
+    && printf '%s\n' "$vr2_out" | jq -e '.score_phase4 == 55 and .actionability == "manual" and (has("confirmed_strength") | not)' >/dev/null; then
+    pass "VR-2: nested score.correctness extracted without strength hint"
 else
     fail "VR-2: nested shape failed" "$vr2_out"
 fi
@@ -4772,8 +7447,8 @@ fi
 vr7_out=$(echo '{"score_phase4": 80, "actionability": "auto_fixable", "decision": "confirmed", "validation_result": {"evidence": ["e1"], "blast_radius": {"writers": [], "consumers": [], "parallel_paths": [], "invariants_at_stake": []}, "fix_proposal": {"approach": "x", "files_to_modify": []}, "verification_context": {"how_to_verify_fix": [], "edge_cases_to_preserve": [], "what_would_break_if_incomplete": []}}}' \
     | "$TOOLS/parse-validator-result.py" --lane deep 2>&1)
 if [[ $? -eq 0 ]] \
-    && echo "$vr7_out" | jq -e '.validation_result.evidence[0] == "e1" and .confirmed_strength == "strong"' >/dev/null; then
-    pass "VR-7: deep-lane validation_result passthrough + strong strength at 80"
+    && printf '%s\n' "$vr7_out" | jq -e '.validation_result.evidence[0] == "e1" and (has("confirmed_strength") | not)' >/dev/null; then
+    pass "VR-7: deep-lane validation_result passthrough without strength hint"
 else
     fail "VR-7: deep-lane passthrough failed" "$vr7_out"
 fi
@@ -4799,8 +7474,8 @@ fi
 vr9_out=$(echo '{"score_phase4": 72, "overall_numeric": 7.5}' \
     | "$TOOLS/parse-validator-result.py" --lane deep 2>&1)
 if [[ $? -eq 0 ]] \
-    && echo "$vr9_out" | jq -e '.score_phase4 == 72 and .confirmed_strength == "moderate"' >/dev/null; then
-    pass "VR-9: in-band score_phase4 (72) wins over out-of-band overall_numeric"
+    && printf '%s\n' "$vr9_out" | jq -e '.score_phase4 == 72 and (has("confirmed_strength") | not)' >/dev/null; then
+    pass "VR-9: in-band score_phase4 wins without strength hint"
 else
     fail "VR-9: in-band score_phase4 precedence failed" "$vr9_out"
 fi
@@ -5658,7 +8333,7 @@ if grep -q '### 0.6a. Branch-behind-base advisory' <<<"$BB_PRE_BODY" \
    && grep -qF 'git merge $comparison_ref' <<<"$BB_PRE_BODY" \
    && grep -q 'preflight_warnings+=("branch_behind_base proceeded' <<<"$BB_PRE_BODY" \
    && grep -qF 'branch_behind_base unresolvable comparison_ref=' <<<"$BB_PRE_BODY"; then
-    pass "BB-1: /adamsreview:review §0.6a branch-behind-base gate present (passive count vs comparison_ref + Stop guidance merges comparison_ref + preflight_warnings buffer + unresolvable-path warning)"
+    pass "BB-1: /matthewsreview:review §0.6a branch-behind-base gate present (passive count vs comparison_ref + Stop guidance merges comparison_ref + preflight_warnings buffer + unresolvable-path warning)"
 else
     fail "BB-1: §0.6a header/rev-list/Stop-merge-comparison_ref/preflight_warnings/unresolvable-path warning missing in $BB_PRE (§0.6a slice)"
 fi
@@ -5723,7 +8398,7 @@ if grep -q '### 7.6a. Branch-behind-base advisory' <<<"$BB_FIX_BODY" \
    && grep -qF 'stash_pop_conflict=false' <<<"$BB_FIX_ABORT_BODY" \
    && grep -qF 'git stash pop 2>>"$trace_log_path"' <<<"$BB_FIX_ABORT_BODY" \
    && grep -qF 'branch_behind_base aborted behind=%s merge_ref=%s fetch_ok=%s stash_pop_conflict=%s' <<<"$BB_FIX_ABORT_BODY"; then
-    pass "BB-2: /adamsreview:fix §7.6a branch-behind-base gate present (active fetch with 30s timeout + fetch_ok routing structure + merge_ref tracked AND consumed in Stop guidance + fetch_note + stash-pop conflict-aware block + Stop AND Abort references + Proceed/Stop/Abort traces + unresolvable-path warning both fetch_ok branches + degraded-path warning + Abort-bullet stash-pop literals pinned)"
+    pass "BB-2: /matthewsreview:fix §7.6a branch-behind-base gate present (active fetch with 30s timeout + fetch_ok routing structure + merge_ref tracked AND consumed in Stop guidance + fetch_note + stash-pop conflict-aware block + Stop AND Abort references + Proceed/Stop/Abort traces + unresolvable-path warning both fetch_ok branches + degraded-path warning + Abort-bullet stash-pop literals pinned)"
 else
     fail "BB-2: §7.6a header/fetch with 30s timeout/fetch_ok routing/merge_ref assignment AND Stop-consumer/fetch_note/stash-pop conflict-aware block/Stop AND Abort references/Proceed/Stop/Abort traces/unresolvable-path warning/degraded-path warning/Abort-bullet stash-pop literals missing in $BB_FIX (§7.6a slice)"
 fi
@@ -5749,16 +8424,16 @@ if grep -q '### 3a. Branch-behind-base advisory' <<<"$BB_ADD_BODY" \
    && grep -qF 'git merge $merge_ref' <<<"$BB_ADD_BODY" \
    && grep -qF 'fetch_note=' <<<"$BB_ADD_BODY" \
    && grep -qE '^allowed-tools:.*AskUserQuestion' "$BB_ADD" \
-   && grep -qF '`AskUserQuestion` once:' <<<"$BB_ADD_BODY" \
+   && grep -qF 'ASK once:' <<<"$BB_ADD_BODY" \
    && grep -qF 'branch_behind_base proceeded behind=%s merge_ref=%s fetch_ok=%s' <<<"$BB_ADD_BODY" \
    && grep -qF 'branch_behind_base stopped behind=%s merge_ref=%s fetch_ok=%s' <<<"$BB_ADD_BODY" \
    && grep -qF 'branch_behind_base aborted behind=%s merge_ref=%s fetch_ok=%s' <<<"$BB_ADD_BODY" \
    && grep -qF 'branch_behind_base unresolvable fetch_ok=true local_resolve=false' <<<"$BB_ADD_BODY" \
    && grep -qF 'branch_behind_base unresolvable fetch_ok=false local_resolve=false' <<<"$BB_ADD_BODY" \
    && grep -qF 'branch_behind_base degraded fetch_ok=false local_resolve=true behind=0' <<<"$BB_ADD_BODY"; then
-    pass "BB-3: /adamsreview:add §3a branch-behind-base gate present (active fetch with 30s timeout + fetch_ok routing structure + merge_ref tracked AND consumed in Stop guidance + fetch_note + AskUserQuestion grant + §3a invocation prose + Proceed/Stop/Abort traces + unresolvable-path warning both fetch_ok branches + degraded-path warning)"
+    pass "BB-3: /matthewsreview:add §3a branch-behind-base gate present (active fetch with 30s timeout + fetch_ok routing structure + merge_ref tracked AND consumed in Stop guidance + fetch_note + AskUserQuestion grant + §3a ASK prose + Proceed/Stop/Abort traces + unresolvable-path warning both fetch_ok branches + degraded-path warning)"
 else
-    fail "BB-3: §3a header/fetch with 30s timeout/fetch_ok routing/merge_ref assignment AND Stop-consumer/fetch_note/AskUserQuestion grant AND §3a invocation/Proceed/Stop/Abort traces/unresolvable-path warning/degraded-path warning missing in $BB_ADD (§3a slice)"
+    fail "BB-3: §3a header/fetch with 30s timeout/fetch_ok routing/merge_ref assignment AND Stop-consumer/fetch_note/AskUserQuestion grant AND §3a ASK/Proceed/Stop/Abort traces/unresolvable-path warning/degraded-path warning missing in $BB_ADD (§3a slice)"
 fi
 
 # UV-1: every uv-shebang Python helper uses `--quiet --script`, not bare
@@ -5802,7 +8477,7 @@ SG_MD="$REPO/fragments/04-scoring-gate.md"
 sg1_missing=()
 for phrase in \
     'When `score` is null' \
-    'treat `(score >= 45)` as false' \
+    'treat `(score >= $phase3_gate)` as false' \
     'score unavailable — Phase 3 score missing or unparseable'; do
     if ! grep -qF "$phrase" "$SG_MD"; then
         sg1_missing+=("$phrase")
@@ -5814,9 +8489,23 @@ else
     fail "SG-1: missing §3.4 null-handling phrases in $SG_MD: ${sg1_missing[*]}"
 fi
 
-# ------------------------------------------------------------------ CR-* /adamsreview:codex-review structural assertions
+# PF-1: every role is materialized before the first classifier dispatch.
+# Otherwise a configured classifier model is unavailable to the first
+# model-consuming preflight step.
+PF_MD="$REPO/fragments/00-preflight.md"
+pf_plan_line=$(grep -n 'Materialize every role now' "$PF_MD" | cut -d: -f1)
+pf_dispatch_line=$(grep -n 'agent-role user_facing_classifier' "$PF_MD" | cut -d: -f1 | head -1)
+if [[ -n "$pf_plan_line" && -n "$pf_dispatch_line" \
+   && "$pf_plan_line" -lt "$pf_dispatch_line" ]]; then
+    pass "PF-1: preflight resolves the model plan before classifier dispatch"
+else
+    fail "PF-1: classifier can run before its configured role exists" \
+      "plan=$pf_plan_line dispatch=$pf_dispatch_line"
+fi
+
+# ------------------------------------------------------------------ CR-* /matthewsreview:codex-review structural assertions
 # Plan: codex-review (plans/codex-review.md). Codex-driven peer to
-# /adamsreview:review. These assertions guard the static structure of
+# /matthewsreview:review. These assertions guard the static structure of
 # the new command + fragments — full end-to-end behavior requires real
 # Codex jobs and real git diffs and is exercised by the user's
 # pre-merge real-PR runs. Structural drift (missing flag, wrong
@@ -5833,7 +8522,7 @@ if [[ -f "$CR_CMD" ]] \
     && grep -qF 'Bash(node:*)' "$CR_CMD" \
     && grep -qF 'AskUserQuestion' "$CR_CMD" \
     && grep -qF 'Bash(artifact-seed.sh:*)' "$CR_CMD" \
-    && grep -qF '[--effort <low|medium|high|xhigh>]' "$CR_CMD" \
+    && grep -qF '[--effort <low|medium|high|xhigh|max|ultra>]' "$CR_CMD" \
     && grep -qF '[--full]' "$CR_CMD"; then
     pass "CR-1: commands/codex-review.md present with codex/effort/full grants"
 else
@@ -5852,17 +8541,19 @@ else
     fail "CR-2: codex-review.md missing reviewer_sources_label working-context assignment"
 fi
 
-# CR-3: codex-review.md has the codex-companion readiness gate before
-# Phase 0 — fail-fast behavior when the companion script is missing or
-# `setup --json` reports a not-ready shape outside the documented
-# cold-start bypass (shared-mode + cli=true + ENOENT+broker.sock). Plan §2
-# (no fallback to Claude lenses) hinges on this gate firing.
-if grep -qF 'codex-companion script not found' "$CR_CMD" \
-    && grep -qF 'setup --json reports not-ready' "$CR_CMD" \
-    && grep -qF '/codex:setup' "$CR_CMD"; then
-    pass "CR-3: codex-review.md readiness gate fails-fast on missing/not-ready companion with /codex:setup hint"
+# CR-3: codex-review.md resolves a usable Codex transport before Phase 0.
+# Companion readiness and the narrow shared-mode cold-start bypass remain;
+# an authenticated standalone CLI selects agent-dispatch, and only the
+# absence of both transports fails with actionable setup guidance.
+if grep -qF 'node "$CODEX_COMPANION" setup --json' "$CR_CMD" \
+    && grep -qF '"$cx_mode" == "shared"' "$CR_CMD" \
+    && grep -qF 'command -v codex' "$CR_CMD" \
+    && grep -qF 'codex_launch_mode="agent-dispatch"' "$CR_CMD" \
+    && grep -qF 'ERROR: no usable Codex transport.' "$CR_CMD" \
+    && grep -qF '/codex:setup, or install/authenticate the codex CLI' "$CR_CMD"; then
+    pass "CR-3: codex-review.md selects companion or standalone Codex fallback and fails only when neither is usable"
 else
-    fail "CR-3: codex-review.md readiness gate missing or incomplete"
+    fail "CR-3: codex-review.md transport readiness gate missing or incomplete"
 fi
 
 # CR-4: each new Codex fragment exists, is non-trivial, and references
@@ -5947,40 +8638,36 @@ case "$PV" in
         pass "CR-8: plugin.json version bumped to $PV (>= 0.3.0 for new codex-review command)"
         ;;
     *)
-        fail "CR-8: plugin.json version is $PV — expected >= 0.3.0 for the new /adamsreview:codex-review command"
+        fail "CR-8: plugin.json version is $PV — expected >= 0.3.0 for the new /matthewsreview:codex-review command"
         ;;
 esac
 
-# CR-9: every Codex result-pluck site leads with .storedJob.result.rawOutput.
-# codex-companion stores task output at .storedJob.result.rawOutput
-# (lib/job-control.mjs sets `result: execution.payload`); the original
-# implementation plucked from .storedJob.payload.rawOutput, so every
-# Codex job extracted empty string and hit the §3.7 retry fallback.
-# Two checks:
-#   a. no line in the 4 Codex docs begins (after whitespace) with
-#      `.storedJob.payload.rawOutput //` — the original bug pattern.
-#   b. every Codex doc references `.storedJob.result.rawOutput` —
-#      catches accidental removal of the canonical key.
-CR_PLUCK_DOCS=(
-    "commands/codex-review.md"
+# CR-9: codex-poll.sh owns the companion-specific storedJob pluck; all
+# execution fragments consume its normalized raw_output field. Keeping the
+# storage path in one helper prevents drift and lets agent-dispatch expose
+# the same verdict shape.
+CR_PLUCK_FRAGMENTS=(
     "fragments/01-codex-detection.md"
     "fragments/05-codex-validation.md"
     "fragments/06-codex-cross-cutting.md"
 )
 cr9_violations=""
-for f in "${CR_PLUCK_DOCS[@]}"; do
+if ! grep -qF '.storedJob.result.rawOutput // .storedJob.payload.rawOutput // .storedJob.rawOutput // ""' "$REPO/bin/codex-poll.sh"; then
+    cr9_violations="$cr9_violations bin/codex-poll.sh(missing-canonical-chain)"
+fi
+for f in "${CR_PLUCK_FRAGMENTS[@]}"; do
     p="$REPO/$f"
-    if grep -nE '^[[:space:]]*\.storedJob\.payload\.rawOutput[[:space:]]*//' "$p" >/dev/null 2>&1; then
-        cr9_violations="$cr9_violations $f(leads-with-payload)"
+    if grep -qF '.storedJob.' "$p"; then
+        cr9_violations="$cr9_violations $f(direct-storage-pluck)"
     fi
-    if ! grep -qF '.storedJob.result.rawOutput' "$p"; then
-        cr9_violations="$cr9_violations $f(missing-result-key)"
+    if ! grep -qF ".raw_output // \"\"" "$p"; then
+        cr9_violations="$cr9_violations $f(missing-normalized-output)"
     fi
 done
 if [[ -z "$cr9_violations" ]]; then
-    pass "CR-9: every Codex pluck-site leads with .storedJob.result.rawOutput (regression guard for path-mismatch bug)"
+    pass "CR-9: codex-poll owns storedJob pluck; fragments consume transport-neutral raw_output"
 else
-    fail "CR-9: Codex rawOutput pluck contract violated:$cr9_violations"
+    fail "CR-9: Codex rawOutput normalization contract violated:$cr9_violations"
 fi
 
 # CR-10: Phase 4 codex-validation type-guards $raw_repaired to an object
@@ -6037,10 +8724,10 @@ cr12a_window=$(awk '
     /^#### L1 /          {if (in_window) in_window=0}
     in_window            {print}
 ' "$REPO/fragments/01-detection.md" | tr '\n' ' ')
-if printf '%s' "$cr12a_window" | grep -qE 'SINGLE[[:space:]]+orchestrator[[:space:]]+turn'; then
+if printf '%s' "$cr12a_window" | grep -qE 'SINGLE[[:space:]]+(orchestrator[[:space:]]+turn|batch)'; then
     pass "CR-12a: fragments/01-detection.md §1.3 carries top-of-section SINGLE-turn parallel-dispatch directive (regression guard for lens-prompt extraction serializing dispatch)"
 else
-    fail "CR-12a: fragments/01-detection.md §1.3 missing top-of-section 'SINGLE orchestrator turn' directive between §1.3 header and the first L1 sub-section"
+    fail "CR-12a: fragments/01-detection.md §1.3 missing top-of-section 'SINGLE turn/batch' directive between §1.3 header and the first L1 sub-section"
 fi
 
 # Flatten newlines before the imperative grep — the per-lens prose
@@ -6380,15 +9067,44 @@ else
     fail "CR-13f: commands/codex-review.md teaches raw status/result-poll recipe (bypasses watchdog):$cr13f_violations"
 fi
 
+# CR-13g — codex-review's standalone CLI fallback is end-to-end, not
+# readiness-only. Both command entry points must grant agent-dispatch, and
+# every codex-review execution fragment must branch launch/poll/stop on
+# codex_launch_mode while retaining the companion path.
+cr13g_problems=""
+for f in commands/review.md commands/codex-review.md; do
+    grep -qF 'Bash(agent-dispatch.sh:*)' "$REPO/$f" \
+        || cr13g_problems="$cr13g_problems $f(no-agent-dispatch-grant)"
+done
+for f in fragments/01-codex-detection.md fragments/05-codex-validation.md fragments/06-codex-cross-cutting.md; do
+    p="$REPO/$f"
+    grep -qF 'codex_launch_mode' "$p" \
+        || cr13g_problems="$cr13g_problems $f(no-mode-branch)"
+    grep -qF 'agent-dispatch.sh" start --engine codex' "$p" \
+        || cr13g_problems="$cr13g_problems $f(no-fallback-start)"
+    grep -qF 'agent-dispatch.sh" poll' "$p" \
+        || cr13g_problems="$cr13g_problems $f(no-fallback-poll)"
+    grep -qF 'agent-dispatch.sh" stop' "$p" \
+        || cr13g_problems="$cr13g_problems $f(no-fallback-stop)"
+    grep -qF 'node "$CODEX_COMPANION" task --background' "$p" \
+        || cr13g_problems="$cr13g_problems $f(no-companion-start)"
+done
+if grep -qF 'codex_launch_mode="agent-dispatch"' "$REPO/commands/codex-review.md" \
+   && [[ -z "$cr13g_problems" ]]; then
+    pass "CR-13g: codex CLI fallback branches readiness, launch, poll, stop, output collection, and permissions end-to-end"
+else
+    fail "CR-13g: codex CLI fallback wiring incomplete:$cr13g_problems"
+fi
+
 # CR-14 — fragments/00-preflight.md gates the --effort skip on working-context
-# `effort` being set. Without the gate, `/adamsreview:review --effort high`
+# `effort` being set. Without the gate, `/matthewsreview:review --effort high`
 # silently consumes the flag (no upstream parser owns it on :review) instead
 # of falling through to the unexpected-token clarify path.
 # Two-signal check: the multi-line gate prose mentions both "only when" the
 # upstream parser owns the flag AND the unset-falls-through path.
 if grep -qE 'only when the upstream parser actually owns the flag' "$REPO/fragments/00-preflight.md" \
    && grep -qE 'unexpected token and falls through to the clarify path' "$REPO/fragments/00-preflight.md"; then
-    pass "CR-14: fragments/00-preflight.md gates --effort skip on working-context effort being set (\`/adamsreview:review --effort\` falls through to clarify, not silent-consume)"
+    pass "CR-14: fragments/00-preflight.md gates --effort skip on working-context effort being set (\`/matthewsreview:review --effort\` falls through to clarify, not silent-consume)"
 else
     fail "CR-14: fragments/00-preflight.md missing the working-context-effort gate around --effort skip"
 fi
@@ -6423,19 +9139,2280 @@ else
     fail "CR-16b: commands/codex-review.md readiness-gate bypass predicate has drifted from fragment shape (missing mode/cli/ENOENT signature, or re-introduced cx_auth)"
 fi
 
-# CR-16c — commands/codex-review.md must retain its fatal `exit 1` on
-# the non-bypass not-ready path. Regression guard against accidentally
-# defaulting the readiness gate to bypass when the cold-start
-# signature doesn't match (which would swallow real auth/CLI failures
-# silently). Uses an awk range bounded by the closing `fi` of the
-# bypass `if !` block so future growth of the block can't silently
-# push the `exit 1` outside a fixed-line window.
+# CR-16c — a not-ready companion may fall through to standalone Codex,
+# but the final no-transport branch must remain fatal. This prevents the
+# cold-start bypass from silently swallowing real auth/CLI failures when
+# neither transport is usable.
 CR16C_COMMAND="$REPO/commands/codex-review.md"
-if awk '/if ! \[\[ "\$cx_mode" == "shared"/,/^[[:space:]]*fi[[:space:]]*$/' "$CR16C_COMMAND" \
-     | grep -qE '^[[:space:]]*exit 1[[:space:]]*$'; then
-    pass "CR-16c: commands/codex-review.md retains fatal exit 1 on non-bypass not-ready (cold-start bypass cannot accidentally swallow real failures)"
+cr16c_block=$(awk '/^if \[\[ -z "\$codex_launch_mode" \]\]; then$/,/^[[:space:]]*fi[[:space:]]*$/' "$CR16C_COMMAND")
+if printf '%s\n' "$cr16c_block" | grep -qF 'ERROR: no usable Codex transport.' \
+   && printf '%s\n' "$cr16c_block" | grep -qE '^[[:space:]]*exit 1[[:space:]]*$'; then
+    pass "CR-16c: codex-review.md retains fatal exit when companion and standalone Codex are both unavailable"
 else
-    fail "CR-16c: commands/codex-review.md readiness gate missing fatal exit 1 in non-bypass branch — cold-start bypass may be swallowing real not-ready failures"
+    fail "CR-16c: codex-review.md final no-transport branch is not fatal"
+fi
+
+# DF-1: large L1 diffs retain full ≤4k-line shard coverage while bounding
+# concurrency in waves. A hard three-shard cap silently recreates oversized
+# prompts above 12k changed lines.
+DF1_FRAGMENT="$REPO/fragments/01-detection.md"
+if ! grep -qF 'never more than 3' "$DF1_FRAGMENT" \
+   && grep -qF 'waves of at most 3' "$DF1_FRAGMENT" \
+   && grep -qF '≤4000 changed lines' "$DF1_FRAGMENT"; then
+    pass "DF-1: L1 sharding bounds concurrency without exceeding the per-shard input ceiling"
+else
+    fail "DF-1: L1 sharding still caps total shards or lacks bounded-wave coverage"
+fi
+
+# DF-2: standalone ensemble polling must not consume its deadline variable
+# before the size-scaled assignment executes.
+DF2_FRAGMENT="$REPO/fragments/02-ensemble-adapter.md"
+df2_assignment=$(grep -n '^ensemble_ceiling_sec=' "$DF2_FRAGMENT" | sed -n '1s/:.*//p')
+df2_poll=$(grep -n -- '--wall-clock-ceiling-sec "\$ensemble_ceiling_sec"' "$DF2_FRAGMENT" | sed -n '1s/:.*//p')
+if [[ "$df2_assignment" =~ ^[0-9]+$ && "$df2_poll" =~ ^[0-9]+$ \
+      && "$df2_assignment" -lt "$df2_poll" ]]; then
+    pass "DF-2: ensemble deadline is materialized before either transport polls"
+else
+    fail "DF-2: ensemble polling can expand an unset deadline" \
+      "assignment=$df2_assignment poll=$df2_poll"
+fi
+
+# DF-3: generated findings preserve a genuinely unknown source line as null.
+# [1,1] is an actual citation, not a safe missing-location sentinel.
+df3_defaults=$(grep -nE 'line_range[^[:cntrl:]]*(//|//=)[[:space:]]*\[1,[[:space:]]*1\]' \
+    "$REPO/fragments/01-detection.md" \
+    "$REPO/fragments/01-codex-detection.md" \
+    "$REPO/fragments/02-ensemble-adapter.md" \
+    "$REPO/fragments/05-validation.md" \
+    "$REPO/commands/add.md" || true)
+if [[ -z "$df3_defaults" ]]; then
+    pass "DF-3: no active candidate path fabricates line 1 for missing location data"
+else
+    fail "DF-3: active candidate paths still fabricate [1,1]" "$df3_defaults"
+fi
+
+
+# ---------------------------------------------------------------- EP-* early-pipeline dogfood regressions
+# These execute the command bodies extracted from the shared fragments rather
+# than copying their logic into the harness. Keep the anchors unique: an empty
+# extraction is a failed contract, never a vacuous pass.
+EP_DIR="$WORK/early-pipeline"
+mkdir -p "$EP_DIR"
+
+ep_extract_fence_after() {
+    local source="$1" anchor="$2" destination="$3"
+    awk -v anchor="$anchor" '
+        !seen && index($0, anchor) { seen=1; next }
+        seen && !fence {
+            trimmed=$0
+            sub(/^[[:space:]]*/, "", trimmed)
+            if (trimmed == "```bash") fence=1
+            next
+        }
+        fence {
+            trimmed=$0
+            sub(/^[[:space:]]*/, "", trimmed)
+            if (trimmed == "```") exit
+            output=$0
+            sub(/^    /, "", output)
+            print output
+        }
+    ' "$source" > "$destination"
+}
+
+# EP-1 / F004: Phase 0's model-plan writer must preserve the patcher's
+# non-zero status while still removing its tempfile. Its success path must
+# pass both model_plan and gates in the same artifact-patch invocation.
+EP_PREFLIGHT="$REPO/fragments/00-preflight.md"
+EP_PLAN_BLOCK="$EP_DIR/plan-writer.sh"
+ep_extract_fence_after "$EP_PREFLIGHT" '### 0.15b. Store the model plan' "$EP_PLAN_BLOCK"
+mkdir -p "$EP_DIR/plan-bin" "$EP_DIR/plan-tmp"
+cat > "$EP_DIR/plan-bin/artifact-patch.py" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$EP_CAPTURE"
+for arg in "$@"; do
+    case "$arg" in
+        model_plan=@*) cat "${arg#model_plan=@}" > "$EP_PLAN_CAPTURE" ;;
+    esac
+done
+exit "${EP_PATCH_RC:-0}"
+EOF
+chmod +x "$EP_DIR/plan-bin/artifact-patch.py"
+
+EP_CAPTURE="$EP_DIR/plan-fail.args" EP_PLAN_CAPTURE="$EP_DIR/plan-fail.json" \
+EP_PATCH_RC=3 PATH="$EP_DIR/plan-bin:$PATH" TMPDIR="$EP_DIR/plan-tmp" \
+artifact_path="$EP_DIR/artifact.json" model_plan_json='{"roles":{}}' \
+gates_json='{"phase3_gate":45}' \
+    /bin/bash "$EP_PLAN_BLOCK" >/dev/null 2>&1
+ep_plan_fail_rc=$?
+ep_plan_leftover=false
+for ep_path in "$EP_DIR"/plan-tmp/matthews-model-plan.*; do
+    [[ -e "$ep_path" ]] && ep_plan_leftover=true
+done
+
+EP_CAPTURE="$EP_DIR/plan-ok.args" EP_PLAN_CAPTURE="$EP_DIR/plan-ok.json" \
+EP_PATCH_RC=0 PATH="$EP_DIR/plan-bin:$PATH" TMPDIR="$EP_DIR/plan-tmp" \
+artifact_path="$EP_DIR/artifact.json" model_plan_json='{"roles":{"scoring":{"engine":"claude"}}}' \
+gates_json='{"phase3_gate":45}' \
+    /bin/bash "$EP_PLAN_BLOCK" >/dev/null 2>&1
+ep_plan_ok_rc=$?
+if [[ "$ep_plan_fail_rc" -eq 3 && "$ep_plan_leftover" == "false" \
+   && "$ep_plan_ok_rc" -eq 0 \
+   && "$(cat "$EP_DIR/plan-ok.json" 2>/dev/null)" == '{"roles":{"scoring":{"engine":"claude"}}}' \
+   && "$(grep -cF -- '--set-json' "$EP_DIR/plan-ok.args" 2>/dev/null)" -eq 2 ]] \
+   && grep -qF 'gates={"phase3_gate":45}' "$EP_DIR/plan-ok.args"; then
+    pass "EP-1 (F004): Phase-0 model-plan writer preserves patch rc, cleans temp, and atomically passes model_plan + gates"
+else
+    fail "EP-1: model-plan writer masks patch failure, leaks temp, or splits model_plan/gates" \
+      "fail_rc=$ep_plan_fail_rc leftover=$ep_plan_leftover ok_rc=$ep_plan_ok_rc"
+fi
+
+# EP-2 / F005: the size-scaled ensemble deadline initializer is a successful
+# initializer whether or not the cap branch runs.
+EP_ENSEMBLE="$REPO/fragments/02-ensemble-adapter.md"
+EP_DEADLINE_BLOCK="$EP_DIR/deadline.sh"
+ep_extract_fence_after "$EP_ENSEMBLE" 'Materialize the shared size-scaled deadline' "$EP_DEADLINE_BLOCK"
+ep_deadline_case() {
+    (
+        lines_changed="$1"
+        . "$EP_DEADLINE_BLOCK"
+        ep_deadline_rc=$?
+        printf '%s:%s\n' "$ep_deadline_rc" "${ensemble_ceiling_sec:-unset}"
+    )
+}
+ep_deadline_0=$(ep_deadline_case 0)
+ep_deadline_10000=$(ep_deadline_case 10000)
+ep_deadline_10017=$(ep_deadline_case 10017)
+if [[ "$ep_deadline_0" == "0:600" \
+   && "$ep_deadline_10000" == "0:1200" \
+   && "$ep_deadline_10017" == "0:1200" ]]; then
+    pass "EP-2 (F005): ensemble deadline initializer returns 0 below, at, and above cap"
+else
+    fail "EP-2: ensemble deadline initializer has a false-predicate status leak" \
+      "0=$ep_deadline_0 10000=$ep_deadline_10000 10017=$ep_deadline_10017"
+fi
+
+# EP-3 / F006: both transports emit exactly one common reviewer row after a
+# launch. Companion usage is explicitly null; standalone numeric usage,
+# including zero, is preserved; a skipped launch emits no row.
+EP_REVIEWER_LOG_BLOCK="$EP_DIR/reviewer-token-log.sh"
+ep_extract_fence_after "$EP_ENSEMBLE" '### 1.5.3b. Log CLI reviewer tokens' "$EP_REVIEWER_LOG_BLOCK"
+EP_NORMALIZER_LOG_BLOCK="$EP_DIR/normalizer-token-log.sh"
+ep_extract_fence_after "$EP_ENSEMBLE" '### 1.5.6. Log normalizer tokens' \
+    "$EP_NORMALIZER_LOG_BLOCK"
+python3 - "$EP_NORMALIZER_LOG_BLOCK" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+body = path.read_text()
+body = body.replace("<id>", "normalizer-1").replace("<N or null>", "123")
+path.write_text(body)
+PY
+mkdir -p "$EP_DIR/token-bin"
+cat > "$EP_DIR/token-bin/log-tokens.sh" <<'EOF'
+#!/usr/bin/env bash
+role="" tokens="" agent_id=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --agent-role) role="$2"; shift 2 ;;
+        --tokens) tokens="$2"; shift 2 ;;
+        --agent-id) agent_id="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+printf '%s|%s|%s\n' "$role" "$tokens" "$agent_id" >> "$EP_TOKEN_LOG"
+EOF
+chmod +x "$EP_DIR/token-bin/log-tokens.sh"
+: > "$EP_DIR/reviewer-tokens.log"
+for ep_token_case in companion standalone skipped; do
+    case "$ep_token_case" in
+        companion)
+            ep_launched=true; ep_mode=companion; ep_id=bg_1; ep_poll='' ;;
+        standalone)
+            ep_launched=true; ep_mode=agent-dispatch; ep_id=ad_1
+            ep_poll='{"verdict":"completed","tokens":0}' ;;
+        skipped)
+            ep_launched=false; ep_mode=agent-dispatch; ep_id=''; ep_poll='' ;;
+    esac
+    EP_TOKEN_LOG="$EP_DIR/reviewer-tokens.log" PATH="$EP_DIR/token-bin:$PATH" \
+    codex_reviewer_launched="$ep_launched" codex_launch_mode="$ep_mode" \
+    codex_reviewer_agent_id="$ep_id" codex_poll="$ep_poll" \
+    review_dir="$EP_DIR/review" role_ensemble_detect="codex:gpt-5.4:xhigh" \
+        /bin/bash "$EP_REVIEWER_LOG_BLOCK" >/dev/null 2>&1
+done
+EP_TOKEN_LOG="$EP_DIR/reviewer-tokens.log" PATH="$EP_DIR/token-bin:$PATH" \
+    review_dir="$EP_DIR/review" role_normalizer=sonnet \
+    /bin/bash "$EP_NORMALIZER_LOG_BLOCK" >/dev/null 2>&1
+ep_reviewer_rows=$(grep -c '^codex_ensemble_reviewer|' "$EP_DIR/reviewer-tokens.log" 2>/dev/null)
+ep_normalizer_rows=$(grep -c '^external_normalizer|123|normalizer-1$' "$EP_DIR/reviewer-tokens.log" 2>/dev/null)
+if [[ "$ep_reviewer_rows" == "2" \
+   && "$(sed -n '1p' "$EP_DIR/reviewer-tokens.log")" == 'codex_ensemble_reviewer|null|bg_1' \
+   && "$(sed -n '2p' "$EP_DIR/reviewer-tokens.log")" == 'codex_ensemble_reviewer|0|ad_1' \
+   && "$ep_normalizer_rows" -eq 1 \
+   && "$(wc -l < "$EP_DIR/reviewer-tokens.log" | tr -d '[:space:]')" == "3" ]]; then
+    pass "EP-3 (F006): companion/standalone reviewer tokens normalize to one common row; skipped launch none; normalizer remains separate"
+else
+    fail "EP-3: transport-dependent reviewer token accounting remains" \
+      "reviewer_rows=$ep_reviewer_rows normalizer_rows=$ep_normalizer_rows log=$(cat "$EP_DIR/reviewer-tokens.log")"
+fi
+
+# EP-4 / F007: candidate enumeration fails closed at both the artifact-read
+# and JSON parse boundaries while preserving a valid empty list.
+EP_SCORING="$REPO/fragments/04-scoring-gate.md"
+EP_ENUM_BLOCK="$EP_DIR/scoring-enumeration.sh"
+ep_extract_fence_after "$EP_SCORING" '### 3.2. Enumerate scoring candidates' "$EP_ENUM_BLOCK"
+cat >> "$EP_ENUM_BLOCK" <<'EOF'
+printf 'RESULT:%s:%s\n' "$scoring_count" "$scoring_ids"
+EOF
+mkdir -p "$EP_DIR/read-bin"
+cat > "$EP_DIR/read-bin/artifact-read.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$EP_READ_MODE" in
+    fail) exit 7 ;;
+    malformed) printf '%s\n' 'not-json' ;;
+    empty) printf '%s\n' '[]' ;;
+    two) printf '%s\n' '["F001","F002"]' ;;
+esac
+EOF
+chmod +x "$EP_DIR/read-bin/artifact-read.sh"
+EP_READ_MODE=fail PATH="$EP_DIR/read-bin:$PATH" artifact_path=/unused \
+    /bin/bash "$EP_ENUM_BLOCK" >/dev/null 2>&1
+ep_enum_read_rc=$?
+EP_READ_MODE=malformed PATH="$EP_DIR/read-bin:$PATH" artifact_path=/unused \
+    /bin/bash "$EP_ENUM_BLOCK" >/dev/null 2>&1
+ep_enum_parse_rc=$?
+ep_enum_empty=$(EP_READ_MODE=empty PATH="$EP_DIR/read-bin:$PATH" artifact_path=/unused \
+    /bin/bash "$EP_ENUM_BLOCK" 2>/dev/null); ep_enum_empty_rc=$?
+ep_enum_two=$(EP_READ_MODE=two PATH="$EP_DIR/read-bin:$PATH" artifact_path=/unused \
+    /bin/bash "$EP_ENUM_BLOCK" 2>/dev/null); ep_enum_two_rc=$?
+if [[ "$ep_enum_read_rc" -ne 0 && "$ep_enum_parse_rc" -ne 0 \
+   && "$ep_enum_empty_rc" -eq 0 && "$ep_enum_empty" == 'RESULT:0:[]' \
+   && "$ep_enum_two_rc" -eq 0 && "$ep_enum_two" == 'RESULT:2:["F001","F002"]' ]]; then
+    pass "EP-4 (F007): scoring enumeration fails closed on read/parse errors and preserves [] semantics"
+else
+    fail "EP-4: scoring enumeration masks read/parse failure or rejects valid arrays" \
+      "read_rc=$ep_enum_read_rc parse_rc=$ep_enum_parse_rc empty=$ep_enum_empty_rc:$ep_enum_empty two=$ep_enum_two_rc:$ep_enum_two"
+fi
+
+# EP-5 / F008: the score tuple stream is the patcher's stdin. An expected
+# count mismatch must remain exit 6 and leave the artifact byte-identical;
+# a valid batch persists score, reason, and history.
+EP_SCORE_WRITE_BLOCK="$EP_DIR/score-write.sh"
+ep_extract_fence_after "$EP_SCORING" 'Write all scores in ONE batched call' "$EP_SCORE_WRITE_BLOCK"
+cp "$FIX/artifact-seed.json" "$EP_DIR/score-mismatch.json"
+ep_score_before=$(sha_of "$EP_DIR/score-mismatch.json")
+PATH="$TOOLS:$PATH" artifact_path="$EP_DIR/score-mismatch.json" scoring_count=2 \
+all_chunk_tuples_json='[{"id":"F001","score_phase3":72,"reason":"rescored"}]' \
+    /bin/bash "$EP_SCORE_WRITE_BLOCK" >/dev/null 2>&1
+ep_score_mismatch_rc=$?
+ep_score_after=$(sha_of "$EP_DIR/score-mismatch.json")
+
+cp "$FIX/artifact-seed.json" "$EP_DIR/score-valid.json"
+PATH="$TOOLS:$PATH" artifact_path="$EP_DIR/score-valid.json" scoring_count=1 \
+all_chunk_tuples_json='[{"id":"F001","score_phase3":72,"reason":"rescored"}]' \
+    /bin/bash "$EP_SCORE_WRITE_BLOCK" >/dev/null 2>&1
+ep_score_valid_rc=$?
+ep_score_valid_shape=$(jq -r '
+  .findings[] | select(.id=="F001")
+  | "\(.score_phase3)|\(.reason)|\(.score_history[-1].phase)|\(.score_history[-1].score)"
+' "$EP_DIR/score-valid.json")
+if [[ "$ep_score_mismatch_rc" -eq 6 && "$ep_score_before" == "$ep_score_after" \
+   && "$ep_score_valid_rc" -eq 0 \
+   && "$ep_score_valid_shape" == '72|rescored|phase_3|72' ]]; then
+    pass "EP-5 (F008): streamed score batch preserves rc 6/atomicity and valid score+reason+history persistence"
+else
+    fail "EP-5: score-write cleanup masks failure or valid streamed batch is incomplete" \
+      "mismatch_rc=$ep_score_mismatch_rc unchanged=$([[ "$ep_score_before" == "$ep_score_after" ]] && echo yes || echo no) valid_rc=$ep_score_valid_rc shape=$ep_score_valid_shape"
+fi
+
+# EP-6 / F009: materialize the artifact gate before first use and evaluate
+# routing in jq so fractional thresholds and null scores are well-defined.
+EP_GATE_LOAD_BLOCK="$EP_DIR/phase3-gate-load.sh"
+ep_extract_fence_after "$EP_SCORING" 'Materialize the resolved Phase-3 gate' "$EP_GATE_LOAD_BLOCK"
+cat >> "$EP_GATE_LOAD_BLOCK" <<'EOF'
+printf 'RESULT:%s\n' "$phase3_gate"
+EOF
+printf '%s\n' '{"gates":{}}' > "$EP_DIR/gate-default.json"
+printf '%s\n' '{"gates":{"phase3_gate":55.5}}' > "$EP_DIR/gate-fractional.json"
+ep_gate_default=$(PATH="$TOOLS:$PATH" artifact_path="$EP_DIR/gate-default.json" \
+    /bin/bash "$EP_GATE_LOAD_BLOCK" 2>/dev/null); ep_gate_default_rc=$?
+ep_gate_fractional=$(PATH="$TOOLS:$PATH" artifact_path="$EP_DIR/gate-fractional.json" \
+    /bin/bash "$EP_GATE_LOAD_BLOCK" 2>/dev/null); ep_gate_fractional_rc=$?
+PATH="$TOOLS:$PATH" artifact_path="$EP_DIR/missing-gate-artifact.json" \
+    /bin/bash "$EP_GATE_LOAD_BLOCK" >/dev/null 2>&1
+ep_gate_missing_rc=$?
+
+EP_GATE_PREDICATE_BLOCK="$EP_DIR/phase3-gate-predicate.sh"
+ep_extract_fence_after "$EP_SCORING" 'For each returned `entry_json`, compute' "$EP_GATE_PREDICATE_BLOCK"
+cat >> "$EP_GATE_PREDICATE_BLOCK" <<'EOF'
+printf 'RESULT:%s\n' "$advances_to_phase_4"
+EOF
+ep_gate_case() {
+    entry_json="$1" phase3_gate="$2" /bin/bash "$EP_GATE_PREDICATE_BLOCK" 2>/dev/null
+}
+ep_gate_54=$(ep_gate_case '{"id":"F1","score":54,"families":["a"]}' 55)
+ep_gate_55=$(ep_gate_case '{"id":"F1","score":55,"families":["a"]}' 55)
+ep_gate_null_one=$(ep_gate_case '{"id":"F1","score":null,"families":["a"]}' 55)
+ep_gate_null_two=$(ep_gate_case '{"id":"F1","score":null,"families":["a","b"]}' 55)
+ep_gate_frac_low=$(ep_gate_case '{"id":"F1","score":55,"families":["a"]}' 55.5)
+ep_gate_frac_equal=$(ep_gate_case '{"id":"F1","score":55.5,"families":["a"]}' 55.5)
+ep_gate_load_line=$(grep -n '^phase3_gate=' "$EP_SCORING" | sed -n '1s/:.*//p')
+ep_gate_use_line=$(grep -n -- '--argjson gate "$phase3_gate"' "$EP_SCORING" | sed -n '1s/:.*//p')
+if [[ "$ep_gate_default_rc" -eq 0 && "$ep_gate_default" == 'RESULT:45' \
+   && "$ep_gate_fractional_rc" -eq 0 && "$ep_gate_fractional" == 'RESULT:55.5' \
+   && "$ep_gate_missing_rc" -ne 0 \
+   && "$ep_gate_54" == 'RESULT:false' && "$ep_gate_55" == 'RESULT:true' \
+   && "$ep_gate_null_one" == 'RESULT:false' && "$ep_gate_null_two" == 'RESULT:true' \
+   && "$ep_gate_frac_low" == 'RESULT:false' && "$ep_gate_frac_equal" == 'RESULT:true' \
+   && "$ep_gate_load_line" =~ ^[0-9]+$ && "$ep_gate_use_line" =~ ^[0-9]+$ \
+   && "$ep_gate_load_line" -lt "$ep_gate_use_line" ]]; then
+    pass "EP-6 (F009): phase3_gate loads fail-fast/default 45, precedes use, and jq routing handles fractional/null/family cases"
+else
+    fail "EP-6: phase3_gate is unset, integer-only, fail-open, or used before materialization" \
+      "default=$ep_gate_default_rc:$ep_gate_default fractional=$ep_gate_fractional_rc:$ep_gate_fractional missing_rc=$ep_gate_missing_rc cases=$ep_gate_54,$ep_gate_55,$ep_gate_null_one,$ep_gate_null_two,$ep_gate_frac_low,$ep_gate_frac_equal lines=$ep_gate_load_line/$ep_gate_use_line"
+fi
+
+# EP-7 / F011: an installed-but-unready companion falls through to a
+# standalone transport only when both the Codex CLI and dispatcher exist.
+# Ready/cold-start companion paths stay companion; max/ultra bypasses probe.
+EP_DETECTION="$REPO/fragments/01-detection.md"
+EP_TRANSPORT_BLOCK="$EP_DIR/transport-negotiation.sh"
+ep_extract_fence_after "$EP_DETECTION" 'Check Codex availability:' "$EP_TRANSPORT_BLOCK"
+cat >> "$EP_TRANSPORT_BLOCK" <<'EOF'
+printf 'RESULT:%s|%s|%s\n' "${codex_launch_mode:-}" "${codex_available:-}" "${codex_reason:-}"
+EOF
+EP_TRANSPORT_HOME="$EP_DIR/transport-home"
+mkdir -p "$EP_TRANSPORT_HOME/.claude/plugins/vendor/codex"
+: > "$EP_TRANSPORT_HOME/.claude/plugins/vendor/codex/codex-companion.mjs"
+EP_JQ_DIR=$(dirname "$(command -v jq)")
+for ep_variant in full no_dispatch no_codex; do
+    mkdir -p "$EP_DIR/transport-$ep_variant"
+    cat > "$EP_DIR/transport-$ep_variant/node" <<'EOF'
+#!/usr/bin/env bash
+[[ -z "${EP_NODE_CALLED:-}" ]] || : > "$EP_NODE_CALLED"
+printf '%s\n' "$EP_SETUP_JSON"
+EOF
+    chmod +x "$EP_DIR/transport-$ep_variant/node"
+done
+for ep_variant in full no_dispatch; do
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$EP_DIR/transport-$ep_variant/codex"
+    chmod +x "$EP_DIR/transport-$ep_variant/codex"
+done
+for ep_variant in full no_codex; do
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$EP_DIR/transport-$ep_variant/agent-dispatch.sh"
+    chmod +x "$EP_DIR/transport-$ep_variant/agent-dispatch.sh"
+done
+ep_transport_case() {
+    local variant="$1" setup="$2" requires="$3" marker="$4"
+    EP_SETUP_JSON="$setup" EP_NODE_CALLED="$marker" HOME="$EP_TRANSPORT_HOME" \
+    PATH="$EP_DIR/transport-$variant:$EP_JQ_DIR:/usr/bin:/bin" \
+    review_dir="$EP_DIR" codex_requires_standalone="$requires" MRB="" \
+        /bin/bash "$EP_TRANSPORT_BLOCK" 2>/dev/null
+}
+ep_transport_fallback=$(ep_transport_case full '{"ready":false,"sessionRuntime":{"mode":"local"},"codex":{"available":true},"auth":{"detail":"not ready"}}' false "$EP_DIR/node-fallback")
+ep_transport_no_dispatch=$(ep_transport_case no_dispatch '{"ready":false,"sessionRuntime":{"mode":"local"}}' false "$EP_DIR/node-no-dispatch")
+ep_transport_no_codex=$(ep_transport_case no_codex '{"ready":false,"sessionRuntime":{"mode":"local"}}' false "$EP_DIR/node-no-codex")
+ep_transport_ready=$(ep_transport_case full '{"ready":true}' false "$EP_DIR/node-ready")
+ep_transport_cold=$(ep_transport_case full '{"ready":false,"sessionRuntime":{"mode":"shared"},"codex":{"available":true},"auth":{"detail":"connect ENOENT /tmp/broker.sock"}}' false "$EP_DIR/node-cold")
+rm -f "$EP_DIR/node-max"
+ep_transport_max=$(ep_transport_case full '{"ready":true}' true "$EP_DIR/node-max")
+if [[ "$ep_transport_fallback" == RESULT:agent-dispatch\|true\|* \
+   && "$ep_transport_no_dispatch" == RESULT:\|false\|* \
+   && "$ep_transport_no_codex" == RESULT:\|false\|* \
+   && "$ep_transport_ready" == RESULT:companion\|true\|* \
+   && "$ep_transport_cold" == RESULT:companion\|true\|* \
+   && "$ep_transport_max" == RESULT:agent-dispatch\|true\|* \
+   && ! -e "$EP_DIR/node-max" ]]; then
+    pass "EP-7 (F011): unready companion falls back only to complete standalone transport; ready/cold/max paths preserved"
+else
+    fail "EP-7: Codex transport negotiation suppresses fallback or weakens prerequisites/bypass" \
+      "fallback=$ep_transport_fallback no_dispatch=$ep_transport_no_dispatch no_codex=$ep_transport_no_codex ready=$ep_transport_ready cold=$ep_transport_cold max=$ep_transport_max max_probed=$([[ -e "$EP_DIR/node-max" ]] && echo yes || echo no)"
+fi
+
+# EP-8 / F025: explicit --effort updates value and provenance for exactly the
+# three Codex review roles. An omitted override is byte-for-byte inert.
+EP_EFFORT_BLOCK="$EP_DIR/effort-override.sh"
+awk '
+    index($0, "# :codex-review only") { capture=1 }
+    capture { print }
+    capture && /^fi$/ { exit }
+' "$EP_PREFLIGHT" > "$EP_EFFORT_BLOCK"
+ep_model_plan='{"roles":{"codex_detect":{"effort":"low","source":"user-config"},"codex_validate":{"effort":"medium","source":"repo-config"},"codex_crosscut":{"effort":"high","source":"profile (strict)"},"ensemble_detect":{"effort":"xhigh","source":"default"}},"gates":{}}'
+ep_effort_explicit=$(model_plan_json="$ep_model_plan" reviewer_sources_label=internal-codex \
+    effort_explicit=true effort=xhigh /bin/bash -c '. "$1"; printf "%s" "$model_plan_json"' _ "$EP_EFFORT_BLOCK")
+ep_effort_omitted=$(model_plan_json="$ep_model_plan" reviewer_sources_label=internal-codex \
+    effort_explicit=false effort='' /bin/bash -c '. "$1"; printf "%s" "$model_plan_json"' _ "$EP_EFFORT_BLOCK")
+ep_effort_roles=$(printf '%s\n' "$ep_effort_explicit" | jq -r '
+  [.roles.codex_detect,.roles.codex_validate,.roles.codex_crosscut]
+  | map("\(.effort)|\(.source)") | join(";")
+')
+ep_effort_ensemble=$(printf '%s\n' "$ep_effort_explicit" | jq -c '.roles.ensemble_detect')
+ep_effort_ensemble_before=$(printf '%s\n' "$ep_model_plan" | jq -c '.roles.ensemble_detect')
+if [[ "$ep_effort_roles" == 'xhigh|user-config + cli(--effort);xhigh|repo-config + cli(--effort);xhigh|profile (strict) + cli(--effort)' \
+   && "$ep_effort_ensemble" == "$ep_effort_ensemble_before" \
+   && "$ep_effort_omitted" == "$ep_model_plan" ]]; then
+    pass "EP-8 (F025): explicit Codex effort updates all three role values + provenance and leaves omitted/ensemble paths untouched"
+else
+    fail "EP-8: explicit Codex effort leaves stale provenance or mutates unrelated/omitted paths" \
+      "roles=$ep_effort_roles ensemble_same=$([[ "$ep_effort_ensemble" == "$ep_effort_ensemble_before" ]] && echo yes || echo no) omitted_same=$([[ "$ep_effort_omitted" == "$ep_model_plan" ]] && echo yes || echo no)"
+fi
+
+# EP-9 / F044: inventory only the unescaped shell expansions in the first
+# unquoted light-validator heredoc, and prove all four values render.
+EP_CODEX_VALIDATION="$REPO/fragments/05-codex-validation.md"
+ep_heredoc_inventory=$(python3 - "$EP_CODEX_VALIDATION" <<'PY'
+import re
+import sys
+
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+start = next((i for i, line in enumerate(lines) if line == 'cat > "$prompt_file" <<PROMPT'), -1)
+if start < 0:
+    raise SystemExit("missing unquoted PROMPT heredoc")
+end = next((i for i in range(start + 1, len(lines)) if lines[i] == "PROMPT"), -1)
+if end < 0:
+    raise SystemExit("missing PROMPT closer")
+inventory_start = next(
+    (i for i in range(max(0, start - 8), start)
+     if lines[i].startswith("# Expansion inventory for this heredoc:")),
+    -1,
+)
+if inventory_start < 0:
+    raise SystemExit("missing expansion inventory comment")
+inventory = "\n".join(lines[inventory_start:start])
+body = "\n".join(lines[start + 1:end])
+pattern = re.compile(r"(?<!\\)\$([A-Za-z_][A-Za-z0-9_]*)")
+expected = sorted(set(pattern.findall(body)))
+declared = sorted(set(pattern.findall(inventory)))
+if declared != expected:
+    raise SystemExit(f"declared={declared} actual={expected}")
+print(",".join(expected))
+PY
+); ep_heredoc_inventory_rc=$?
+EP_PROMPT_BLOCK="$EP_DIR/light-prompt.sh"
+ep_extract_fence_after "$EP_CODEX_VALIDATION" '#### 4.3.1. Build per-chunk prompt' "$EP_PROMPT_BLOCK"
+ep_prompt_path="/tmp/matthews-review-codex-ep_contract-LB-chunk7.md"
+rm -f "$ep_prompt_path"
+review_id=ep_contract chunk_n=7 chunk_candidates='[]' trivial_mode=TRIVIAL_SENTINEL \
+phase4_b1=B1_SENTINEL phase4_b2=B2_SENTINEL phase4_b3=B3_SENTINEL \
+claude_md_paths=CLAUDE_SENTINEL /bin/bash "$EP_PROMPT_BLOCK" >/dev/null 2>&1
+ep_prompt_rc=$?
+ep_prompt_missing=""
+for sentinel in TRIVIAL_SENTINEL B1_SENTINEL B2_SENTINEL B3_SENTINEL; do
+    grep -qF "$sentinel" "$ep_prompt_path" 2>/dev/null \
+        || ep_prompt_missing="$ep_prompt_missing $sentinel"
+done
+rm -f "$ep_prompt_path"
+if [[ "$ep_heredoc_inventory_rc" -eq 0 \
+   && "$ep_heredoc_inventory" == 'phase4_b1,phase4_b2,phase4_b3,trivial_mode' \
+   && "$ep_prompt_rc" -eq 0 && -z "$ep_prompt_missing" ]]; then
+    pass "EP-9 (F044): Phase-4 heredoc inventory exactly matches and renders trivial_mode + three configured bands"
+else
+    fail "EP-9: Phase-4 heredoc expansion inventory/body drift" \
+      "inventory_rc=$ep_heredoc_inventory_rc inventory=$ep_heredoc_inventory prompt_rc=$ep_prompt_rc missing=$ep_prompt_missing"
+fi
+
+# EP-10 / F077: root Markdown fences must balance without swallowing
+# headings, and the exact scoring-enumeration fence must parse as Bash.
+python3 - "$EP_SCORING" > "$EP_DIR/fence-scan.out" <<'PY'
+import re
+import sys
+
+inside = False
+opened = 0
+violations = []
+for number, raw in enumerate(open(sys.argv[1], encoding="utf-8"), 1):
+    line = raw.rstrip("\n")
+    if not inside and re.fullmatch(r"```[A-Za-z0-9_-]*", line):
+        inside = True
+        opened = number
+        continue
+    if inside and line == "```":
+        inside = False
+        opened = 0
+        continue
+    if inside and re.match(r"^#{2,3} ", line):
+        violations.append(f"{opened}->{number}:{line}")
+if inside:
+    violations.append(f"{opened}->EOF:unclosed")
+if violations:
+    raise SystemExit("; ".join(violations))
+print("balanced")
+PY
+ep_fence_scan_rc=$?
+ep_fence_scan=$(cat "$EP_DIR/fence-scan.out" 2>/dev/null)
+EP_ENUM_SYNTAX="$EP_DIR/scoring-enumeration-syntax.sh"
+ep_extract_fence_after "$EP_SCORING" '### 3.2. Enumerate scoring candidates' "$EP_ENUM_SYNTAX"
+/bin/bash -n "$EP_ENUM_SYNTAX" >/dev/null 2>&1
+ep_enum_syntax_rc=$?
+if [[ "$ep_fence_scan_rc" -eq 0 && "$ep_fence_scan" == "balanced" \
+   && "$ep_enum_syntax_rc" -eq 0 && -s "$EP_ENUM_SYNTAX" ]]; then
+    pass "EP-10 (F077): scoring fragment root fences balance before headings and enumeration fence is Bash-valid"
+else
+    fail "EP-10: scoring root fence swallows prose/headings or enumeration is not Bash-valid" \
+      "scan_rc=$ep_fence_scan_rc scan=$ep_fence_scan syntax_rc=$ep_enum_syntax_rc size=$(wc -c < "$EP_ENUM_SYNTAX" | tr -d '[:space:]')"
+fi
+
+# EP-11 / F091: PR-comment recovery accepts current and legacy markers,
+# applies the existing author filter, and selects the latest recognized id,
+# while the renderer continues to write only the current marker.
+EP_MARKER_BLOCK="$EP_DIR/comment-recovery.sh"
+ep_extract_fence_after "$EP_PREFLIGHT" 'If `mode=pr` AND step 0.13 found no prior local artifact' "$EP_MARKER_BLOCK"
+mkdir -p "$EP_DIR/gh-bin"
+cat > "$EP_DIR/gh-bin/gh" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "api" && "$2" == "user" ]]; then
+    printf '%s\n' me
+elif [[ "$1" == "api" && "$2" == "--paginate" ]]; then
+    printf '%s\n' "$EP_COMMENTS"
+elif [[ "$1" == "repo" && "$2" == "view" ]]; then
+    printf '%s\n' owner/repo
+else
+    exit 64
+fi
+EOF
+chmod +x "$EP_DIR/gh-bin/gh"
+ep_marker_case() {
+    EP_COMMENTS="$1" PATH="$EP_DIR/gh-bin:$PATH" pr_number=9 \
+        /bin/bash "$EP_MARKER_BLOCK" 2>/dev/null
+}
+ep_marker_legacy=$(ep_marker_case '[{"id":11,"user":{"login":"me"},"body":"<!-- adams-review-v1 -->"}]')
+ep_marker_current=$(ep_marker_case '[{"id":12,"user":{"login":"me"},"body":"<!-- matthews-review-v1 -->"}]')
+ep_marker_mixed=$(ep_marker_case '[{"id":12,"user":{"login":"me"},"body":"<!-- matthews-review-v1 -->"},{"id":13,"user":{"login":"me"},"body":"<!-- adams-review-v1 -->"}]')
+ep_marker_pages=$(ep_marker_case $'[{"id":16,"user":{"login":"me"},"body":"<!-- matthews-review-v1 -->"}]\n[{"id":19,"user":{"login":"me"},"body":"<!-- adams-review-v1 -->"},{"id":20,"user":{"login":"other"},"body":"<!-- matthews-review-v1 -->"}]')
+ep_marker_wrong=$(ep_marker_case '[{"id":14,"user":{"login":"other"},"body":"<!-- matthews-review-v1 -->"}]')
+ep_marker_none=$(ep_marker_case '[{"id":15,"user":{"login":"me"},"body":"ordinary comment"}]')
+ep_renderer_output=$("$TOOLS/artifact-render.py" --input "$FIX/artifact-seed.json" 2>/dev/null)
+ep_renderer_current=$(printf '%s\n' "$ep_renderer_output" | grep -cF '<!-- matthews-review-v1 -->')
+ep_renderer_legacy=$(printf '%s\n' "$ep_renderer_output" | grep -cF '<!-- adams-review-v1 -->')
+if [[ "$ep_marker_legacy" == "11" && "$ep_marker_current" == "12" \
+   && "$ep_marker_mixed" == "13" && "$ep_marker_pages" == "19" \
+   && -z "$ep_marker_wrong" && -z "$ep_marker_none" \
+   && "$ep_renderer_current" -eq 1 && "$ep_renderer_legacy" -eq 0 ]]; then
+    pass "EP-11 (F091): recovery reads legacy/current markers and latest author match; renderer writes current marker only"
+else
+    fail "EP-11: marker read compatibility/latest-author semantics or current-only write contract regressed" \
+      "legacy=$ep_marker_legacy current=$ep_marker_current mixed=$ep_marker_mixed pages=$ep_marker_pages wrong=$ep_marker_wrong none=$ep_marker_none renderer_current=$ep_renderer_current renderer_legacy=$ep_renderer_legacy"
+fi
+
+
+# EP-12 / F006+F011: standalone launch/poll output must cross the Bash
+# tool boundary instead of being swallowed in shell-local assignments.
+EP_STANDALONE_LAUNCH="$EP_DIR/standalone-launch.sh"
+ep_extract_fence_after "$EP_ENSEMBLE" \
+    '*`codex_launch_mode == "agent-dispatch"` (standalone fallback' \
+    "$EP_STANDALONE_LAUNCH"
+mkdir -p "$EP_DIR/dispatch-bin" "$EP_DIR/dispatch-scratch"
+cat > "$EP_DIR/dispatch-bin/agent-dispatch.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+    start)
+        printf '%s\n' "${EP_START_PAYLOAD:-{\"job_id\":\"opaque-7f3a\",\"pid\":42,\"out_file\":\"/tmp/out\"}}"
+        ;;
+    poll)
+        shift
+        received_job=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --job) received_job="$2"; shift 2 ;;
+                *) shift ;;
+            esac
+        done
+        printf '%s\n' "$received_job" > "$EP_POLL_JOB"
+        count_file="$EP_POLL_COUNT"
+        count=0
+        [[ ! -f "$count_file" ]] || count=$(cat "$count_file")
+        count=$((count + 1))
+        printf '%s\n' "$count" > "$count_file"
+        if [[ "$count" -eq 1 ]]; then
+            printf '%s\n' '{"verdict":"alive","status":"running"}'
+        else
+            printf '%s\n' '{"verdict":"completed","status":"completed","raw_output":"review result","tokens":7}'
+        fi
+        ;;
+    stop)
+        printf '%s\n' '{"verdict":"cancelled","status":"cancelled"}'
+        ;;
+    *)
+        exit 64
+        ;;
+esac
+EOF
+chmod +x "$EP_DIR/dispatch-bin/agent-dispatch.sh"
+ep_launch_out=$(MRB="$EP_DIR/dispatch-bin/" review_id=ep \
+    scratch_dir="$EP_DIR/dispatch-scratch" \
+    role_ensemble_detect_model=gpt-5.4 role_ensemble_detect_effort=xhigh \
+    /bin/bash "$EP_STANDALONE_LAUNCH" 2>/dev/null)
+ep_launch_rc=$?
+ep_launch_job_id=$(printf '%s\n' "$ep_launch_out" | jq -er '.job_id')
+ep_launch_missing_out=$(EP_START_PAYLOAD='{"pid":42}' \
+    MRB="$EP_DIR/dispatch-bin/" review_id=ep \
+    scratch_dir="$EP_DIR/dispatch-scratch" \
+    /bin/bash "$EP_STANDALONE_LAUNCH" 2>/dev/null)
+ep_launch_missing_rc=$?
+ep_launch_malformed_out=$(EP_START_PAYLOAD='not-json' \
+    MRB="$EP_DIR/dispatch-bin/" review_id=ep \
+    scratch_dir="$EP_DIR/dispatch-scratch" \
+    /bin/bash "$EP_STANDALONE_LAUNCH" 2>/dev/null)
+ep_launch_malformed_rc=$?
+
+EP_STANDALONE_POLL="$EP_DIR/standalone-poll.sh"
+ep_extract_fence_after "$EP_ENSEMBLE" \
+    '*`codex_launch_mode == "agent-dispatch"`:* run one foreground collector' \
+    "$EP_STANDALONE_POLL"
+rm -f "$EP_DIR/poll-count" "$EP_DIR/poll-job"
+ep_poll_out=$(EP_POLL_COUNT="$EP_DIR/poll-count" \
+    EP_POLL_JOB="$EP_DIR/poll-job" MRB="$EP_DIR/dispatch-bin/" \
+    codex_job_id="$ep_launch_job_id" \
+    scratch_dir="$EP_DIR/dispatch-scratch" ensemble_ceiling_sec=600 \
+    trace_log_path="$EP_DIR/trace.md" \
+    /bin/bash "$EP_STANDALONE_POLL" 2>/dev/null)
+ep_poll_rc=$?
+ep_poll_body=$(cat "$EP_DIR/dispatch-scratch/codex.out" 2>/dev/null)
+ep_poll_count=$(cat "$EP_DIR/poll-count" 2>/dev/null)
+ep_poll_job=$(cat "$EP_DIR/poll-job" 2>/dev/null)
+if [[ "$ep_launch_rc" -eq 0 \
+   && "$ep_launch_job_id" == "opaque-7f3a" \
+   && "$ep_launch_missing_rc" -ne 0 && "$ep_launch_malformed_rc" -ne 0 \
+   && "$ep_poll_rc" -eq 0 \
+   && "$(printf '%s\n' "$ep_poll_out" | jq -r '.verdict')" == "completed" \
+   && "$ep_poll_body" == "review result" \
+   && "$ep_poll_count" == "2" && "$ep_poll_job" == "$ep_launch_job_id" ]]; then
+    pass "EP-12 (F006/F011): standalone launch and terminal poll JSON cross the tool boundary into orchestrator context"
+else
+    fail "EP-12: standalone dispatch state remains shell-local or collector output is incomplete" \
+      "launch=$ep_launch_rc:$ep_launch_out missing=$ep_launch_missing_rc:$ep_launch_missing_out malformed=$ep_launch_malformed_rc:$ep_launch_malformed_out poll=$ep_poll_rc:$ep_poll_out job=$ep_poll_job body=$ep_poll_body count=$ep_poll_count"
+fi
+
+# ---------------------------------------------------------------- LF-* lifecycle regression contracts
+# These execute the command fences where the Markdown exposes runnable Bash.
+# Parser-only Markdown is checked as an instruction contract because there is
+# no standalone parser binary to invoke.
+LF_DIR="$WORK/lifecycle-regressions"
+mkdir -p "$LF_DIR"
+
+cat > "$LF_DIR/plan-refresh.py" <<'PY'
+from pathlib import Path
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import textwrap
+
+root = Path(sys.argv[1])
+work_root = Path(sys.argv[2])
+paths = [
+    root / "commands/add.md",
+    root / "commands/walkthrough.md",
+    root / "fragments/08-fix-loader.md",
+]
+runtime_plan = {
+    "orchestrator": "claude-code",
+    "roles": {
+        "fix": {
+            "engine": "claude",
+            "model": "runtime-opus",
+            "effort": None,
+            "source": "fixture",
+        }
+    },
+    "gates": {
+        "phase3_gate": 12,
+        "phase4_bands": [12, 34, 56],
+        "fix_threshold": 70.25,
+        "walkthrough_threshold": 55.5,
+    },
+    "warnings": [],
+}
+artifact = {
+    "base_branch": "fallback-must-not-be-used",
+    "base_context": {"comparison_ref": "trusted-ref", "freshness": "fresh"},
+    "gates": {
+        "phase3_gate": 37.5,
+        "phase4_bands": [37.5, 62.5, 91],
+        "fix_threshold": 60,
+        "walkthrough_threshold": 60,
+    },
+    "model_plan": {
+        "gates": {
+            "phase3_gate": 37.5,
+            "phase4_bands": [37.5, 62.5, 91],
+        }
+    },
+}
+
+with tempfile.TemporaryDirectory(prefix="plan-", dir=work_root) as td:
+    work = Path(td)
+    stubs = work / "bin"
+    captures = work / "captures"
+    stubs.mkdir()
+    captures.mkdir()
+    artifact_path = work / "artifact.json"
+    artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
+    missing_path = work / "missing-comparison-ref.json"
+    missing = json.loads(json.dumps(artifact))
+    del missing["base_context"]
+    missing_path.write_text(json.dumps(missing), encoding="utf-8")
+
+    (stubs / "artifact-read.sh").write_text(textwrap.dedent("""\
+        #!/usr/bin/env bash
+        set -u
+        path=""; filter=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --path) path="$2"; shift 2 ;;
+            --filter) filter="$2"; shift 2 ;;
+            *) exit 64 ;;
+          esac
+        done
+        jq -c "$filter" "$path"
+    """), encoding="utf-8")
+    (stubs / "review-config.sh").write_text(textwrap.dedent("""\
+        #!/usr/bin/env bash
+        set -u
+        ref=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --repo-root|--orchestrator|--profile|--models) shift 2 ;;
+            --repo-config-ref) ref="$2"; shift 2 ;;
+            *) exit 64 ;;
+          esac
+        done
+        [[ "$ref" == trusted-ref ]] || {
+          printf 'untrusted comparison ref: %s\n' "$ref" >&2
+          exit 9
+        }
+        printf '%s\n' "$RUNTIME_PLAN_JSON"
+    """), encoding="utf-8")
+    (stubs / "artifact-patch.py").write_text(textwrap.dedent("""\
+        #!/usr/bin/env bash
+        set -u
+        plan=""; gates=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --path) shift 2 ;;
+            --set-json)
+              pair="$2"; shift 2
+              key="${pair%%=*}"; value="${pair#*=}"
+              case "$key" in
+                model_plan) plan="${value#@}" ;;
+                gates) gates="$value" ;;
+              esac
+              ;;
+            *) exit 64 ;;
+          esac
+        done
+        [[ -z "$plan" ]] || cat "$plan" > "$CAPTURE_DIR/$CASE.plan.json"
+        printf '%s\n' "$gates" > "$CAPTURE_DIR/$CASE.gates.json"
+        exit "${PATCH_RC:-0}"
+    """), encoding="utf-8")
+    for stub in stubs.iterdir():
+        stub.chmod(0o755)
+
+    base_env = {
+        **os.environ,
+        "PATH": f"{stubs}:{os.environ['PATH']}",
+        "RUNTIME_PLAN_JSON": json.dumps(runtime_plan, separators=(",", ":")),
+        "CAPTURE_DIR": str(captures),
+        "artifact_path": str(artifact_path),
+        "repo_root": str(work),
+        "harness_id": "claude-code",
+        "profile": "",
+        "models_csv": "",
+        "threshold": "",
+    }
+    for source in paths:
+        text = source.read_text(encoding="utf-8")
+        anchor = text.index("comparison_ref=$(")
+        assert text.index('artifact-validate.sh --path "$artifact_path"') < anchor
+        start = text.rfind("```bash\n", 0, anchor) + len("```bash\n")
+        end = text.index("\n```", anchor)
+        block = text[start:end]
+        case = source.name.replace(".", "-")
+        result = subprocess.run(
+            ["/bin/bash", "-c", block],
+            env={**base_env, "CASE": case, "PATCH_RC": "0"},
+            text=True,
+            capture_output=True,
+        )
+        assert result.returncode == 0, (
+            f"{source.relative_to(root)} success rc={result.returncode}: "
+            f"{result.stderr}"
+        )
+        plan = json.loads((captures / f"{case}.plan.json").read_text())
+        gates = json.loads((captures / f"{case}.gates.json").read_text())
+        assert plan["roles"]["fix"]["model"] == "runtime-opus"
+        assert plan["gates"]["phase3_gate"] == 37.5
+        assert plan["gates"]["phase4_bands"] == [37.5, 62.5, 91]
+        assert plan["gates"]["fix_threshold"] == 70.25
+        assert plan["gates"]["walkthrough_threshold"] == 55.5
+        assert gates == plan["gates"]
+
+        failed = subprocess.run(
+            ["/bin/bash", "-c", block],
+            env={**base_env, "CASE": case + "-failed", "PATCH_RC": "23"},
+            text=True,
+            capture_output=True,
+        )
+        assert failed.returncode == 23, (
+            f"{source.relative_to(root)} masked patch rc 23 "
+            f"with {failed.returncode}"
+        )
+
+        missing_case = case + "-missing"
+        absent = subprocess.run(
+            ["/bin/bash", "-c", block],
+            env={
+                **base_env,
+                "artifact_path": str(missing_path),
+                "CASE": missing_case,
+                "PATCH_RC": "0",
+            },
+            text=True,
+            capture_output=True,
+        )
+        assert absent.returncode != 0
+        assert "missing trusted base_context.comparison_ref" in absent.stderr
+        assert not (captures / f"{missing_case}.plan.json").exists()
+PY
+lf_plan_out=$(python3 "$LF_DIR/plan-refresh.py" "$REPO" "$LF_DIR" 2>&1)
+lf_plan_rc=$?
+if [[ "$lf_plan_rc" -eq 0 ]]; then
+    pass "LF-1 (F014/F082): extracted refreshes trust comparison_ref, preserve classification gates, refresh runtime plan, write coherent gates, and retain patch rc"
+else
+    fail "LF-1: extracted lifecycle plan refresh contract failed" "$lf_plan_out"
+fi
+
+cat > "$LF_DIR/parser-contracts.py" <<'PY'
+from pathlib import Path
+import os
+import subprocess
+import sys
+import textwrap
+
+root = Path(sys.argv[1])
+paths = [
+    root / "commands/fix.md",
+    root / "commands/walkthrough.md",
+    root / "fragments/08-fix-loader.md",
+]
+blocks = []
+for path in paths:
+    text = path.read_text(encoding="utf-8")
+    start = text.index('  jq -en --arg token "$token"')
+    end = (
+        text.index("  ' >/dev/null 2>&1", start)
+        + len("  ' >/dev/null 2>&1")
+    )
+    block = textwrap.dedent(text[start:end])
+    blocks.append(block)
+    assert "before any artifact lookup" in text
+    assert "Accept at most one positional threshold token" in text
+    assert "Keep the original token as `threshold`" in text
+    assert "second positional" in text and "duplicate-threshold usage error" in text
+    assert "unknown option" in text
+    assert "Do not continue past parsing on any error" in text
+assert len(set(blocks)) == 1
+for token in ("0", "60.5", "100", "1e2"):
+    result = subprocess.run(
+        ["/bin/bash", "-c", blocks[0]],
+        env={**os.environ, "token": token},
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, f"valid threshold rejected: {token}"
+for token in ("101", "-1", "text", "NaN", "Infinity", "1e999", "60junk"):
+    result = subprocess.run(
+        ["/bin/bash", "-c", blocks[0]],
+        env={**os.environ, "token": token},
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode != 0, f"invalid threshold accepted: {token}"
+
+promote = (root / "commands/promote.md").read_text(encoding="utf-8")
+promote_flat = " ".join(promote.split())
+frontmatter = promote.split("---", 2)[1]
+assert "--profile" not in promote and "--models" not in promote
+assert "before asking for a reason" in promote
+assert "A second finding id, a repeated flag, a missing/empty flag value" in promote_flat
+assert "an unknown option, or any unconsumed token" in promote_flat
+assert "exit with usage code 64" in promote_flat
+assert "do not look up or mutate an artifact" in promote_flat
+assert "exactly one tally pair" in promote_flat
+assert "tally-subagent-tokens.sh" in frontmatter
+assert "orchestrator-tokens.sh" in frontmatter
+PY
+lf_parser_out=$(python3 "$LF_DIR/parser-contracts.py" "$REPO" 2>&1)
+lf_parser_rc=$?
+if [[ "$lf_parser_rc" -eq 0 ]]; then
+    pass "LF-2 (F018/F019/F082): finite threshold and strict promote parser instruction contracts reject invalid input before side effects"
+else
+    fail "LF-2: parser instruction contract drifted" "$lf_parser_out"
+fi
+
+ep_extract_fence_after "$REPO/commands/promote.md" \
+    '### 6.5. Refresh cumulative token tallies' "$LF_DIR/promote-tally.sh"
+ep_extract_fence_after "$REPO/commands/promote.md" \
+    '### 7. Re-render `artifact.md`' "$LF_DIR/promote-render.sh"
+cat "$LF_DIR/promote-tally.sh" "$LF_DIR/promote-render.sh" \
+    > "$LF_DIR/promote-finalize.sh"
+ep_extract_fence_after "$REPO/commands/walkthrough.md" \
+    '#### 6.1. Re-tally `subagent_tokens` + `orchestrator_tokens`, then re-render `artifact.md`' \
+    "$LF_DIR/walkthrough-finalize.sh"
+mkdir -p "$LF_DIR/tally-bin" "$LF_DIR/review"
+printf '{"review_started_at":"2026-07-21T00:00:00Z"}\n' \
+    > "$LF_DIR/review/artifact.json"
+: > "$LF_DIR/review/tokens.jsonl"
+: > "$LF_DIR/review/trace.md"
+cat > "$LF_DIR/tally-bin/tally-subagent-tokens.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'subagent\n' >> "$LF_ORDER"
+exit 7
+EOF
+cat > "$LF_DIR/tally-bin/orchestrator-tokens.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'orchestrator\n' >> "$LF_ORDER"
+exit 8
+EOF
+cat > "$LF_DIR/tally-bin/artifact-render.py" <<'EOF'
+#!/usr/bin/env bash
+printf 'render\n' >> "$LF_ORDER"
+exit 0
+EOF
+chmod +x "$LF_DIR/tally-bin/"*
+lf_tally_bad=""
+for lf_tally_case in promote-finalize walkthrough-finalize; do
+    LF_ORDER="$LF_DIR/$lf_tally_case.order"
+    export LF_ORDER
+    : > "$LF_ORDER"
+    PATH="$LF_DIR/tally-bin:$PATH" \
+      review_dir="$LF_DIR/review" \
+      artifact_path="$LF_DIR/review/artifact.json" \
+      trace_log_path="$LF_DIR/review/trace.md" \
+      /bin/bash "$LF_DIR/$lf_tally_case.sh" >/dev/null 2>&1
+    lf_tally_rc=$?
+    lf_tally_order=$(tr '\n' ' ' < "$LF_ORDER" | sed 's/[[:space:]]*$//')
+    if [[ "$lf_tally_rc" -ne 0 \
+       || "$lf_tally_order" != "subagent orchestrator render" ]]; then
+        lf_tally_bad="$lf_tally_bad $lf_tally_case=$lf_tally_rc:$lf_tally_order"
+    fi
+done
+if [[ -z "$lf_tally_bad" ]]; then
+    pass "LF-3 (F046): non-deferred promote and deferred walkthrough batch tally exactly once in subagent→orchestrator→render order"
+else
+    fail "LF-3: lifecycle tally order/count drifted" "$lf_tally_bad"
+fi
+
+cat > "$LF_DIR/locations.py" <<'PY'
+from pathlib import Path
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+import textwrap
+
+root = Path(sys.argv[1])
+work_root = Path(sys.argv[2])
+walk = (root / "commands/walkthrough.md").read_text(encoding="utf-8")
+add = (root / "commands/add.md").read_text(encoding="utf-8")
+loader = (root / "fragments/08-fix-loader.md").read_text(encoding="utf-8")
+
+def fence(text, needle):
+    anchor = text.index(needle)
+    start = text.rfind("```bash\n", 0, anchor) + len("```bash\n")
+    end = text.index("\n```", anchor)
+    return text[start:end]
+
+def run(block, env=None):
+    result = subprocess.run(
+        ["/bin/bash", "-c", block],
+        env={**os.environ, **(env or {})},
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, (
+        f"rc={result.returncode}\nstdout={result.stdout}\nstderr={result.stderr}"
+    )
+    return result.stdout
+
+fixture = [
+    {"id": "F1", "file": "src/ranged.py", "line_range": [4, 9],
+     "score": 70, "disposition": "confirmed_manual",
+     "auto_fix_hint": {"hint": "h", "confidence": "high",
+                       "second_opinion": "concurs"}},
+    {"id": "F2", "file": "src/no-range.py", "line_range": None,
+     "score": 70, "disposition": "confirmed_manual",
+     "auto_fix_hint": {"hint": "h", "confidence": "high",
+                       "second_opinion": "concurs"}},
+    {"id": "F3", "file": "(unknown)", "line_range": None,
+     "score": 70, "disposition": "confirmed_manual",
+     "auto_fix_hint": {"hint": "h", "confidence": "high",
+                       "second_opinion": "concurs"}},
+]
+table = fence(walk, "auto_rec_table=$(jq -r '")
+out = run(
+    "auto_rec_in_scope=" +
+    shlex.quote(json.dumps(fixture, separators=(",", ":"))) +
+    "\n" + table + "\nprintf '%s\n' \"$auto_rec_table\""
+)
+assert "src/ranged.py:4" in out
+assert "src/no-range.py" in out and "src/no-range.py:null" not in out
+assert "(unknown)" in out and "(unknown):" not in out
+assert "null-null" not in out
+
+loader_location = fence(
+    loader,
+    "auto_rec_location=$(printf '%s\\n' \"$auto_rec_entry_json\"",
+)
+for entry, expected in ((fixture[0], "src/ranged.py:4-9"),
+                        (fixture[1], "src/no-range.py"),
+                        (fixture[2], "(unknown)")):
+    out = run(
+        "auto_rec_entry_json=" +
+        shlex.quote(json.dumps(entry, separators=(",", ":"))) +
+        "\n" + loader_location +
+        "\nprintf '%s\n' \"$auto_rec_location\""
+    ).strip()
+    assert out == expected
+
+with tempfile.TemporaryDirectory(prefix="locations-", dir=work_root) as td:
+    work = Path(td)
+    reader = work / "artifact-read.sh"
+    reader.write_text(textwrap.dedent("""\
+        #!/usr/bin/env bash
+        set -u
+        path=""; filter=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --path) path="$2"; shift 2 ;;
+            --filter) filter="$2"; shift 2 ;;
+            *) exit 64 ;;
+          esac
+        done
+        jq "$filter" "$path"
+    """), encoding="utf-8")
+    reader.chmod(0o755)
+    env = {"PATH": f"{work}:{os.environ['PATH']}"}
+    artifact = work / "artifact.json"
+    artifact.write_text(json.dumps({"findings": [
+        {"id": "F1", "file": "src/ranged.py", "line_range": [4, 9],
+         "claim": "ranged", "disposition": "confirmed_manual",
+         "impact_type": "correctness", "score_phase4": 70,
+         "human_confirmation": None},
+        {"id": "F2", "file": "src/no-range.py", "line_range": None,
+         "claim": "no range", "disposition": "confirmed_manual",
+         "impact_type": "correctness", "score_phase4": 70,
+         "human_confirmation": None},
+        {"id": "F3", "file": "(unknown)", "line_range": None,
+         "claim": "unknown", "disposition": "confirmed_manual",
+         "impact_type": "correctness", "score_phase4": 70,
+         "human_confirmation": None},
+    ]}), encoding="utf-8")
+
+    summary_anchor = add.index("Build the per-finding lines from `artifact-read.sh`")
+    filter_anchor = add.index(
+        "--filter \"[.findings[] | select(.id | IN", summary_anchor
+    )
+    start = add.rfind("```bash\n", 0, filter_anchor) + len("```bash\n")
+    end = add.index("\n```", filter_anchor)
+    add_block = add[start:end]
+    add_block, count = re.subn(
+        r"select\(\.id \| IN\(.*?\)\)", "select(true)", add_block, count=1
+    )
+    assert count == 1
+    out = run(
+        f"artifact_path={shlex.quote(str(artifact))}\n"
+        "new_ids=F1,F2,F3\n" + add_block,
+        env,
+    )
+    assert "src/ranged.py:4" in out
+    assert "src/no-range.py:null" not in out
+    assert "(unknown):" not in out
+    assert "null-null" not in out
+
+    brief = fence(
+        walk,
+        "f_line_range_json=$(jq -c '.line_range // null' <<<\"$finding_json\")",
+    )
+    issue = fence(walk, 'f_issue_location_rule="In the Location section')
+    findings = json.loads(artifact.read_text())["findings"]
+    for item, expected in zip(
+        findings,
+        ("src/ranged.py:4-9", "src/no-range.py", "(unknown)"),
+    ):
+        finding_json = shlex.quote(json.dumps(item, separators=(",", ":")))
+        out = run(
+            "finding_json=" + finding_json + "\n" + brief +
+            "\nprintf '%s\n%s\n' \"$f_location\" \"$f_location_context\"",
+            env,
+        )
+        lines = out.splitlines()
+        assert lines[0] == expected
+        if item["line_range"] is None:
+            assert "claim/evidence" in lines[1]
+        if item["file"] == "(unknown)":
+            assert "Do not issue a Read request" in lines[1]
+        assert "null-null" not in out
+
+        out = run(
+            f"artifact_path={shlex.quote(str(artifact))}\n"
+            f"finding_id={item['id']}\n" + issue +
+            "\nprintf '%s\n%s\n%s\n' \"$f_location\" "
+            "\"$f_issue_location_rule\" \"$f_issue_context\"",
+            env,
+        )
+        lines = out.splitlines()
+        assert lines[0] == expected
+        if item["line_range"] is None:
+            assert "claim/evidence" in lines[2]
+        if item["file"] == "(unknown)":
+            assert "Do not issue a Read request" in lines[2]
+            assert "exact source location is unknown" in lines[1]
+        elif item["line_range"] is None:
+            assert lines[1].endswith("with no line suffix.")
+        assert "null-null" not in out
+PY
+lf_location_out=$(python3 "$LF_DIR/locations.py" "$REPO" "$LF_DIR" 2>&1)
+lf_location_rc=$?
+if [[ "$lf_location_rc" -eq 0 ]]; then
+    pass "LF-4 (F085): extracted ranged/file-only/unknown consumers never fabricate ranges or placeholder Reads"
+else
+    fail "LF-4: nullable lifecycle location contract failed" "$lf_location_out"
+fi
+
+
+# ---------------------------------------------------------------- FT-* finalization regression contracts
+FT_DIR="$WORK/finalization-regressions"
+mkdir -p "$FT_DIR"
+
+# Exercise the exact Phase 6.2b fence. A malformed active transcript must
+# retain the prior telemetry bytes while persisting exactly one failure row.
+ep_extract_fence_after "$REPO/fragments/07-finalize.md" \
+    '### 6.2b. Tally `orchestrator_tokens` from the session transcript(s)' \
+    "$FT_DIR/orchestrator-finalize.sh"
+cat >> "$FT_DIR/orchestrator-finalize.sh" <<'EOF'
+printf '%s|%s\n' "$orchestrator_tally_failed" "$finalization_record_failed"
+EOF
+mkdir -p "$FT_DIR/orchestrator"
+cp "$FIX/artifact-seed.json" "$FT_DIR/orchestrator/artifact.json"
+cat > "$FT_DIR/orchestrator/prior.jsonl" <<'JSONL'
+{"type":"assistant","timestamp":"2026-07-21T00:01:00.000Z","sessionId":"prior-session","message":{"usage":{"input_tokens":17,"output_tokens":5,"cache_read_input_tokens":3,"cache_creation_input_tokens":2}}}
+JSONL
+MATTHEWS_REVIEW_TALLY_ORCHESTRATOR=1 \
+  "$TOOLS/orchestrator-tokens.sh" \
+    --artifact "$FT_DIR/orchestrator/artifact.json" \
+    --since "2026-07-21T00:00:00.000Z" \
+    --transcript-file "$FT_DIR/orchestrator/prior.jsonl" \
+    --session-id prior-session >/dev/null 2>&1 \
+  || fail "FT-1: could not seed prior orchestrator telemetry"
+cat > "$FT_DIR/orchestrator/malformed.jsonl" <<'JSONL'
+{"type":"assistant","timestamp":"2026-07-21T00:02:00.000Z","sessionId":"active-session","message":{"usage":{"input_tokens":999,"output_tokens":999}}}
+{"type":
+JSONL
+: > "$FT_DIR/orchestrator/phases.jsonl"
+: > "$FT_DIR/orchestrator/trace.md"
+ft_orch_before=$(sha_of "$FT_DIR/orchestrator/artifact.json")
+ft_orch_state=$(PATH="$TOOLS:$PATH" \
+    MATTHEWS_REVIEW_TALLY_ORCHESTRATOR=1 \
+    MATTHEWS_REVIEW_TRANSCRIPT_FILE="$FT_DIR/orchestrator/malformed.jsonl" \
+    MATTHEWS_REVIEW_SESSION_ID=active-session \
+    artifact_path="$FT_DIR/orchestrator/artifact.json" \
+    review_started_at="2026-07-21T00:00:00.000Z" \
+    review_dir="$FT_DIR/orchestrator" \
+    trace_log_path="$FT_DIR/orchestrator/trace.md" \
+    /bin/bash "$FT_DIR/orchestrator-finalize.sh" 2>&1)
+ft_orch_rc=$?
+ft_orch_after=$(sha_of "$FT_DIR/orchestrator/artifact.json")
+ft_orch_rows=$(jq -s '
+  [.[] | select(
+    .name == "orchestrator-tally"
+    and .finalization_failures == 1
+  )] | length
+' "$FT_DIR/orchestrator/phases.jsonl")
+ft_orch_total=$(jq -r '.orchestrator_tokens.total_input' \
+    "$FT_DIR/orchestrator/artifact.json")
+if [[ "$ft_orch_rc" -eq 0 && "$ft_orch_before" == "$ft_orch_after" \
+   && "$ft_orch_rows" == "1" && "$ft_orch_total" == "17" \
+   && "$ft_orch_state" == *"true|false"* \
+   && "$(cat "$FT_DIR/orchestrator/trace.md")" == *"orchestrator_tally_failed"* \
+   && "$(cat "$FT_DIR/orchestrator/trace.md")" == *"ERROR:"* \
+   && "$(cat "$FT_DIR/orchestrator/trace.md")" == *"Action:"* ]]; then
+    pass "FT-1 (F012): malformed transcript retains telemetry bytes and records one persisted finalization failure without fake zero"
+else
+    fail "FT-1: malformed transcript finalization contract failed" \
+      "rc=$ft_orch_rc hash=$ft_orch_before/$ft_orch_after rows=$ft_orch_rows total=$ft_orch_total state=$ft_orch_state trace=$(cat "$FT_DIR/orchestrator/trace.md")"
+fi
+
+# An empty scoped retally removes only the active session row and recomputes
+# totals from retained siblings.
+mkdir -p "$FT_DIR/empty-scope"
+cp "$FIX/artifact-seed.json" "$FT_DIR/empty-scope/artifact.json"
+cat > "$FT_DIR/empty-scope/a.jsonl" <<'JSONL'
+{"type":"assistant","timestamp":"2026-07-21T01:00:00.000Z","sessionId":"session-a","message":{"usage":{"input_tokens":10,"output_tokens":11,"cache_read_input_tokens":12,"cache_creation_input_tokens":13}}}
+JSONL
+cat > "$FT_DIR/empty-scope/b.jsonl" <<'JSONL'
+{"type":"assistant","timestamp":"2026-07-21T02:00:00.000Z","sessionId":"session-b","message":{"usage":{"input_tokens":20,"output_tokens":21,"cache_read_input_tokens":22,"cache_creation_input_tokens":23}}}
+JSONL
+: > "$FT_DIR/empty-scope/empty.jsonl"
+ft_empty_bad=""
+for ft_session in a b; do
+    MATTHEWS_REVIEW_TALLY_ORCHESTRATOR=1 \
+      "$TOOLS/orchestrator-tokens.sh" \
+        --artifact "$FT_DIR/empty-scope/artifact.json" \
+        --since "2026-07-21T00:00:00.000Z" \
+        --transcript-file "$FT_DIR/empty-scope/$ft_session.jsonl" \
+        --session-id "session-$ft_session" >/dev/null 2>&1 \
+      || ft_empty_bad="$ft_empty_bad seed-$ft_session"
+done
+MATTHEWS_REVIEW_TALLY_ORCHESTRATOR=1 \
+  "$TOOLS/orchestrator-tokens.sh" \
+    --artifact "$FT_DIR/empty-scope/artifact.json" \
+    --since "2026-07-21T00:00:00.000Z" \
+    --transcript-file "$FT_DIR/empty-scope/empty.jsonl" \
+    --session-id session-a >/dev/null 2>&1 \
+  || ft_empty_bad="$ft_empty_bad retally"
+ft_empty_summary=$(jq -r '
+  [
+    .orchestrator_tokens.total_input,
+    .orchestrator_tokens.total_output,
+    .orchestrator_tokens.cache_read,
+    .orchestrator_tokens.cache_creation,
+    .orchestrator_tokens.turn_count,
+    (.orchestrator_tokens.sessions | length),
+    .orchestrator_tokens.sessions[0].session_id
+  ] | map(tostring) | join("|")
+' "$FT_DIR/empty-scope/artifact.json")
+if [[ -z "$ft_empty_bad" \
+   && "$ft_empty_summary" == "20|21|22|23|1|1|session-b" ]]; then
+    pass "FT-2 (F042): empty scoped retally removes only the active row and preserves sibling session totals"
+else
+    fail "FT-2: empty scoped orchestrator retally damaged sibling totals" \
+      "errors=$ft_empty_bad summary=$ft_empty_summary"
+fi
+
+# sync-degraded.py rejects malformed encodings/shapes/counters without a
+# partial write, accepts explicit null as zero, and removes an all-zero field.
+mkdir -p "$FT_DIR/sync"
+cp "$FIX/artifact-seed.json" "$FT_DIR/sync/baseline.json"
+ft_sync_bad=""
+ft_sync_invalid() {
+    local name="$1" writer="$2"
+    local artifact="$FT_DIR/sync/$name.json"
+    local phases="$FT_DIR/sync/$name.jsonl"
+    local output code before after
+    cp "$FT_DIR/sync/baseline.json" "$artifact"
+    case "$writer" in
+        malformed)
+            printf '{"lens_dispatch_failures":\n' > "$phases"
+            ;;
+        utf8)
+            printf '\377\n' > "$phases"
+            ;;
+        nonobject)
+            printf '[]\n' > "$phases"
+            ;;
+        wrongtype)
+            printf '{"lens_dispatch_failures":"1"}\n' > "$phases"
+            ;;
+        negative)
+            printf '{"candidate_drop_failures":-1}\n' > "$phases"
+            ;;
+    esac
+    before=$(sha_of "$artifact")
+    output=$("$TOOLS/sync-degraded.py" \
+      --artifact "$artifact" --phases-log "$phases" 2>&1)
+    code=$?
+    after=$(sha_of "$artifact")
+    if [[ "$code" -ne 1 || "$before" != "$after" \
+       || "$output" != *"ERROR:"* || "$output" != *"Action:"* ]]; then
+        ft_sync_bad="$ft_sync_bad $name=$code:$before/$after:$output"
+    fi
+}
+for ft_sync_case in malformed utf8 nonobject wrongtype negative; do
+    ft_sync_invalid "$ft_sync_case" "$ft_sync_case"
+done
+
+cp "$FT_DIR/sync/baseline.json" "$FT_DIR/sync/null-zero.json"
+"$TOOLS/artifact-patch.py" \
+  --path "$FT_DIR/sync/null-zero.json" \
+  --set-json 'degraded={"lens_dispatch_failures":9,"candidate_drop_failures":8,"finalization_failures":7}' \
+  >/dev/null
+cat > "$FT_DIR/sync/null-zero.jsonl" <<'JSONL'
+{"lens_dispatch_failures":null,"candidate_drop_failures":null,"finalization_failures":null}
+{"lens_dispatch_failures":0,"candidate_drop_failures":0,"finalization_failures":0}
+JSONL
+ft_sync_null_out=$("$TOOLS/sync-degraded.py" \
+  --artifact "$FT_DIR/sync/null-zero.json" \
+  --phases-log "$FT_DIR/sync/null-zero.jsonl" 2>&1)
+ft_sync_null_rc=$?
+ft_sync_null_has=$(jq -r 'has("degraded")' "$FT_DIR/sync/null-zero.json")
+
+cp "$FT_DIR/sync/baseline.json" "$FT_DIR/sync/positive.json"
+cat > "$FT_DIR/sync/positive.jsonl" <<'JSONL'
+{"lens_dispatch_failures":2,"candidate_drop_failures":null}
+{"candidate_drop_failures":3,"finalization_failures":1}
+JSONL
+ft_sync_positive_out=$("$TOOLS/sync-degraded.py" \
+  --artifact "$FT_DIR/sync/positive.json" \
+  --phases-log "$FT_DIR/sync/positive.jsonl" 2>&1)
+ft_sync_positive_rc=$?
+ft_sync_positive=$(jq -c '.degraded' "$FT_DIR/sync/positive.json")
+if [[ -z "$ft_sync_bad" && "$ft_sync_null_rc" -eq 0 \
+   && "$ft_sync_null_has" == "false" && "$ft_sync_positive_rc" -eq 0 \
+   && "$ft_sync_positive" == '{"lens_dispatch_failures":2,"candidate_drop_failures":3,"finalization_failures":1}' ]]; then
+    pass "FT-3 (F086): degraded sync is strict/atomic, treats null as zero, canonicalizes positives, and removes all-zero field"
+else
+    fail "FT-3: degraded synchronization contract failed" \
+      "invalid=$ft_sync_bad null=$ft_sync_null_rc:$ft_sync_null_has:$ft_sync_null_out positive=$ft_sync_positive_rc:$ft_sync_positive:$ft_sync_positive_out"
+fi
+
+# Assemble the exact current finalization fences into a scenario runner.
+ep_extract_fence_after "$REPO/fragments/07-finalize.md" \
+    '### 6.4b. Synchronize degraded runs' "$FT_DIR/sync-block.sh"
+ep_extract_fence_after "$REPO/fragments/07-finalize.md" \
+    '### 6.5. Render `artifact.md`' "$FT_DIR/render-block.sh"
+ep_extract_fence_after "$REPO/fragments/07-finalize.md" \
+    'Initialize publication state once:' "$FT_DIR/publish-init.sh"
+ep_extract_fence_after "$REPO/fragments/07-finalize.md" \
+    '**PR mode:**' "$FT_DIR/publish-pr.sh"
+ep_extract_fence_after "$REPO/fragments/07-finalize.md" \
+    'failure from either mode once' "$FT_DIR/publish-failure.sh"
+ep_extract_fence_after "$REPO/fragments/07-finalize.md" \
+    'Select the report body first:' "$FT_DIR/mirror.sh"
+cat > "$FT_DIR/scenario-runner.sh" <<'EOF'
+#!/usr/bin/env bash
+set -u
+EOF
+cat "$FT_DIR/sync-block.sh" "$FT_DIR/render-block.sh" \
+    "$FT_DIR/publish-init.sh" "$FT_DIR/publish-pr.sh" \
+    "$FT_DIR/publish-failure.sh" "$FT_DIR/mirror.sh" \
+    >> "$FT_DIR/scenario-runner.sh"
+cat >> "$FT_DIR/scenario-runner.sh" <<'EOF'
+printf '%s|%s|%s|%s|%s|%s\n' \
+  "$finalization_record_failed" "$render_failed" "$render_recovery_failed" \
+  "$publish_attempted" "$publish_failed" "$publish_recovery_render_failed" \
+  > "$review_dir/state"
+if [[ -n "$mirror_path" ]]; then
+    cp "$mirror_path" "$review_dir/chat.md"
+fi
+EOF
+chmod +x "$FT_DIR/scenario-runner.sh"
+
+mkdir -p "$FT_DIR/scenario-bin"
+cat > "$FT_DIR/scenario-bin/artifact-render.py" <<'EOF'
+#!/usr/bin/env bash
+set -u
+printf 'render\n' >> "$FT_STATE/render.calls"
+remaining=$(cat "$FT_STATE/render.failures")
+if [[ "$remaining" -gt 0 ]]; then
+    printf '%s\n' "$((remaining - 1))" > "$FT_STATE/render.failures"
+    printf 'ERROR: injected renderer failure\n' >&2
+    exit 1
+fi
+exec "$FT_REAL_RENDERER" "$@"
+EOF
+cat > "$FT_DIR/scenario-bin/artifact-publish.sh" <<'EOF'
+#!/usr/bin/env bash
+set -u
+printf 'publish\n' >> "$FT_STATE/publish.calls"
+review_dir=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --review-dir) review_dir="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+if [[ "$FT_PUBLISH_RESULT" == "failure" ]]; then
+    printf 'ERROR: injected publisher failure\n' >&2
+    exit 1
+fi
+printf '%s\n' '<!-- matthews-review-v1 -->' \
+  'COMPACT FAKE PUBLICATION BODY' > "$review_dir/published.md"
+printf '%s\n' '{"comment_id":9001}'
+EOF
+cat > "$FT_DIR/scenario-bin/log-phase.sh" <<'EOF'
+#!/usr/bin/env bash
+set -u
+printf 'log\n' >> "$FT_STATE/log.calls"
+if [[ "$FT_LOG_RESULT" == "failure" ]]; then
+    printf 'ERROR: injected phase-log failure\n' >&2
+    exit 70
+fi
+exec "$FT_REAL_LOG_PHASE" "$@"
+EOF
+cat > "$FT_DIR/scenario-bin/sync-degraded.py" <<'EOF'
+#!/usr/bin/env bash
+set -u
+count=0
+[[ ! -f "$FT_STATE/sync.calls" ]] || count=$(cat "$FT_STATE/sync.calls")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FT_STATE/sync.calls"
+if [[ "$FT_SYNC_FAIL_ON" -gt 0 && "$count" -eq "$FT_SYNC_FAIL_ON" ]]; then
+    printf 'ERROR: injected degradation-sync failure\n' >&2
+    printf 'Action: repair the phase log and retry.\n' >&2
+    exit 71
+fi
+exec "$FT_REAL_SYNC" "$@"
+EOF
+chmod +x "$FT_DIR/scenario-bin/"*
+
+ft_run_scenario() {
+    local name="$1" render_failures="$2" publish_result="$3"
+    local log_result="$4" sync_fail_on="$5"
+    local dir="$FT_DIR/$name"
+    mkdir -p "$dir"
+    cp "$FIX/artifact-seed.json" "$dir/artifact.json"
+    : > "$dir/phases.jsonl"
+    : > "$dir/trace.md"
+    : > "$dir/render.calls"
+    : > "$dir/publish.calls"
+    : > "$dir/log.calls"
+    printf '%s\n' "$render_failures" > "$dir/render.failures"
+    PATH="$FT_DIR/scenario-bin:$TOOLS:$PATH" \
+      FT_STATE="$dir" \
+      FT_REAL_RENDERER="$TOOLS/artifact-render.py" \
+      FT_REAL_LOG_PHASE="$TOOLS/log-phase.sh" \
+      FT_REAL_SYNC="$TOOLS/sync-degraded.py" \
+      FT_PUBLISH_RESULT="$publish_result" \
+      FT_LOG_RESULT="$log_result" \
+      FT_SYNC_FAIL_ON="$sync_fail_on" \
+      artifact_path="$dir/artifact.json" \
+      phases_log_path="$dir/phases.jsonl" \
+      trace_log_path="$dir/trace.md" \
+      review_dir="$dir" \
+      finalization_record_failed=false \
+      mode=pr review_id=rev_test pr_number=1 \
+      repo_slug=owner/repo head_branch=feature existing_comment_id="" \
+      /bin/bash "$FT_DIR/scenario-runner.sh" >/dev/null 2>&1
+}
+
+ft_scenario_bad=""
+ft_run_scenario render-failure 1 success success 0
+if [[ "$(cat "$FT_DIR/render-failure/state")" != \
+      "false|true|false|false|false|false" \
+   || -s "$FT_DIR/render-failure/publish.calls" \
+   || "$(wc -l < "$FT_DIR/render-failure/render.calls" | tr -d '[:space:]')" != "2" \
+   || "$(jq -r '.degraded.finalization_failures' "$FT_DIR/render-failure/artifact.json")" != "1" \
+   || "$(cat "$FT_DIR/render-failure/artifact.md")" != *"REVIEW DEGRADED"* ]] \
+   || ! cmp -s "$FT_DIR/render-failure/artifact.md" "$FT_DIR/render-failure/chat.md"; then
+    ft_scenario_bad="$ft_scenario_bad render-failure"
+fi
+
+ft_run_scenario publish-failure 0 failure success 0
+if [[ "$(cat "$FT_DIR/publish-failure/state")" != \
+      "false|false|false|true|true|false" \
+   || "$(wc -l < "$FT_DIR/publish-failure/publish.calls" | tr -d '[:space:]')" != "1" \
+   || "$(wc -l < "$FT_DIR/publish-failure/render.calls" | tr -d '[:space:]')" != "2" \
+   || "$(jq -r '.degraded.finalization_failures' "$FT_DIR/publish-failure/artifact.json")" != "1" \
+   || "$(cat "$FT_DIR/publish-failure/artifact.md")" != *"REVIEW DEGRADED"* ]] \
+   || ! cmp -s "$FT_DIR/publish-failure/artifact.md" "$FT_DIR/publish-failure/chat.md"; then
+    ft_scenario_bad="$ft_scenario_bad publish-failure"
+fi
+
+ft_run_scenario publish-success 0 success success 0
+if [[ "$(cat "$FT_DIR/publish-success/state")" != \
+      "false|false|false|true|false|false" \
+   || "$(wc -l < "$FT_DIR/publish-success/publish.calls" | tr -d '[:space:]')" != "1" \
+   || "$(jq -r 'has("degraded")' "$FT_DIR/publish-success/artifact.json")" != "false" ]] \
+   || cmp -s "$FT_DIR/publish-success/artifact.md" "$FT_DIR/publish-success/published.md" \
+   || ! cmp -s "$FT_DIR/publish-success/published.md" "$FT_DIR/publish-success/chat.md"; then
+    ft_scenario_bad="$ft_scenario_bad publish-success"
+fi
+
+ft_run_scenario record-log-failure 1 success failure 0
+ft_log_rows=$(wc -l < "$FT_DIR/record-log-failure/phases.jsonl" | tr -d '[:space:]')
+if [[ "$(cat "$FT_DIR/record-log-failure/state")" != \
+      "true|true|false|false|false|false" \
+   || "$(wc -l < "$FT_DIR/record-log-failure/render.calls" | tr -d '[:space:]')" != "1" \
+   || -s "$FT_DIR/record-log-failure/publish.calls" \
+   || "$ft_log_rows" != "0" || -e "$FT_DIR/record-log-failure/chat.md" ]]; then
+    ft_scenario_bad="$ft_scenario_bad record-log-failure"
+fi
+
+ft_run_scenario record-sync-failure 1 success success 2
+ft_sync_rows=$(jq -s '
+  [.[] | select(.finalization_failures == 1)] | length
+' "$FT_DIR/record-sync-failure/phases.jsonl")
+if [[ "$(cat "$FT_DIR/record-sync-failure/state")" != \
+      "true|true|false|false|false|false" \
+   || "$(wc -l < "$FT_DIR/record-sync-failure/render.calls" | tr -d '[:space:]')" != "1" \
+   || -s "$FT_DIR/record-sync-failure/publish.calls" \
+   || "$ft_sync_rows" != "1" || -e "$FT_DIR/record-sync-failure/chat.md" ]]; then
+    ft_scenario_bad="$ft_scenario_bad record-sync-failure"
+fi
+
+if [[ -z "$ft_scenario_bad" ]]; then
+    pass "FT-4 (F086): exact finalization fences fail closed, recover locally once, publish once, and mirror the exact published body"
+else
+    fail "FT-4: render/publish/failure-recorder scenario drift" "$ft_scenario_bad"
+fi
+
+
+# ---------------------------------------------------------------- DX-* dispatch/poller regression contracts
+# DispatchStateFix explicitly declared the production protocol stable before
+# these black-box assertions were added.
+DX_DIR="$WORK/dispatch-regressions"
+DX_SCRATCH="$DX_DIR/scratch"
+mkdir -p "$DX_SCRATCH"
+
+dx_raw_identity() {
+    LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null \
+      | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+dx_init_job() {
+    local job="$1" engine="$2" wrapper_pid="$3" wrapper_identity="$4"
+    local child_pid="$5" child_identity="$6"
+    local dir="$DX_SCRATCH/$job"
+    mkdir -p "$dir"
+    printf '%s\n' "$engine" > "$dir/engine"
+    printf '%s\n' "$wrapper_pid" > "$dir/pid"
+    printf 'v1|%s|%s\n' "$wrapper_pid" "$wrapper_identity" \
+      > "$dir/pid_identity"
+    printf '%s\n' "$child_pid" > "$dir/child_pid"
+    printf 'v1|%s|%s\n' "$child_pid" "$child_identity" \
+      > "$dir/child_identity"
+    date +%s > "$dir/started_epoch"
+    : > "$dir/out"
+    : > "$dir/err"
+}
+
+# Identity tri-state: authenticated live, empty/invalid ps observations, and
+# authenticated absence. Only the final case may seal a synthetic failure.
+/bin/sleep 30 &
+dx_live_pid=$!
+dx_live_identity=$(dx_raw_identity "$dx_live_pid")
+dx_live_job=ad_dx_live_1
+dx_init_job "$dx_live_job" omp "$dx_live_pid" "$dx_live_identity" \
+    "$dx_live_pid" "$dx_live_identity"
+dx_live_out=$("$AD" poll --job "$dx_live_job" \
+    --scratch-dir "$DX_SCRATCH")
+
+mkdir -p "$DX_DIR/empty-ps-bin"
+cat > "$DX_DIR/empty-ps-bin/ps" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+    *"lstart="*) exit 0 ;;
+    *"-axo pid="*) printf 'not-a-pid\n'; exit 0 ;;
+    *) exec /bin/ps "$@" ;;
+esac
+EOF
+chmod +x "$DX_DIR/empty-ps-bin/ps"
+dx_unknown_job=ad_dx_unknown_1
+dx_init_job "$dx_unknown_job" omp "$dx_live_pid" "$dx_live_identity" \
+    "$dx_live_pid" "$dx_live_identity"
+dx_unknown_out=$(PATH="$DX_DIR/empty-ps-bin:$PATH" \
+    "$AD" poll --job "$dx_unknown_job" --scratch-dir "$DX_SCRATCH")
+
+dx_dead_pid=2147483000
+dx_dead_identity=$(dx_raw_identity "$$")
+dx_dead_job=ad_dx_dead_1
+dx_init_job "$dx_dead_job" omp "$dx_dead_pid" "$dx_dead_identity" \
+    "$dx_dead_pid" "$dx_dead_identity"
+printf '%s\n' "$dx_dead_pid" > "$DX_SCRATCH/$dx_dead_job/child_pgid"
+printf 'v1|%s|%s\n' "$dx_dead_pid" "$dx_dead_pid" \
+  > "$DX_SCRATCH/$dx_dead_job/child_group"
+printf 'orphan stderr\n' > "$DX_SCRATCH/$dx_dead_job/err"
+dx_dead_first=$("$AD" poll --job "$dx_dead_job" \
+    --scratch-dir "$DX_SCRATCH")
+dx_dead_hash_before=$(
+  shasum "$DX_SCRATCH/$dx_dead_job/terminal/"* | shasum | awk '{print $1}'
+)
+dx_dead_second=$("$AD" poll --job "$dx_dead_job" \
+    --scratch-dir "$DX_SCRATCH")
+dx_dead_hash_after=$(
+  shasum "$DX_SCRATCH/$dx_dead_job/terminal/"* | shasum | awk '{print $1}'
+)
+kill "$dx_live_pid" 2>/dev/null || true
+wait "$dx_live_pid" 2>/dev/null || true
+
+if printf '%s' "$dx_live_out" | jq -e '
+     keys == ["elapsed_sec", "status", "verdict"]
+     and .verdict == "alive" and .status == "running"
+   ' >/dev/null \
+   && printf '%s' "$dx_unknown_out" | jq -e '
+     keys == ["elapsed_sec", "process_verification", "status", "verdict"]
+     and .verdict == "alive" and .status == "running"
+     and .process_verification == "unverifiable"
+   ' >/dev/null \
+   && [[ ! -e "$DX_SCRATCH/$dx_unknown_job/terminal/ready" ]] \
+   && printf '%s' "$dx_dead_first" | jq -e '
+     keys == ["error_tail", "exit_code", "status", "verdict"]
+     and .verdict == "failed_terminal" and .status == "failed"
+     and .exit_code == 255
+   ' >/dev/null \
+   && [[ "$dx_dead_first" == "$dx_dead_second" \
+      && "$dx_dead_hash_before" == "$dx_dead_hash_after" ]]; then
+    pass "DX-1 (F030/F041/F055): identity tri-state fails closed and dead wrapper+child seals failed_terminal(255) exactly once"
+else
+    fail "DX-1: process identity/sealing contract failed" \
+      "live=$dx_live_out unknown=$dx_unknown_out dead1=$dx_dead_first dead2=$dx_dead_second hash=$dx_dead_hash_before/$dx_dead_hash_after"
+fi
+
+# A dead wrapper with an authenticated live child group remains live across
+# polls. Launch through the real dispatcher so the platform-neutral group
+# supervisor and every ownership marker are exercised.
+DX_ENGINE_BIN="$DX_DIR/engine-bin"
+mkdir -p "$DX_ENGINE_BIN"
+cat > "$DX_ENGINE_BIN/omp" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${DX_OMP_MODE:-sleep}" == "ignore-term" ]]; then
+    trap '' TERM
+    while :; do /bin/sleep 1; done
+fi
+exec /bin/sleep 30
+EOF
+chmod +x "$DX_ENGINE_BIN/omp"
+printf 'dispatch prompt\n' > "$DX_DIR/prompt.md"
+dx_orphan_start=$(PATH="$DX_ENGINE_BIN:$PATH" \
+    DX_OMP_MODE=sleep \
+    "$AD" start --engine omp --prompt-file "$DX_DIR/prompt.md" \
+      --scratch-dir "$DX_SCRATCH")
+dx_orphan_job=$(printf '%s' "$dx_orphan_start" | jq -r '.job_id')
+dx_orphan_wrapper=$(cat "$DX_SCRATCH/$dx_orphan_job/pid")
+dx_orphan_pid=$(cat "$DX_SCRATCH/$dx_orphan_job/child_pid")
+/bin/kill -KILL "$dx_orphan_wrapper"
+dx_orphan_wait=0
+dx_orphan_first=""
+while [[ "$dx_orphan_wait" -lt 60 ]]; do
+    dx_orphan_first=$("$AD" poll --job "$dx_orphan_job" \
+        --scratch-dir "$DX_SCRATCH")
+    [[ "$(printf '%s' "$dx_orphan_first" | jq -r \
+      '.wrapper_state // empty')" == "dead" ]] && break
+    sleep 0.05
+    dx_orphan_wait=$((dx_orphan_wait + 1))
+done
+dx_orphan_second=$("$AD" poll --job "$dx_orphan_job" \
+    --scratch-dir "$DX_SCRATCH")
+dx_orphan_terminal=false
+[[ -e "$DX_SCRATCH/$dx_orphan_job/terminal/ready" ]] \
+    && dx_orphan_terminal=true
+dx_orphan_stop=$("$AD" stop --job "$dx_orphan_job" \
+    --scratch-dir "$DX_SCRATCH" 2>/dev/null)
+dx_orphan_stop_rc=$?
+if [[ "$dx_orphan_terminal" == "false" \
+   && "$dx_orphan_stop_rc" -eq 0 ]] \
+   && ! /bin/kill -0 "$dx_orphan_pid" 2>/dev/null \
+   && printf '%s' "$dx_orphan_first" | jq -e '
+        keys == ["elapsed_sec", "engine_state", "status", "verdict", "wrapper_state"]
+        and .verdict == "alive" and .status == "running"
+        and .wrapper_state == "dead" and .engine_state == "alive"
+      ' >/dev/null \
+   && printf '%s' "$dx_orphan_second" | jq -e \
+      --argjson first "$dx_orphan_first" '
+        keys == ["elapsed_sec", "engine_state", "status", "verdict", "wrapper_state"]
+        and .verdict == "alive" and .status == "running"
+        and .wrapper_state == "dead" and .engine_state == "alive"
+        and .elapsed_sec >= $first.elapsed_sec
+      ' >/dev/null \
+   && printf '%s' "$dx_orphan_stop" | jq -e --arg job "$dx_orphan_job" '
+        keys == ["job_id", "status", "verdict"]
+        and .job_id == $job and .verdict == "cancelled"
+        and .status == "cancelled"
+      ' >/dev/null; then
+    pass "DX-2 (F021/F034/F041): dead wrapper plus live child cannot seal/retry until authenticated stop removes the group"
+else
+    /bin/kill -KILL -- "-$dx_orphan_pid" 2>/dev/null || true
+    fail "DX-2: orphan engine group was sealed or left running" \
+      "start=$dx_orphan_start first=$dx_orphan_first second=$dx_orphan_second terminal=$dx_orphan_terminal stop=$dx_orphan_stop_rc:$dx_orphan_stop"
+fi
+
+# Force the full authenticated cancellation sequence with a process that
+# ignores TERM. A PATH-scoped kill wrapper records TERM before KILL while
+# delegating the real signals.
+mkdir -p "$DX_DIR/kill-bin"
+cat > "$DX_DIR/kill-bin/kill" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" != "-0" ]]; then
+    last=""
+    for arg in "$@"; do last="$arg"; done
+    printf '%s|%s\n' "${1:-}" "$last" >> "$DX_KILL_LOG"
+fi
+exec /bin/kill "$@"
+EOF
+chmod +x "$DX_DIR/kill-bin/kill"
+: > "$DX_DIR/kill.log"
+dx_term_start=$(PATH="$DX_DIR/kill-bin:$DX_ENGINE_BIN:$PATH" \
+    DX_KILL_LOG="$DX_DIR/kill.log" DX_OMP_MODE=ignore-term \
+    "$AD" start --engine omp --prompt-file "$DX_DIR/prompt.md" \
+      --scratch-dir "$DX_SCRATCH")
+dx_term_job=$(printf '%s' "$dx_term_start" | jq -r '.job_id')
+dx_term_pid=$(cat "$DX_SCRATCH/$dx_term_job/pid")
+dx_term_child_pid=$(cat "$DX_SCRATCH/$dx_term_job/child_pid")
+dx_term_stop=$(PATH="$DX_DIR/kill-bin:$PATH" \
+    DX_KILL_LOG="$DX_DIR/kill.log" \
+    "$AD" stop --job "$dx_term_job" --scratch-dir "$DX_SCRATCH" 2>/dev/null)
+dx_term_rc=$?
+dx_term_poll=$("$AD" poll --job "$dx_term_job" \
+    --scratch-dir "$DX_SCRATCH")
+dx_term_stop_again=$("$AD" stop --job "$dx_term_job" \
+    --scratch-dir "$DX_SCRATCH")
+dx_signal_order=$(awk -F'|' -v target="-$dx_term_child_pid" '
+  $2 == target && $1 == "-TERM" && !term { printf "TERM "; term=1 }
+  $2 == target && $1 == "-KILL" && term && !killed {
+    printf "KILL"; killed=1
+  }
+' "$DX_DIR/kill.log")
+
+# Completion wins the other ordering: later stop/poll calls must decode the
+# immutable completed record rather than rewriting it as cancelled.
+dx_complete_job=ad_dx_complete_1
+dx_init_job "$dx_complete_job" omp "$dx_dead_pid" "$dx_dead_identity" \
+    "$dx_dead_pid" "$dx_dead_identity"
+printf 'completed body\n' > "$DX_SCRATCH/$dx_complete_job/out"
+mkdir -p "$DX_SCRATCH/$dx_complete_job/terminal"
+printf 'completed\n' > "$DX_SCRATCH/$dx_complete_job/terminal/state"
+printf '0\n' > "$DX_SCRATCH/$dx_complete_job/terminal/exit_code"
+printf '1\n' > "$DX_SCRATCH/$dx_complete_job/terminal/ready"
+dx_complete_stop=$("$AD" stop --job "$dx_complete_job" \
+    --scratch-dir "$DX_SCRATCH")
+dx_complete_poll=$("$AD" poll --job "$dx_complete_job" \
+    --scratch-dir "$DX_SCRATCH")
+
+if [[ "$dx_term_rc" -eq 0 && "$dx_signal_order" == "TERM KILL" \
+   && "$(cat "$DX_SCRATCH/$dx_term_job/terminal/state")" == "cancelled" ]] \
+   && printf '%s' "$dx_term_stop" | jq -e --arg job "$dx_term_job" '
+        keys == ["job_id", "status", "verdict"]
+        and .job_id == $job and .verdict == "cancelled"
+      ' >/dev/null \
+   && printf '%s' "$dx_term_poll" | jq -e --arg job "$dx_term_job" '
+        keys == ["job_id", "status", "verdict"]
+        and .job_id == $job and .verdict == "cancelled"
+      ' >/dev/null \
+   && printf '%s' "$dx_term_stop_again" | jq -e --arg job "$dx_term_job" '
+        keys == ["job_id", "status", "stop_noop", "verdict"]
+        and .job_id == $job and .verdict == "cancelled"
+        and .stop_noop == true
+      ' >/dev/null \
+   && printf '%s' "$dx_complete_stop" | jq -e --arg job "$dx_complete_job" '
+        keys == ["job_id", "status", "stop_noop", "terminal_verdict", "verdict"]
+        and .job_id == $job and .verdict == "already_finished"
+        and .status == "completed" and .terminal_verdict == "completed"
+        and .stop_noop == true
+      ' >/dev/null \
+   && printf '%s' "$dx_complete_poll" | jq -e '
+        keys == ["raw_output", "status", "tokens", "verdict"]
+        and .verdict == "completed" and .status == "completed"
+        and .raw_output == "completed body\n"
+      ' >/dev/null \
+   && [[ "$(cat "$DX_SCRATCH/$dx_complete_job/terminal/state")" == "completed" ]]; then
+    pass "DX-3 (F016/F055/F056): authenticated TERM→check→KILL→check and completion/cancel first-writer outcomes stay monotonic"
+else
+    fail "DX-3: cancellation sequence or terminal monotonicity failed" \
+      "rc=$dx_term_rc signals=$dx_signal_order stop=$dx_term_stop poll=$dx_term_poll again=$dx_term_stop_again complete_stop=$dx_complete_stop complete_poll=$dx_complete_poll"
+fi
+
+# Completion-during-poll: the first wrapper-identity observation releases a
+# real engine, then waits for its terminal commit before reporting liveness.
+# The poller's initial terminal read has already missed; it must re-read after
+# the wrapper observation rather than synthesize failure or lose output.
+DX_RACE_DIR="$DX_DIR/completion-races"
+DX_RACE_BIN="$DX_RACE_DIR/engine-bin"
+mkdir -p "$DX_RACE_BIN" "$DX_RACE_DIR/ps-bin" "$DX_RACE_DIR/mkdir-bin"
+cat > "$DX_RACE_BIN/omp" <<'EOF'
+#!/usr/bin/env bash
+while [[ ! -e "$DX_RACE_RELEASE" ]]; do
+    /bin/sleep 0.01
+done
+printf '%s\n' "$DX_RACE_OUTPUT"
+EOF
+chmod +x "$DX_RACE_BIN/omp"
+
+dx_poll_race_release="$DX_RACE_DIR/poll.release"
+dx_poll_race_fired="$DX_RACE_DIR/poll.fired"
+rm -f "$dx_poll_race_release" "$dx_poll_race_fired"
+dx_poll_race_start=$(PATH="$DX_RACE_BIN:/usr/bin:/bin" \
+    DX_RACE_RELEASE="$dx_poll_race_release" \
+    DX_RACE_OUTPUT=poll-race-result \
+    "$AD" start --engine omp --prompt-file "$DX_DIR/prompt.md" \
+      --scratch-dir "$DX_SCRATCH")
+dx_poll_race_job=$(printf '%s' "$dx_poll_race_start" | jq -r '.job_id')
+dx_poll_race_dir="$DX_SCRATCH/$dx_poll_race_job"
+dx_real_ps=$(PATH="/usr/bin:/bin" command -v ps)
+cat > "$DX_RACE_DIR/ps-bin/ps" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"lstart="* && ! -e "$DX_POLL_RACE_FIRED" ]]; then
+    : > "$DX_POLL_RACE_FIRED"
+    : > "$DX_POLL_RACE_RELEASE"
+    probe=0
+    while [[ ! -f "$DX_POLL_RACE_JOB_DIR/terminal/ready" \
+          && "$probe" -lt 500 ]]; do
+        /bin/sleep 0.01
+        probe=$((probe + 1))
+    done
+fi
+exec "$DX_REAL_PS" "$@"
+EOF
+chmod +x "$DX_RACE_DIR/ps-bin/ps"
+dx_poll_race_first=$(PATH="$DX_RACE_DIR/ps-bin:/usr/bin:/bin" \
+    DX_POLL_RACE_FIRED="$dx_poll_race_fired" \
+    DX_POLL_RACE_RELEASE="$dx_poll_race_release" \
+    DX_POLL_RACE_JOB_DIR="$dx_poll_race_dir" DX_REAL_PS="$dx_real_ps" \
+    "$AD" poll --job "$dx_poll_race_job" --scratch-dir "$DX_SCRATCH")
+dx_poll_race_first_rc=$?
+dx_poll_race_body_before=$(cat "$dx_poll_race_dir/out" 2>/dev/null || true)
+dx_poll_race_second=$("$AD" poll --job "$dx_poll_race_job" \
+    --scratch-dir "$DX_SCRATCH")
+dx_poll_race_second_rc=$?
+dx_poll_race_body_after=$(cat "$dx_poll_race_dir/out" 2>/dev/null || true)
+if [[ "$dx_poll_race_first_rc" -eq 0 \
+   && "$dx_poll_race_second_rc" -eq 0 \
+   && -e "$dx_poll_race_fired" \
+   && "$dx_poll_race_first" == "$dx_poll_race_second" \
+   && "$dx_poll_race_body_before" == "$dx_poll_race_body_after" \
+   && "$dx_poll_race_body_after" == "poll-race-result" \
+   && "$(cat "$dx_poll_race_dir/terminal/state" 2>/dev/null)" == \
+      "completed" ]] \
+   && printf '%s' "$dx_poll_race_first" | jq -e '
+        keys == ["raw_output", "status", "tokens", "verdict"]
+        and .verdict == "completed" and .status == "completed"
+        and .raw_output == "poll-race-result\n"
+      ' >/dev/null; then
+    pass "DX-3a (F055/F056): completion between poll terminal/liveness checks wins once with repeatable preserved output"
+else
+    "$AD" stop --job "$dx_poll_race_job" \
+      --scratch-dir "$DX_SCRATCH" >/dev/null 2>&1 || true
+    fail "DX-3a: completion-during-poll race was not monotonic" \
+      "start=$dx_poll_race_start first=$dx_poll_race_first_rc:$dx_poll_race_first second=$dx_poll_race_second_rc:$dx_poll_race_second body=$dx_poll_race_body_before/$dx_poll_race_body_after"
+fi
+
+# Completion-during-stop: interpose only the cancellation claim's terminal
+# mkdir. Releasing the engine before that mkdir executes lets the real
+# completion writer win the exclusive directory claim. Stop must report
+# already_finished, and subsequent polls must retain the exact output.
+dx_stop_race_release="$DX_RACE_DIR/stop.release"
+dx_stop_race_fired="$DX_RACE_DIR/stop.fired"
+rm -f "$dx_stop_race_release" "$dx_stop_race_fired"
+dx_stop_race_start=$(PATH="$DX_RACE_BIN:/usr/bin:/bin" \
+    DX_RACE_RELEASE="$dx_stop_race_release" \
+    DX_RACE_OUTPUT=stop-race-result \
+    "$AD" start --engine omp --prompt-file "$DX_DIR/prompt.md" \
+      --scratch-dir "$DX_SCRATCH")
+dx_stop_race_job=$(printf '%s' "$dx_stop_race_start" | jq -r '.job_id')
+dx_stop_race_dir="$DX_SCRATCH/$dx_stop_race_job"
+dx_real_mkdir=$(PATH="/usr/bin:/bin" command -v mkdir)
+cat > "$DX_RACE_DIR/mkdir-bin/mkdir" <<'EOF'
+#!/usr/bin/env bash
+last=""
+for arg in "$@"; do last="$arg"; done
+if [[ "$last" == "$DX_STOP_RACE_JOB_DIR/terminal" \
+      && ! -e "$DX_STOP_RACE_FIRED" ]]; then
+    : > "$DX_STOP_RACE_FIRED"
+    : > "$DX_STOP_RACE_RELEASE"
+    probe=0
+    while [[ ! -f "$DX_STOP_RACE_JOB_DIR/terminal/ready" \
+          && "$probe" -lt 500 ]]; do
+        /bin/sleep 0.01
+        probe=$((probe + 1))
+    done
+fi
+exec "$DX_REAL_MKDIR" "$@"
+EOF
+chmod +x "$DX_RACE_DIR/mkdir-bin/mkdir"
+dx_stop_race_out=$(PATH="$DX_RACE_DIR/mkdir-bin:/usr/bin:/bin" \
+    DX_STOP_RACE_FIRED="$dx_stop_race_fired" \
+    DX_STOP_RACE_RELEASE="$dx_stop_race_release" \
+    DX_STOP_RACE_JOB_DIR="$dx_stop_race_dir" \
+    DX_REAL_MKDIR="$dx_real_mkdir" \
+    "$AD" stop --job "$dx_stop_race_job" --scratch-dir "$DX_SCRATCH" \
+      2>/dev/null)
+dx_stop_race_rc=$?
+dx_stop_race_body_before=$(cat "$dx_stop_race_dir/out" 2>/dev/null || true)
+dx_stop_race_poll_first=$("$AD" poll --job "$dx_stop_race_job" \
+    --scratch-dir "$DX_SCRATCH")
+dx_stop_race_poll_second=$("$AD" poll --job "$dx_stop_race_job" \
+    --scratch-dir "$DX_SCRATCH")
+dx_stop_race_body_after=$(cat "$dx_stop_race_dir/out" 2>/dev/null || true)
+if [[ "$dx_stop_race_rc" -eq 0 && -e "$dx_stop_race_fired" \
+   && "$dx_stop_race_poll_first" == "$dx_stop_race_poll_second" \
+   && "$dx_stop_race_body_before" == "$dx_stop_race_body_after" \
+   && "$dx_stop_race_body_after" == "stop-race-result" \
+   && "$(cat "$dx_stop_race_dir/terminal/state" 2>/dev/null)" == \
+      "completed" ]] \
+   && printf '%s' "$dx_stop_race_out" | jq -e \
+      --arg job "$dx_stop_race_job" '
+        keys == ["job_id", "status", "stop_noop", "terminal_verdict", "verdict"]
+        and .job_id == $job and .verdict == "already_finished"
+        and .status == "completed" and .terminal_verdict == "completed"
+        and .stop_noop == true
+      ' >/dev/null \
+   && printf '%s' "$dx_stop_race_poll_first" | jq -e '
+        keys == ["raw_output", "status", "tokens", "verdict"]
+        and .verdict == "completed" and .status == "completed"
+        and .raw_output == "stop-race-result\n"
+      ' >/dev/null; then
+    pass "DX-3b (F055/F056): completion while stop claims terminal returns already_finished and preserves repeated poll output"
+else
+    "$AD" stop --job "$dx_stop_race_job" \
+      --scratch-dir "$DX_SCRATCH" >/dev/null 2>&1 || true
+    fail "DX-3b: completion-during-stop race was not monotonic" \
+      "start=$dx_stop_race_start stop=$dx_stop_race_rc:$dx_stop_race_out poll1=$dx_stop_race_poll_first poll2=$dx_stop_race_poll_second body=$dx_stop_race_body_before/$dx_stop_race_body_after"
+fi
+
+# Thresholds are canonicalized before arithmetic and invalid/overflow values
+# fail before job/companion access. Also black-box the companion poller's
+# verdict-specific completed/alive/failed JSON surfaces.
+dx_threshold_bad=""
+dx_padded=$("$AD" poll --job ad_dx_missing_1 --scratch-dir "$DX_DIR/missing" \
+    --stall-threshold-sec 0000000005 \
+    --wall-clock-ceiling-sec 0000000010 2>&1)
+dx_padded_rc=$?
+dx_spaced=$("$AD" poll --job ad_dx_missing_1 --scratch-dir "$DX_DIR/missing" \
+    --stall-threshold-sec " 5 " --wall-clock-ceiling-sec 10 2>&1)
+dx_spaced_rc=$?
+dx_overflow=$("$AD" poll --job ad_dx_missing_1 --scratch-dir "$DX_DIR/missing" \
+    --stall-threshold-sec 5 \
+    --wall-clock-ceiling-sec 9223372036854775808 2>&1)
+dx_overflow_rc=$?
+if [[ "$dx_padded_rc" -ne 1 || "$dx_padded" != *"no job dir"* \
+   || "$dx_spaced_rc" -ne 64 || "$dx_spaced" == *"no job dir"* \
+   || "$dx_overflow_rc" -ne 64 || "$dx_overflow" == *"no job dir"* ]]; then
+    dx_threshold_bad="$dx_threshold_bad dispatcher=padded:$dx_padded_rc:$dx_padded spaced:$dx_spaced_rc:$dx_spaced overflow:$dx_overflow_rc:$dx_overflow"
+fi
+
+dx_cp_padded=$("$TOOLS/codex-poll.sh" --job missing \
+    --companion "$DX_DIR/no-companion.mjs" \
+    --stall-threshold-sec 0000000005 \
+    --wall-clock-ceiling-sec 0000000010 2>&1)
+dx_cp_padded_rc=$?
+dx_cp_spaced=$("$TOOLS/codex-poll.sh" --job missing \
+    --companion "$DX_DIR/no-companion.mjs" \
+    --stall-threshold-sec " 5 " \
+    --wall-clock-ceiling-sec 10 2>&1)
+dx_cp_spaced_rc=$?
+dx_cp_overflow=$("$TOOLS/codex-poll.sh" --job missing \
+    --companion "$DX_DIR/no-companion.mjs" \
+    --stall-threshold-sec 5 \
+    --wall-clock-ceiling-sec 9223372036854775808 2>&1)
+dx_cp_overflow_rc=$?
+if [[ "$dx_cp_padded_rc" -ne 5 \
+   || "$dx_cp_padded" != *"codex-companion not found"* \
+   || "$dx_cp_spaced_rc" -ne 64 \
+   || "$dx_cp_spaced" == *"codex-companion not found"* \
+   || "$dx_cp_overflow_rc" -ne 64 \
+   || "$dx_cp_overflow" == *"codex-companion not found"* ]]; then
+    dx_threshold_bad="$dx_threshold_bad poller=padded:$dx_cp_padded_rc:$dx_cp_padded spaced:$dx_cp_spaced_rc:$dx_cp_spaced overflow:$dx_cp_overflow_rc:$dx_cp_overflow"
+fi
+
+mkdir -p "$DX_DIR/node-bin"
+printf '// fixture\n' > "$DX_DIR/companion.mjs"
+: > "$DX_DIR/companion.log"
+cat > "$DX_DIR/node-bin/node" <<'EOF'
+#!/usr/bin/env bash
+sub="${2:-}"
+if [[ "$sub" == "status" ]]; then
+    case "$DX_NODE_MODE" in
+        completed)
+            printf '{"job":{"status":"completed","logFile":"%s"}}\n' "$DX_NODE_LOG"
+            ;;
+        running)
+            printf '{"job":{"status":"running","logFile":"%s"}}\n' "$DX_NODE_LOG"
+            ;;
+        failed)
+            printf '{"job":{"status":"failed","logFile":"%s"}}\n' "$DX_NODE_LOG"
+            ;;
+    esac
+elif [[ "$sub" == "result" ]]; then
+    printf '{"storedJob":{"result":{"rawOutput":"companion result"}}}\n'
+else
+    exit 64
+fi
+EOF
+chmod +x "$DX_DIR/node-bin/node"
+dx_cp_completed=$(PATH="$DX_DIR/node-bin:$PATH" \
+    DX_NODE_MODE=completed DX_NODE_LOG="$DX_DIR/companion.log" \
+    "$TOOLS/codex-poll.sh" --job opaque \
+      --companion "$DX_DIR/companion.mjs" \
+      --stall-threshold-sec 00090 --wall-clock-ceiling-sec 00600)
+dx_cp_alive=$(PATH="$DX_DIR/node-bin:$PATH" \
+    DX_NODE_MODE=running DX_NODE_LOG="$DX_DIR/companion.log" \
+    "$TOOLS/codex-poll.sh" --job opaque \
+      --companion "$DX_DIR/companion.mjs" \
+      --stall-threshold-sec 00090 --wall-clock-ceiling-sec 00600)
+dx_cp_failed=$(PATH="$DX_DIR/node-bin:$PATH" \
+    DX_NODE_MODE=failed DX_NODE_LOG="$DX_DIR/companion.log" \
+    "$TOOLS/codex-poll.sh" --job opaque \
+      --companion "$DX_DIR/companion.mjs" \
+      --stall-threshold-sec 00090 --wall-clock-ceiling-sec 00600)
+if [[ -z "$dx_threshold_bad" ]] \
+   && printf '%s' "$dx_cp_completed" | jq -e '
+        keys == [
+          "elapsed_sec", "log_file", "log_mtime_age_sec", "raw_output",
+          "status", "verdict"
+        ]
+        and .status == "completed" and .verdict == "completed"
+        and .raw_output == "companion result"
+      ' >/dev/null \
+   && printf '%s' "$dx_cp_alive" | jq -e '
+        keys == [
+          "elapsed_sec", "log_file", "log_mtime_age_sec", "status", "verdict"
+        ]
+        and .status == "running" and .verdict == "alive"
+      ' >/dev/null \
+   && printf '%s' "$dx_cp_failed" | jq -e '
+        keys == [
+          "elapsed_sec", "log_file", "log_mtime_age_sec", "status", "verdict"
+        ]
+        and .status == "failed" and .verdict == "failed_terminal"
+      ' >/dev/null; then
+    pass "DX-4 (F034/F057): dispatcher/poller canonicalize padded thresholds, reject overflow pre-access, and emit full verdict schemas"
+else
+    fail "DX-4: threshold ordering or companion verdict schema failed" \
+      "thresholds=$dx_threshold_bad completed=$dx_cp_completed alive=$dx_cp_alive failed=$dx_cp_failed"
+fi
+
+# Standalone Codex must authenticate before creating job state or executing an
+# engine. The authenticated control must execute exactly once and complete.
+DX_AUTH="$DX_DIR/auth"
+mkdir -p "$DX_AUTH/bin" "$DX_AUTH/scratch"
+cat > "$DX_AUTH/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "login" && "${2:-}" == "status" ]]; then
+    printf 'probe\n' >> "$DX_AUTH_STATE/auth.calls"
+    [[ "$DX_AUTH_OK" == "true" ]]
+    exit $?
+fi
+printf 'exec\n' >> "$DX_AUTH_STATE/exec.calls"
+out=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -o) out="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+cat >/dev/null
+printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":2}}\n'
+[[ -z "$out" ]] || printf 'authenticated result\n' > "$out"
+EOF
+chmod +x "$DX_AUTH/bin/codex"
+: > "$DX_AUTH/auth.calls"
+: > "$DX_AUTH/exec.calls"
+printf 'auth prompt\n' > "$DX_AUTH/prompt.md"
+dx_unauth_out=$(PATH="$DX_AUTH/bin:$PATH" \
+    DX_AUTH_STATE="$DX_AUTH" DX_AUTH_OK=false \
+    "$AD" start --engine codex --prompt-file "$DX_AUTH/prompt.md" \
+      --scratch-dir "$DX_AUTH/scratch" 2>&1)
+dx_unauth_rc=$?
+dx_unauth_state_count=$(
+  shopt -s nullglob
+  dx_unauth_dirs=("$DX_AUTH/scratch"/ad_*)
+  printf '%s' "${#dx_unauth_dirs[@]}"
+)
+dx_unauth_exec_count=$(wc -l < "$DX_AUTH/exec.calls" | tr -d '[:space:]')
+dx_auth_start=$(PATH="$DX_AUTH/bin:$PATH" \
+    DX_AUTH_STATE="$DX_AUTH" DX_AUTH_OK=true \
+    "$AD" start --engine codex --prompt-file "$DX_AUTH/prompt.md" \
+      --scratch-dir "$DX_AUTH/scratch")
+dx_auth_rc=$?
+dx_auth_job=$(printf '%s' "$dx_auth_start" | jq -r '.job_id // empty')
+dx_auth_poll=""
+dx_auth_wait=0
+while [[ "$dx_auth_wait" -lt 60 ]]; do
+    dx_auth_poll=$("$AD" poll --job "$dx_auth_job" \
+        --scratch-dir "$DX_AUTH/scratch" 2>/dev/null)
+    [[ "$(printf '%s' "$dx_auth_poll" | jq -r '.verdict // empty')" == \
+       "completed" ]] && break
+    sleep 0.05
+    dx_auth_wait=$((dx_auth_wait + 1))
+done
+dx_auth_exec_count=$(wc -l < "$DX_AUTH/exec.calls" | tr -d '[:space:]')
+if [[ "$dx_unauth_rc" -eq 5 && "$dx_unauth_out" == *"not authenticated"* \
+   && "$dx_unauth_state_count" == "0" && "$dx_unauth_exec_count" == "0" \
+   && "$dx_auth_rc" -eq 0 && -n "$dx_auth_job" \
+   && "$dx_auth_exec_count" == "1" \
+   && "$(printf '%s' "$dx_auth_poll" | jq -r '.raw_output')" == \
+      "authenticated result" ]] \
+   && grep -qF 'Bash(codex login status)' "$REPO/commands/codex-review.md" \
+   && grep -qF '`max` and `ultra` require the authenticated standalone Codex transport.' \
+      "$REPO/commands/codex-review.md"; then
+    pass "DX-5 (F030/F056): unauthenticated Codex has zero exec/state; auth control completes; command grants/describes auth-only max/ultra"
+else
+    fail "DX-5: standalone authentication gate or command contract failed" \
+      "unauth=$dx_unauth_rc:$dx_unauth_out state=$dx_unauth_state_count unauth_exec=$dx_unauth_exec_count auth=$dx_auth_rc:$dx_auth_start exec=$dx_auth_exec_count poll=$dx_auth_poll"
+fi
+
+# Execute the exact Phase 4a/4b/5 stop handlers. Valid already_finished must
+# re-poll the matching job and replace stale output/tokens; malformed,
+# mismatched, or verdict/exit-incoherent stop schemas must abort.
+cat > "$DX_DIR/extract-stop-handlers.py" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+specs = [
+    ("fragments/05-codex-validation.md", "phase_4a_codex_watchdog:",
+     "phase4a.sh",
+     'printf "%s|%s|%s\\n" "$verdict" "$codex_output" "$codex_tokens"'),
+    ("fragments/05-codex-validation.md", "phase_4b_codex_watchdog:",
+     "phase4b.sh",
+     'printf "%s|%s|%s\\n" "$verdict" "$codex_chunk_output" "$codex_chunk_tokens"'),
+    ("fragments/06-codex-cross-cutting.md", "phase_5_codex_watchdog:",
+     "phase5.sh",
+     'printf "%s|%s|%s\\n" "$verdict" "$xc_codex_output" "$xc_codex_tokens"'),
+]
+for relative, needle, name, trailer in specs:
+    text = (root / relative).read_text(encoding="utf-8")
+    anchor = text.index(needle)
+    start = text.rfind("```bash\n", 0, anchor) + len("```bash\n")
+    end = text.index("\n```", anchor)
+    (destination / name).write_text(
+        text[start:end] + "\n" + trailer + "\n",
+        encoding="utf-8",
+    )
+PY
+dx_extract_out=$(python3 "$DX_DIR/extract-stop-handlers.py" \
+    "$REPO" "$DX_DIR" 2>&1)
+dx_extract_rc=$?
+mkdir -p "$DX_DIR/caller-bin" "$DX_DIR/caller-scratch"
+cat > "$DX_DIR/caller-bin/agent-dispatch.sh" <<'EOF'
+#!/usr/bin/env bash
+sub="$1"
+shift
+job=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --job) job="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+printf '%s:%s\n' "$sub" "$job" >> "$DX_CALLS"
+if [[ "$sub" == "poll" ]]; then
+    printf '{"verdict":"completed","status":"completed","raw_output":"rematerialized-%s","tokens":42}\n' "$job"
+    exit 0
+fi
+case "$DX_STOP_MODE" in
+    already)
+        jq -nc --arg job "$job" \
+          '{verdict:"already_finished",status:"completed",
+            terminal_verdict:"completed",job_id:$job,stop_noop:true}'
+        ;;
+    cancelled)
+        jq -nc --arg job "$job" \
+          '{verdict:"cancelled",status:"cancelled",job_id:$job}'
+        ;;
+    stop-failed)
+        jq -nc --arg job "$job" \
+          '{verdict:"stop_failed",status:"stop_failed",job_id:$job,
+            reason:"still alive",wrapper_alive:true,engine_alive:false,
+            wrapper_state:"alive",engine_state:"gone"}'
+        exit 9
+        ;;
+    stop-failed-zero)
+        jq -nc --arg job "$job" \
+          '{verdict:"stop_failed",status:"stop_failed",job_id:$job,
+            reason:"still alive",wrapper_alive:true,engine_alive:false}'
+        ;;
+    mismatch)
+        jq -nc \
+          '{verdict:"cancelled",status:"cancelled",job_id:"wrong-job"}'
+        ;;
+    invalid-already)
+        jq -nc --arg job "$job" \
+          '{verdict:"already_finished",status:"completed",
+            terminal_verdict:"failed_terminal",job_id:$job,stop_noop:true}'
+        ;;
+    partial-stop-failed)
+        jq -nc --arg job "$job" \
+          '{verdict:"stop_failed",status:"stop_failed",job_id:$job}'
+        exit 9
+        ;;
+    duplicate)
+        jq -nc --arg job "$job" \
+          '{verdict:"cancelled",status:"cancelled",job_id:$job}'
+        jq -nc --arg job "$job" \
+          '{verdict:"cancelled",status:"cancelled",job_id:$job}'
+        ;;
+esac
+EOF
+chmod +x "$DX_DIR/caller-bin/agent-dispatch.sh"
+
+dx_run_handler() {
+    local script="$1" job_var="$2" job="$3" extra_name="$4" extra_value="$5"
+    local calls="$DX_DIR/$script.calls" trace="$DX_DIR/$script.trace"
+    : > "$calls"
+    : > "$trace"
+    env \
+      DX_CALLS="$calls" DX_STOP_MODE=already \
+      MRB="$DX_DIR/caller-bin/" \
+      codex_launch_mode=agent-dispatch \
+      codex_dispatch_scratch="$DX_DIR/caller-scratch" \
+      ceiling=600 \
+      poll='{"verdict":"wall_clock_exceeded","status":"running"}' \
+      verdict=wall_clock_exceeded \
+      codex_output=stale codex_tokens=stale \
+      codex_chunk_output=stale codex_chunk_tokens=stale \
+      xc_codex_output=stale xc_codex_tokens=stale \
+      trace_log_path="$trace" \
+      "$job_var=$job" "$extra_name=$extra_value" \
+      /bin/bash "$DX_DIR/$script"
+}
+dx_p4a=$(dx_run_handler phase4a.sh job_id ad_dx_p4a finding_id F001 2>&1)
+dx_p4a_rc=$?
+dx_p4b=$(dx_run_handler phase4b.sh job_id ad_dx_p4b chunk_n 3 2>&1)
+dx_p4b_rc=$?
+dx_p5=$(dx_run_handler phase5.sh xc_job_id ad_dx_p5 unused unused 2>&1)
+dx_p5_rc=$?
+dx_remat_bad=""
+for dx_remat_case in \
+    "phase4a.sh:$dx_p4a_rc:$dx_p4a:ad_dx_p4a" \
+    "phase4b.sh:$dx_p4b_rc:$dx_p4b:ad_dx_p4b" \
+    "phase5.sh:$dx_p5_rc:$dx_p5:ad_dx_p5"; do
+    dx_remat_name=${dx_remat_case%%:*}
+    dx_remat_rest=${dx_remat_case#*:}
+    dx_remat_code=${dx_remat_rest%%:*}
+    dx_remat_rest=${dx_remat_rest#*:}
+    dx_remat_output=${dx_remat_rest%:*}
+    dx_remat_job=${dx_remat_rest##*:}
+    dx_remat_calls=$(cat "$DX_DIR/$dx_remat_name.calls")
+    if [[ "$dx_remat_code" -ne 0 \
+       || "$dx_remat_output" != \
+          "completed|rematerialized-$dx_remat_job|42" \
+       || "$dx_remat_calls" != \
+          $'stop:'"$dx_remat_job"$'\n''poll:'"$dx_remat_job" ]]; then
+        dx_remat_bad="$dx_remat_bad $dx_remat_name=$dx_remat_code:$dx_remat_output:$dx_remat_calls"
+    fi
+done
+
+dx_schema_bad=""
+dx_schema_case() {
+    local mode="$1" expected="$2" marker="$3"
+    local calls="$DX_DIR/schema-$mode.calls"
+    local trace="$DX_DIR/schema-$mode.trace"
+    local output code
+    : > "$calls"
+    : > "$trace"
+    output=$(env \
+      DX_CALLS="$calls" DX_STOP_MODE="$mode" \
+      MRB="$DX_DIR/caller-bin/" codex_launch_mode=agent-dispatch \
+      codex_dispatch_scratch="$DX_DIR/caller-scratch" ceiling=600 \
+      poll='{"verdict":"wall_clock_exceeded","status":"running"}' \
+      verdict=wall_clock_exceeded codex_output=stale codex_tokens=stale \
+      trace_log_path="$trace" job_id=ad_dx_schema finding_id=F001 \
+      /bin/bash "$DX_DIR/phase4a.sh" 2>&1)
+    code=$?
+    if [[ "$code" -ne "$expected" || "$output" != *"$marker"* ]]; then
+        dx_schema_bad="$dx_schema_bad $mode=$code:$output"
+    fi
+}
+dx_schema_case cancelled 0 'wall_clock_exceeded|stale|stale'
+dx_schema_case stop-failed 1 'cancellation could not be verified'
+dx_schema_case stop-failed-zero 1 'exited 0 with verdict stop_failed'
+dx_schema_case mismatch 1 'malformed, partial, or mismatched'
+dx_schema_case invalid-already 1 'malformed, partial, or mismatched'
+dx_schema_case partial-stop-failed 1 'malformed, partial, or mismatched'
+dx_schema_case duplicate 1 'malformed, partial, or mismatched'
+
+if [[ "$dx_extract_rc" -eq 0 && -z "$dx_remat_bad" \
+   && -z "$dx_schema_bad" ]]; then
+    pass "DX-6 (F041/F055/F057): Phase 4a/4b/5 enforce matching verdict schemas and already_finished re-poll rematerializes output/tokens"
+else
+    fail "DX-6: standalone caller schema/rematerialization contract failed" \
+      "extract=$dx_extract_rc:$dx_extract_out remat=$dx_remat_bad schema=$dx_schema_bad"
 fi
 
 echo

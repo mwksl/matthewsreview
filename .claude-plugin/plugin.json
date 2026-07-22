@@ -1,9 +1,9 @@
 {
-  "name": "adamsreview",
-  "version": "0.4.3",
-  "description": "Multi-lens code review pipeline: deep review (Claude or Codex), automated fix loop, interactive walkthrough, manual promote, external-finding injection.",
-  "author": { "name": "Adam Miller" },
+  "name": "matthewsreview",
+  "version": "1.0.4",
+  "description": "Multi-lens code review pipeline for Claude Code, Codex, and Oh My Pi: deep review (Claude, Codex, or omp engines), per-stage model selection, automated fix loop, interactive walkthrough, manual promote, external-finding injection.",
+  "author": { "name": "Matthew \"mwksl\" Stingel" },
   "license": "MIT",
-  "keywords": ["code-review", "pr-review", "review"],
-  "repository": "https://github.com/adamjgmiller/adamsreview"
+  "keywords": ["code-review", "pr-review", "review", "multi-harness"],
+  "repository": "https://github.com/mwksl/matthewsreview"
 }

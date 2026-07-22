@@ -16,6 +16,17 @@ one Opus per candidate.
 Capture `phase_4_start_epoch=$(date +%s)` as the first action of this
 phase — step 4.7 logs the elapsed time.
 
+Read the resolved Phase-4 bands once and retain the three cutoffs for
+validator prompts and tuple assembly:
+
+```bash
+phase4_bands=$(artifact-read.sh \
+  --path "$artifact_path" --filter '.gates.phase4_bands')
+phase4_b1=$(printf '%s' "$phase4_bands" | jq -r '.[0]')
+phase4_b2=$(printf '%s' "$phase4_bands" | jq -r '.[1]')
+phase4_b3=$(printf '%s' "$phase4_bands" | jq -r '.[2]')
+```
+
 ### 4.1. Partition candidates into lanes
 
 Read the phase-3 survivors (findings parked at `pending_validation`;
@@ -45,9 +56,9 @@ on `impact_type`):
 > `sum(opus_durations)`. Serializing turns the deep lane into a
 > per-candidate timer.
 
-For each deep-lane candidate, launch ONE `Agent` tool-use with
-`model: opus`, `subagent_type: general-purpose`. Dispatch all in one
-orchestrator turn for concurrency.
+For each deep-lane candidate, launch ONE sub-agent with role
+`deep_validate` (default claude:opus), `subagent_type: general-purpose`.
+Dispatch all in one orchestrator turn for concurrency.
 
 **Never batch deep-lane candidates into one Opus call.** Each candidate needs independent blast-radius and fix-proposal work. The `--apply-decisions --expected $N` guard catches under-count violations but cannot catch the collapse-then-correct-unwrap failure mode (batching N candidates into one Opus call, then unwrapping the response into N tuples to satisfy the guard). The discipline is yours.
 
@@ -57,7 +68,7 @@ Each sub-agent receives:
   plus the Read/grep tools it uses to look at the diff directly.
 - `$claude_md_paths` (absolute paths).
 - If this is a retry-mode run (Stage 3 context): the finding's prior
-  `fix_attempts` for context. In Stage 2 `/adamsreview:review`, `fix_attempts`
+  `fix_attempts` for context. In Stage 2 `/matthewsreview:review`, `fix_attempts`
   is always empty.
 
 Prompt essence:
@@ -72,12 +83,24 @@ Prompt essence:
 >
 > **Candidate:** `<finding JSON>`
 > **CLAUDE.md paths:** `$claude_md_paths`
+> **Reviewed SHA:** `$reviewed_sha`
 >
 > **Read-only.** Do not use `Edit` or `Write`, and do not run Bash that
 > mutates the tree (no `git checkout`, no `git restore`, no writes into
 > tracked paths). If a fix is warranted, describe it in `fix_proposal` —
 > Phase 8 applies it. Any working-tree changes you make will be reverted
 > before Phase 5.
+>
+> **Source of truth: the reviewed commit, not the working tree.** The
+> review targets SHA `$reviewed_sha` (substituted below). The working
+> tree may have drifted since (branch switches, other sessions) — a
+> prior run produced bogus disproofs by reading a tree that had moved.
+> Read reviewed code via `git show $reviewed_sha:<path>` (and `git show
+> $reviewed_sha:<path> | sed -n 'X,Yp'` for ranges) for every file the
+> claim touches. Working-tree reads are allowed ONLY as supplementary
+> context, and must be labeled as such in your evidence. If you detect
+> `git rev-parse HEAD` != `$reviewed_sha`, note `head_drift: true` in
+> your evidence and continue against the pinned SHA regardless.
 >
 > Steps:
 > 1. **Confirm or disprove.** Trace the claim end-to-end in the code.
@@ -200,7 +223,8 @@ Prompt essence:
 Split light-lane candidates (including every candidate under
 `trivial_mode`) into chunks of **at most 25 candidates per chunk**,
 balanced as evenly as feasible. For each chunk, launch ONE `Agent`
-tool-use with `model: sonnet`. Dispatch all chunk-agents in one
+with role `light_validate` (default claude:sonnet). Dispatch all
+chunk-agents in one
 orchestrator turn for concurrency.
 
 Light-lane batches well — rubric-checking against CLAUDE.md, not per-candidate blast-radius investigation. Cap chunks at 25: unbounded batches collapse score resolution onto the rubric anchors and stop using parallelism on large reviews. The §4.4 `--apply-decisions --expected $N` guard catches a chunk-agent dropping a finding the same way it catches collapsed deep-lane Opus calls.
@@ -216,10 +240,16 @@ Prompt essence:
 > ```
 >
 > **CLAUDE.md paths:** `$claude_md_paths`
+> **Reviewed SHA:** `$reviewed_sha`
 > **trivial_mode:** `<true|false>` (when true, do NOT emit `actionability: auto_fixable` for ANY candidate — only `manual` or `report_only` per §13.9).
 >
 > **Read-only.** Do not use `Edit` or `Write`; describe any needed
 > change in each finding's `note` — it's not yours to apply.
+>
+> **Source of truth: the reviewed commit.** Read reviewed code via
+> `git show $reviewed_sha:<path>` — the working tree may have drifted
+> since the review started. Working-tree reads are supplementary
+> context only.
 >
 > Verify each finding's accuracy only: does the CLAUDE.md really
 > contain this rule? Does the adjacent comment really conflict? Adjust
@@ -231,9 +261,10 @@ Prompt essence:
 > `report_only`.
 >
 > **Anti-anchor-clustering instruction (chunk-batch specific):** Use
-> the full 0-100 range. The §13.1 Phase-4 routing has cutoffs at 45,
-> 60, and 75; a finding that sits between 60 and 75 should score 65 or
-> 70 — do not snap it to an anchor. If multiple candidates in the
+> the full 0-100 range. The §13.1 Phase-4 routing has resolved cutoffs
+> at `$phase4_b1`, `$phase4_b2`, and `$phase4_b3`; a finding between
+> adjacent cutoffs should use the available interior scores rather
+> than snap to an anchor. If multiple candidates in the
 > chunk would naturally land at the same anchor, resolve which ones
 > are actually higher / lower before returning. Compressed-onto-anchor
 > scores lose the resolution Phase 6 needs to render confirmed_strength.
@@ -258,14 +289,14 @@ matching the Phase 3 pattern in §3.3 step 1):
 log-tokens.sh \
   --review-dir "$review_dir" --phase phase_4a \
   --agent-role validator --finding-id "$id" \
-  --agent-id <id> --model opus \
+  --agent-id <id> --model "$role_deep_validate" \
   --tokens <N or null>
 
 # Light lane (per chunk-agent — --finding-id omitted):
 log-tokens.sh \
   --review-dir "$review_dir" --phase phase_4b \
   --agent-role validator \
-  --agent-id <id> --model sonnet \
+  --agent-id <id> --model "$role_light_validate" \
   --tokens <N or null>
 ```
 
@@ -282,14 +313,17 @@ sees a single summary line instead of N per-finding prose blocks.
 | Score | Rule | Disposition | is_actionable | Other |
 |---|---|---|---|---|
 | `null` | parse failure | `uncertain` | false | reason default: "uncertain (Phase 4 inconclusive)" |
-| `< 45` | disproven | `disproven` | false | reason default: "disproven by Phase 4" |
-| `45-59` | uncertain | `uncertain` | false | reason default: "uncertain (Phase 4 inconclusive)" |
-| `60-74` AND `actionability=auto_fixable` | | `confirmed_mechanical` | true | confirmed_strength: moderate |
-| `60-74` AND `actionability=manual` | | `confirmed_manual` | false | confirmed_strength: moderate |
-| `60-74` AND `actionability=report_only` | | `confirmed_report` | false | confirmed_strength: moderate |
-| `75+` AND `actionability=auto_fixable` | | `confirmed_mechanical` | true | confirmed_strength: strong |
-| `75+` AND `actionability=manual` | | `confirmed_manual` | false | confirmed_strength: strong |
-| `75+` AND `actionability=report_only` | | `confirmed_report` | false | confirmed_strength: strong |
+| `< B1` | disproven | `disproven` | false | reason default: "disproven by Phase 4" |
+| `B1..B2-1` | uncertain | `uncertain` | false | reason default: "uncertain (Phase 4 inconclusive)" |
+| `B2..B3-1` AND `actionability=auto_fixable` | | `confirmed_mechanical` | true | confirmed_strength: moderate |
+| `B2..B3-1` AND `actionability=manual` | | `confirmed_manual` | false | confirmed_strength: moderate |
+| `B2..B3-1` AND `actionability=report_only` | | `confirmed_report` | false | confirmed_strength: moderate |
+| `B3+` AND `actionability=auto_fixable` | | `confirmed_mechanical` | true | confirmed_strength: strong |
+| `B3+` AND `actionability=manual` | | `confirmed_manual` | false | confirmed_strength: strong |
+| `B3+` AND `actionability=report_only` | | `confirmed_report` | false | confirmed_strength: strong |
+
+`B1`/`B2`/`B3` are the resolved `gates.phase4_bands` values (default
+`[45, 60, 75]`).
 
 Include the raw `decision` field in each tuple for audit-trail
 legibility — it's accepted by the helper but not authoritative; when
@@ -305,11 +339,28 @@ The helper writes `validation_result` only when the derived
 disposition lands in the confirmed band; pass it for every deep-lane
 tuple — uncertain / disproven tuples have it silently ignored.
 
+**Reject transport failures before normalization.** A response is
+eligible for `parse-validator-result.py` only when its dispatch
+transport completed successfully: a native harness tool returned
+without error/cancellation/timeout, or a subprocess poll returned
+`verdict=completed`. Never pass a failed tool envelope, cancellation
+payload, timeout payload, or `failed_terminal` stderr through the
+semantic parser — wrapper metadata can contain numbers and prose that
+look like a validator score.
+
+Retry the same validator unit once on transport failure. If the retry
+also fails, append the transport verdict/error to `trace.md` and
+synthesize `score_phase4: null`, `actionability: null`, and reason
+`"Phase 4 validator transport failure after retry — manual review"`.
+For a light-lane chunk, synthesize one such tuple for every id owned by
+the failed chunk so `--expected` remains a structural guard rather than
+silently dropping candidates.
+
 **Normalize validator output before tuple compose.** Pipe each raw
 validator response through `parse-validator-result.py --lane
 deep|light` before composing the tuple; the helper returns a canonical
-shape (`score_phase4`, `actionability`, `confirmed_strength`,
-`decision`, `validation_result`, `notes`) with `scale_inferred:` audit
+shape (`score_phase4`, `actionability`, `decision`,
+`validation_result`, `notes`) with `scale_inferred:` audit
 notes when it had to guess. Exit 2 from the helper means the score was
 unrecoverable — emit `score_phase4: null` in the tuple so
 `--apply-decisions` routes to `uncertain`, and stash the stderr in
@@ -346,8 +397,9 @@ any co-located ad-hoc helper you wrote). Then invoke the helper on
 that path.
 
 Tuple shape (the helper rejects unknown keys; `id` is required;
-`actionability` is required when `score_phase4 >= 60`; everything else
-is optional and gets a sensible default):
+`actionability` is required when `score_phase4 >= $phase4_b2`, the
+resolved confirmation cutoff; everything else is optional and gets a
+sensible default):
 
 ```json
 [
@@ -367,7 +419,7 @@ disproven / uncertain tuples. Deep-lane confirmed tuples carry the
 full nested object.
 
 ```bash
-scratch="/tmp/adams-review-$review_id"
+scratch="/tmp/matthews-review-$review_id"
 mkdir -p "$scratch"
 
 # Compose the tuple array in orchestrator context and write it to
@@ -451,7 +503,7 @@ per §4.5 step 4), run a `git status --porcelain` sweep. Validators have no
 legitimate reason to touch the working tree — the 4.2 / 4.3 prompts
 already forbid it. This catches a prompt-override and restores the
 tree before Phase 5 so a misbehaving validator cannot poison the
-commit `/adamsreview:fix` will later produce.
+commit `/matthewsreview:fix` will later produce.
 
 **Gate on `pre_validator_clean`** (captured in Phase 0 step 0.8 after
 the dirty-tree gate resolves). When the user chose option 2
@@ -529,7 +581,7 @@ If the resulting list is non-empty AND we haven't already done Wave 2:
         reason: null,
         confirmed_strength: null,
         file: $cand.file,
-        line_range: ($cand.line_range // [1,1]),
+        line_range: ($cand.line_range // null),
         claim: $cand.claim,
         score_phase3: null,
         score_phase4: null,
@@ -623,7 +675,7 @@ rather than `$scratch` — §4.4 may not have run if Phase 3 gated every
 candidate out:
 
 ```bash
-rm -rf -- "/tmp/adams-review-$review_id"
+rm -rf -- "/tmp/matthews-review-$review_id"
 ```
 
 ### 4.7. Log Phase 4 summary

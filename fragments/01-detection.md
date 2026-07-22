@@ -66,7 +66,7 @@ prepends this shared block when assembling the dispatch prompt.
 The orchestrator dispatches `<shared invariants> + <lens body>` as the
 sub-agent prompt. The shared invariants and the lens body both live in
 files now (extracted per `plans/codex-review.md` §4.1 so
-`/adamsreview:codex-review` can consume the same source).
+`/matthewsreview:codex-review` can consume the same source).
 
 Shared invariants: Read `fragments/lens-prompts/_shared-invariants.md`
 — its content is the shared block prepended to every lens's prompt
@@ -127,7 +127,7 @@ lens claim.
 This gate runs before the dispatch turn so a missing-CLI prompt surfaces
 ahead of any token spend. Under `ensemble_mode=false` it's a one-line
 no-op; under `ensemble_mode=true` it probes Codex, may prompt the user
-via `AskUserQuestion`, and prepares the scratch directory + Codex
+via ASK, and prepares the scratch directory + Codex
 prompt file for the joint dispatch at step 1.3.
 
 **When `ensemble_mode != true`:**
@@ -147,7 +147,7 @@ Create the scratch directory for CLI output (keeps `$review_dir`
 free of transient noise):
 
 ```bash
-scratch_dir="/tmp/adams-review-$review_id"
+scratch_dir="/tmp/matthews-review-$review_id"
 mkdir -p "$scratch_dir"
 ```
 
@@ -155,60 +155,83 @@ Check Codex availability:
 
 ```bash
 CODEX_COMPANION="$(find ~/.claude/plugins -type f -name codex-companion.mjs -path '*codex*' 2>/dev/null | head -1)"
-if [[ -z "$CODEX_COMPANION" ]]; then
-    codex_available=false
-    codex_reason="companion script not found — run /codex:setup"
-else
+codex_launch_mode=""
+codex_readiness_note=""
+codex_reason=""
+codex_setup_json=""
+
+# max/ultra is standalone-only: do not probe or select the companion.
+if [[ "${codex_requires_standalone:-false}" != "true" \
+      && -n "$CODEX_COMPANION" ]]; then
     # Companion CLI surface: `setup --json` emits {"ready": true|false, ...}.
-    # The older `ready` subcommand does not exist — parse the JSON's
-    # `.ready` boolean instead of grep-matching a literal string.
-    codex_setup_json=$(node "$CODEX_COMPANION" setup --json 2>&1)
+    codex_setup_json=$(node "$CODEX_COMPANION" setup --json 2>&1) || true
     codex_ready=$(jq -r '.ready // false' <<<"$codex_setup_json" 2>/dev/null)
     if [[ "$codex_ready" == "true" ]]; then
-        codex_available=true
+        codex_launch_mode="companion"
     else
-        # Cold-start false-negative bypass (shared session mode):
-        # `.ready` rolls up `.auth.loggedIn`, which is verified through
-        # the broker socket. The broker only materializes once a task
-        # is running, so a fresh probe sees ENOENT on
-        # /tmp/cxc-*/broker.sock and reports not-ready even though
-        # `.codex.available` (CLI binary present) is true. Treat that
-        # exact shape as ready; the first lens dispatch warms the
-        # broker. (`.auth.available` is intentionally NOT checked — the
-        # companion's auth-status builder hardcodes it true regardless
-        # of credential state, so it's cargo-cult; `.auth.loggedIn` is
-        # the real auth signal and is what the broker round-trip
-        # gates.)
-        #
-        # Edge case: if the user has logged out but a stale saved
-        # broker-session file remains, the probe is structurally
-        # indistinguishable from a legitimate cold start (same ENOENT
-        # path), so this bypass also fires. The first lens dispatch
-        # then surfaces the auth failure with an actionable error.
-        # Acceptable trade-off; the alternative (active warm-up +
-        # re-probe) costs a Codex turn on every cold start.
-        #
-        # Any other not-ready shape (missing CLI, direct-mode failure,
-        # malformed payload) falls through to the AskUserQuestion
-        # prompt below.
+        # Shared-mode cold start reports ENOENT until the first task starts.
+        # Accept only that exact available-CLI shape; all others may fall
+        # through to a complete standalone transport.
         cx_mode=$(jq -r '.sessionRuntime.mode // ""' <<<"$codex_setup_json" 2>/dev/null)
         cx_cli=$(jq -r '.codex.available // false' <<<"$codex_setup_json" 2>/dev/null)
         cx_auth_detail=$(jq -r '.auth.detail // ""' <<<"$codex_setup_json" 2>/dev/null)
         if [[ "$cx_mode" == "shared" && "$cx_cli" == "true" \
               && "$cx_auth_detail" == *"ENOENT"*"broker.sock"* ]]; then
-            codex_available=true
-            printf '%s\n' "Phase 1 readiness: shared-mode cold-start broker ENOENT — bypassed (first lens warms the broker)" \
-                >> "$review_dir/trace.md"
-        else
-            codex_available=false
-            codex_reason="setup --json reported not-ready — run /codex:setup to diagnose"
+            codex_launch_mode="companion"
+            codex_readiness_note="shared-mode cold-start broker ENOENT bypassed (first lens warms the broker)"
         fi
+    fi
+fi
+
+# Companion absent or unusable: standalone requires both a quiet successful
+# auth probe and the dispatcher that owns its lifecycle.
+codex_cli_installed=false
+codex_cli_authenticated=false
+if [[ -z "$codex_launch_mode" ]] && command -v codex >/dev/null 2>&1; then
+    codex_cli_installed=true
+    if codex login status >/dev/null 2>&1; then
+        codex_cli_authenticated=true
+    fi
+fi
+if [[ "$codex_cli_authenticated" == "true" ]] \
+   && { [[ -n "${MRB:-}" && -x "${MRB}agent-dispatch.sh" ]] \
+        || command -v agent-dispatch.sh >/dev/null 2>&1; }; then
+    codex_launch_mode="agent-dispatch"
+    if [[ "${codex_requires_standalone:-false}" == "true" ]]; then
+        codex_readiness_note="max/ultra effort requires authenticated standalone Codex CLI"
+    elif [[ -z "$CODEX_COMPANION" ]]; then
+        codex_readiness_note="companion not found; using authenticated codex CLI via agent-dispatch.sh"
+    else
+        codex_readiness_note="companion not ready; using authenticated codex CLI via agent-dispatch.sh"
+    fi
+fi
+
+if [[ -n "$codex_launch_mode" ]]; then
+    codex_available=true
+    if [[ -n "$codex_readiness_note" ]]; then
+        printf '%s\n' "Phase 1 readiness: $codex_readiness_note" \
+            >> "$review_dir/trace.md"
+    fi
+else
+    codex_available=false
+    if [[ "$codex_cli_installed" == "true" \
+          && "$codex_cli_authenticated" != "true" ]]; then
+        codex_reason="standalone codex CLI is installed but 'codex login status' failed — run 'codex login' before retrying"
+    elif [[ "${codex_requires_standalone:-false}" == "true" ]]; then
+        codex_reason="resolved max/ultra effort requires authenticated standalone Codex CLI and agent-dispatch.sh"
+    elif [[ -z "$CODEX_COMPANION" ]]; then
+        codex_reason="companion script not found and authenticated standalone codex/agent-dispatch transport incomplete — run /codex:setup or install/login to Codex CLI"
+    else
+        codex_reason="companion setup reported not-ready and authenticated standalone codex/agent-dispatch transport incomplete — run /codex:setup to diagnose"
     fi
 fi
 ```
 
-**If Codex is available**, proceed silently. **If Codex is
-unavailable**, dispatch `AskUserQuestion` **once** with two options:
+**If Codex is available**, proceed silently with the negotiated
+`codex_launch_mode`: `companion` only for a ready companion or the exact
+shared-mode cold start, otherwise `agent-dispatch` for the complete
+standalone fallback. **If Codex is unavailable**, ASK **once** with two
+options:
 
 - **Proceed without Codex** — in PR mode, continue with the PR
   bot-comment scrape only; in local mode, this leaves Phase 1.5 with
@@ -227,7 +250,7 @@ gate ahead of dispatch.
 the dispatch turn at 1.3 is pure launches with no side effects:
 
 ```bash
-cat > "/tmp/adams-review-codex-$review_id.md" <<PROMPT
+cat > "/tmp/matthews-review-codex-$review_id.md" <<PROMPT
 Review this PR as a skeptical careful reader — the kind of reviewer who
 catches bugs a linter and the test suite miss. Range: the diff between
 $comparison_ref and HEAD, plus surrounding code you need to understand it.
@@ -307,7 +330,7 @@ consumed once at step 1.3 (L2's prompt). No artifact write here —
 suspects are prompt input, not findings.
 
 **Finally, capture `phase_1_5_start_epoch`** — AFTER the readiness-gate
-`AskUserQuestion` (from step 1.2a) may have run AND after the prior-fix
+ASK primitive (from step 1.2a) may have run AND after the prior-fix
 helper completes, so neither user-response wait time nor helper runtime
 is billed into Phase 1.5's elapsed:
 
@@ -329,40 +352,57 @@ dispatch turn and the two `elapsed_sec` values naturally overlap in
 `fragments/lens-prompts/L<N>.md` files plus
 `fragments/lens-prompts/_shared-invariants.md` first (these `Read`
 tool-uses can run in parallel within one orchestrator turn). Then
-issue EVERY applicable lens's `Agent` tool-use in a SINGLE
-orchestrator turn so they run concurrently — alongside the ensemble
-fan-out's background `Bash` call when `ensemble_mode == true` (see
-the "Ensemble fan-out" sub-section below). The per-lens sub-sections
-that follow are declarative spec data — the dispatch model, prompt
-body location, and substitution rules (`$prior_fix_suspects`,
-`$claude_md_paths`) for each lens; they are reference material, NOT
-seven serial action targets. The unambiguous action target is the
-"#### Dispatch turn" sub-section after L7. Treating each per-lens
-sub-section as its own dispatch turn defeats the parallelism this
-phase relies on: Phase 1 wall-clock latency goes from
-`max(lens_durations)` to `sum(lens_durations)`, and the ensemble
-fan-out's background CLI loses its overlap window with the lens
-dispatches.
+issue every applicable non-sharded lens plus the first L1 shard wave
+in a SINGLE batch (Prelude §3.4) so they run concurrently — alongside
+the ensemble fan-out's background `Bash` call when `ensemble_mode ==
+true` (see the "Ensemble fan-out" sub-section below). If L1 needs more
+than three shards, dispatch later L1 waves only after the preceding
+wave settles; each wave contains at most three shards. This is the
+sole exception to the single-turn rule and bounds concurrency without
+dropping coverage. The per-lens sub-sections that follow are
+declarative spec data — the dispatch model, prompt body location, and
+substitution rules (`$prior_fix_suspects`, `$claude_md_paths`) for each
+lens; they are reference material, NOT seven serial action targets.
+The unambiguous action target is the "#### Dispatch turn" sub-section
+after L7. Treating ordinary lenses as separate dispatch turns defeats
+the parallelism this phase relies on.
 
-#### L1 — diff-local scan (Sonnet)
+#### L1 — diff-local scan (role `light_lens`)
 
-> **Read L1–L7 before issuing any Agent tool-use.** The per-lens sub-sections
-> below are spec data (model, prompt body, substitutions). Issue every
-> applicable lens's `Agent` block in the single `#### Dispatch turn` at the
-> end of this section — one orchestrator turn, not seven. Phase 1 latency is
-> `max(lens_durations)`, not `sum(lens_durations)`.
+> **Read L1–L7 before issuing any Agent tool-use.** The per-lens
+> sub-sections below are spec data. Issue every applicable ordinary
+> lens and up to three L1 shards in the first `#### Dispatch turn`;
+> only additional L1 shard waves may require later turns.
 
-Dispatch spec: `model: sonnet`, `subagent_type: general-purpose`.
+Dispatch spec: role `light_lens` (default claude:sonnet), `subagent_type: general-purpose`.
+
+**Sharding (large diffs).** L1 reads the full diff inline and has
+twice hit the 30-minute sub-agent limit on multi-thousand-line PRs
+(killed once, resumed once at +348k tokens). When Phase 0's
+`lines_changed > 4000`, split `reviewed_files_all` into
+⌈lines_changed/4000⌉ balanced shards with a target of ≤4000 changed lines
+per shard where file boundaries allow. **Do not cap the total shard count**:
+that silently recreates oversized prompts above 12,000 lines. Bound
+runtime concurrency instead — dispatch shards in waves of at most 3,
+parallel within each wave, until every shard has run. A single file
+larger than the target is an indivisible oversized shard; record
+`phase_1_l1_oversized_file: path=<file> lines=<N>` in `trace.md`.
+Generate one per-shard diff (`git diff $comparison_ref -- <shard
+files>`) and give each L1 sub-agent only its subset's diff. Shard
+results merge at the Phase-1 join like any lens output; duplicates
+across shard boundaries are resolved by Phase 2 dedup.
 
 Prompt body: `fragments/lens-prompts/L1.md` (read in step 1.3's bulk
 pre-read; its content is the L1 prompt body verbatim). Final prompt =
-shared invariants (from step 1.2.1) + lens body.
+shared invariants (from step 1.2.1) + lens body. When sharded, append
+to the prompt: "You are reviewing shard N of M — only the files in
+the diff below; other shards cover the rest of the PR."
 
-#### L2 — structural / blast-radius (Opus; skipped if `trivial_mode`)
+#### L2 — structural / blast-radius (role `deep_lens`; skipped if `trivial_mode`)
 
 > **Spec data — issue this lens's `Agent` block in the single `#### Dispatch turn` at the end of §1.3, not here.**
 
-Dispatch spec: `model: opus`, `subagent_type: general-purpose`. The
+Dispatch spec: role `deep_lens` (default claude:opus), `subagent_type: general-purpose`. The
 sub-agent inherits the parent command's `Read` + `Bash(git:*)` +
 `Bash(grep:*)` grants (this already covers it).
 
@@ -374,11 +414,11 @@ substitution: `$prior_fix_suspects` → the JSON array captured at step
 1.2b. Final prompt = shared invariants (from step 1.2.1) + lens body
 (with substitution applied).
 
-#### L3 — CLAUDE.md compliance (Sonnet)
+#### L3 — CLAUDE.md compliance (role `light_lens`)
 
 > **Spec data — issue this lens's `Agent` block in the single `#### Dispatch turn` at the end of §1.3, not here.**
 
-Dispatch spec: `model: sonnet`.
+Dispatch spec: role `light_lens` (default claude:sonnet).
 
 Prompt body: `fragments/lens-prompts/L3.md` (read in step 1.3's bulk
 pre-read; its content is the L3 prompt body verbatim). Per-lens
@@ -386,11 +426,11 @@ substitution: `$claude_md_paths` → the newline-joined list from Phase
 0 step 0.7. Final prompt = shared invariants (from step 1.2.1) + lens
 body (with substitution applied).
 
-#### L4 — comment compliance (Sonnet)
+#### L4 — comment compliance (role `light_lens`)
 
 > **Spec data — issue this lens's `Agent` block in the single `#### Dispatch turn` at the end of §1.3, not here.**
 
-Dispatch spec: `model: sonnet`.
+Dispatch spec: role `light_lens` (default claude:sonnet).
 
 L4 additionally reads the current content of every modified file.
 
@@ -398,11 +438,11 @@ Prompt body: `fragments/lens-prompts/L4.md` (read in step 1.3's bulk
 pre-read; its content is the L4 prompt body verbatim). Final prompt =
 shared invariants (from step 1.2.1) + lens body.
 
-#### L5 — UX (Sonnet; skipped if `trivial_mode` or `user_facing == false`)
+#### L5 — UX (role `light_lens`; skipped if `trivial_mode` or `user_facing == false`)
 
 > **Spec data — issue this lens's `Agent` block in the single `#### Dispatch turn` at the end of §1.3, not here.**
 
-Dispatch spec: `model: sonnet`.
+Dispatch spec: role `light_lens` (default claude:sonnet).
 
 Prompt body: `fragments/lens-prompts/L5.md` (read in step 1.3's bulk
 pre-read; its content is the L5 prompt body verbatim — the canonical
@@ -411,11 +451,11 @@ for now to avoid scope creep). Per-lens substitution: `$claude_md_paths`
 → the newline-joined list from Phase 0 step 0.7. Final prompt = shared
 invariants (from step 1.2.1) + lens body (with substitution applied).
 
-#### L6 — lightweight security (Sonnet; skipped if `trivial_mode`)
+#### L6 — lightweight security (role `light_lens`; skipped if `trivial_mode`)
 
 > **Spec data — issue this lens's `Agent` block in the single `#### Dispatch turn` at the end of §1.3, not here.**
 
-Dispatch spec: `model: sonnet`.
+Dispatch spec: role `light_lens` (default claude:sonnet).
 
 Prompt body: `fragments/lens-prompts/L6.md` (read in step 1.3's bulk
 pre-read; its content is the L6 prompt body verbatim — the canonical
@@ -427,7 +467,7 @@ invariants (from step 1.2.1) + lens body.
 
 > **Spec data — issue this lens's `Agent` block in the single `#### Dispatch turn` at the end of §1.3, not here.**
 
-Dispatch spec: `model: opus`, `subagent_type: general-purpose`.
+Dispatch spec: role `deep_lens` (default claude:opus), `subagent_type: general-purpose`.
 Inherits the parent command's Read + Bash(git:*) + Bash(grep:*) grants —
 same permissions as L2.
 
@@ -467,39 +507,41 @@ values naturally overlap in `phases.jsonl`, and
 `--argjson accum "$internal_candidates"` appends require.
 
 **Dispatch.** With every applicable lens's spec assembled (L1–L7
-sub-sections above), issue every applicable lens's `Agent` tool-use
+sub-sections above), issue every applicable lens's DISPATCH
 in a SINGLE orchestrator turn. The per-lens sub-sections are
 reference data — a parameter sweep, not a turn sweep. Phase 1
 wall-clock latency is `max(lens_durations)`, not `sum(lens_durations)`.
 
-Under `ensemble_mode == true`, the Ensemble fan-out's background
-`Bash` call (next sub-section) launches in this same turn — see the
-"Total tool-use blocks" table below for the exact count by mode.
-
 #### Ensemble fan-out (same turn, when `ensemble_mode == true`)
 
-When `ensemble_mode=true`, the dispatch turn also launches the
-external Codex CLI reviewer. It runs as a tool-use block in the same
-orchestrator turn as the lens `Agent` dispatches above — waiting a
-turn between them serializes what's meant to be parallel. The PR
-comment scrape is NOT in this turn; it's deferred to §1.5.4 in
-`02-ensemble-adapter.md` so third-party PR-comment bots have time
-to land their posts during the CLI window.
+Under `ensemble_mode == true`, the Ensemble fan-out's external-reviewer
+tool-use also launches in this same turn. The transport selected in step 1.2a
+changes how that one block is issued:
+
+- `companion` is a background Bash call; capture its returned shell id.
+- `agent-dispatch` is a short foreground Bash call that starts the detached
+  job and returns JSON immediately. Issue it in the same turn as the lens
+  Agent calls, but do **not** wrap it in another background shell: its
+  `job_id` must be captured into orchestrator working context for Phase 1.5.
+
+Waiting a turn before either launch serializes work that is meant to overlap.
+The PR comment scrape is NOT in this turn; it is deferred to §1.5.4 in
+`02-ensemble-adapter.md` so third-party PR-comment bots have time to land
+their posts during the CLI window.
 
 Total tool-use blocks in the dispatch turn:
 
 | Condition | Blocks |
 |---|---|
 | `ensemble_mode=false` | applicable lenses (6 max — L1..L6; L7 is ensemble-gated) |
-| `ensemble_mode=true`, Codex available | lenses (up to 7, including L7) + 1 background Bash |
+| `ensemble_mode=true`, Codex available | lenses (up to 7, including L7) + 1 Codex launch Bash block |
 | `ensemble_mode=true`, Codex unavailable | lenses (up to 7) |
 
-The ensemble launch spec lives in `02-ensemble-adapter.md`:
-
-- **Codex** (background Bash) — see `02-ensemble-adapter.md` step
-  1.5.2. Skip if `codex_available=false`. The prompt file was already
-  written in step 1.2a; the launch block just invokes `node
-  "$CODEX_COMPANION" task …`. Capture `codex_shell_id`.
+The exact transport launch specs live in `02-ensemble-adapter.md` step 1.5.2.
+After the launch tool result arrives, record its identifiers in orchestrator
+working context as instructed there (`codex_shell_id` for companion or
+`codex_job_id` for standalone). Shell-local assignments do not survive into
+Phase 1.5.
 
 Under `ensemble_mode=false`, this launch doesn't happen; the
 02-ensemble-adapter fragment's top-level skip note fires when
@@ -515,6 +557,15 @@ along with `phase_1_start_epoch`) and are committed at the join step
 1.5.
 
 For each sub-agent result, in the order it returns:
+
+0. **Dispatch failure handling.** If a lens's DISPATCH itself fails
+   (tool error, non-zero exit, engine 404/429, no result at all —
+   distinct from a returned-but-unparseable result), append
+   `lens_dropped_dispatch_failed: lens=<lens-tag> error=<one-line>` to
+   `$trace_log_path` and move on to the next lens. The lens contributes
+   zero candidates this run. Step 1.6 counts the tag into
+   `lens_dispatch_failures` (structured `phases.jsonl` field — Phase
+   6.4b reads it to mark the run degraded).
 
 1. **Log tokens first** (§24.4 — "cost accounted even for failed agents").
    Parse the sub-agent's `<usage>total_tokens: N</usage>` block. If the
@@ -626,15 +677,13 @@ For each sub-agent result, in the order it returns:
    artifact writes. If the orchestrator loses context mid-collection,
    Phase 1 has to re-run from dispatch.
 
-   A common lens failure is `line_range: null` instead of `[N, N]`.
-   Default to `[1, 1]` with a one-line `trace.md` note at collection
-   time so the join step's jq builder doesn't blow up on a schema-
-   invalid pool entry:
-
-   ```bash
-   tagged=$(echo "$tagged" \
-     | jq '[.[] | .line_range //= [1,1]]')
-   ```
+   `line_range: null` means the lens found a concrete issue but could
+   not establish a trustworthy source line. Preserve that uncertainty:
+   schema v1 accepts a nullable range, the validators can relocate the
+   claim from `file + claim`, and the renderer omits a line citation.
+   **Never coerce a missing range to `[1,1]`** — line 1 is a real
+   location and would turn uncertainty into fabricated evidence. Step
+   1.5's full-finding builder materializes an absent key as JSON null.
 
 ### 1.5. Join + assign IDs + batched add-findings (§13.12)
 
@@ -798,6 +847,7 @@ build_result=$(printf '%s' "$ided" | jq -c --argjson trivial "$trivial_mode" '
         is_actionable: false,
         reason: null,
         confirmed_strength: null,
+        line_range: ($cand.line_range // null),
         score_phase3: null,
         score_phase4: null,
         score_history: [],
@@ -949,17 +999,28 @@ add_findings_rejected=$(grep -c '^add-findings-rejected:' "$trace_log_path" 2>/d
 jq_builder_count_drops=$(grep -c '^phase_1_jq_builder_count_drop:' "$trace_log_path" 2>/dev/null || true)
 add_findings_total_failures=$(grep -c '^phase_1_add_findings_total_failure:' "$trace_log_path" 2>/dev/null || true)
 
+lens_dispatch_failures=$(grep -c '^lens_dropped_dispatch_failed:' "$trace_log_path" 2>/dev/null || true)
+candidate_drop_failures=$((lens_drops + add_findings_rejected \
+  + jq_builder_count_drops + add_findings_total_failures))
+
 log-phase.sh \
   --review-dir "$review_dir" --phase 1 --name detection \
   --elapsed "$phase_1_elapsed" \
-  --summary "total=$total_candidates; counts_by_family=$counts_by_family; skipped_lenses=<list-if-any>; lens_drops=$lens_drops; origin_crosscheck_skipped=$oc_skipped; add_findings_rejected=$add_findings_rejected; jq_builder_count_drops=$jq_builder_count_drops; add_findings_total_failures=$add_findings_total_failures"
+  --summary "total=$total_candidates; counts_by_family=$counts_by_family; skipped_lenses=<list-if-any>; lens_drops=$lens_drops; lens_dispatch_failures=$lens_dispatch_failures; origin_crosscheck_skipped=$oc_skipped; add_findings_rejected=$add_findings_rejected; jq_builder_count_drops=$jq_builder_count_drops; add_findings_total_failures=$add_findings_total_failures; candidate_drop_failures=$candidate_drop_failures"
 
 log-phase.sh \
   --review-dir "$review_dir" --phase 1 --record "$(jq -nc \
     --arg name detection \
     --argjson elapsed "$phase_1_elapsed" \
     --argjson total "$total_candidates" \
-    '{name:$name, elapsed_sec:$elapsed, counts_by_state:{open:$total}, counts_by_disposition:{pending_validation:$total}, delta:"+\($total) open"}')"
+    --argjson lens_dispatch_failures "$lens_dispatch_failures" \
+    --argjson candidate_drop_failures "$candidate_drop_failures" \
+    '{name:$name, elapsed_sec:$elapsed,
+      counts_by_state:{open:$total},
+      counts_by_disposition:{pending_validation:$total},
+      delta:"+\($total) open",
+      lens_dispatch_failures:$lens_dispatch_failures,
+      candidate_drop_failures:$candidate_drop_failures}')"
 ```
 
 Under `--ensemble`, `phase_1_elapsed` and Phase 1.5's elapsed will overlap — both phases share a dispatch-turn start boundary; the overlap is the intended observability signal.

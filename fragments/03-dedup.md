@@ -1,6 +1,6 @@
 ## Phase 2 — Dedup (LLM-only)
 
-A single Sonnet sub-agent groups near-duplicate candidates so one
+A single sub-agent using the resolved `dedup` role groups near-duplicate candidates so one
 underlying issue doesn't surface as multiple findings downstream.
 No structural fingerprinting — one LLM pass, pennies of cost.
 
@@ -26,7 +26,8 @@ Phase 2 entirely — log "Phase 2 skipped (no candidates)" to `trace.md`.
 
 ### 2.2. Dispatch the Sonnet dedup sub-agent
 
-Launch one `Agent` tool-use with `model: sonnet`. Prompt essence:
+Launch one sub-agent with role `dedup` (default claude:sonnet).
+Prompt essence:
 
 > Group these candidate findings into sets where each set represents the
 > same underlying issue described in different language.
@@ -60,7 +61,7 @@ log-tokens.sh \
   --phase phase_2 \
   --agent-role dedup \
   --agent-id "$dedup_agent_id" \
-  --model sonnet \
+  --model "$role_dedup" \
   --tokens "$dedup_tokens_or_null"
 ```
 

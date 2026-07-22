@@ -6,7 +6,7 @@ user-facing-change classifier (step 0.9), and that's skipped in trivial mode.
 **Run every Bash command in this phase in the foreground — do NOT use
 `run_in_background`.** Phase 0's output (branch detection, dirty-tree
 status, freshness prompts) is consumed inline by later steps and by
-`AskUserQuestion` dispatches; backgrounded shells leave the orchestrator
+ASK dispatches; backgrounded shells leave the orchestrator
 unable to read the output and the session stalls on a variable that
 never gets assigned.
 
@@ -21,15 +21,15 @@ and `force_full=true/false` in your context.
 
 If the top-level command already parsed top-level-only flags into your
 working context BEFORE invoking this fragment (e.g., `effort` from
-`/adamsreview:codex-review --effort high`), trust those values and
+`/matthewsreview:codex-review --effort high`), trust those values and
 ignore the corresponding tokens in `$ARGUMENTS`. Recognized
 top-level-only flags whose value tokens this step skips silently
 **only when the upstream parser actually owns the flag** (i.e., the
 corresponding working-context value is set):
 
-- `--effort <value>` — owned by `/adamsreview:codex-review`'s argument
+- `--effort <value>` — owned by `/matthewsreview:codex-review`'s argument
   handler. Skip the flag and its value token only when working-context
-  `effort` is set. If `effort` is unset (e.g., `/adamsreview:review
+  `effort` is set. If `effort` is unset (e.g., `/matthewsreview:review
   --effort high` — `:review` has no `--effort` parser), `--effort` is
   an unexpected token and falls through to the clarify path below.
   Working-context `effort` being set is the proof that an upstream
@@ -67,7 +67,7 @@ Capture `base_branch`.
 
 Phase-0 invariant preventing stale-local-`base_branch` runs from poisoning
 downstream lenses / blame. `freshness-gate.sh` owns remote detect, fetch,
-and behind-count; orchestrator owns `AskUserQuestion`.
+and behind-count; orchestrator owns the ASK primitive.
 
 ```bash
 # Initialize preflight_warnings ONCE — prior-call warnings must survive
@@ -214,7 +214,7 @@ else
 fi
 ```
 
-If `$behind > 0`, `AskUserQuestion` once:
+If `$behind > 0`, ASK once:
 
 > Branch `$head_branch` is `$behind` commits behind `$comparison_ref`
 > (the diff base for this review). The lens diff includes phantom
@@ -223,7 +223,7 @@ If `$behind > 0`, `AskUserQuestion` once:
 > merging `$comparison_ref` into `$head_branch` first — this updates
 > your feature branch tip, separate from any earlier diff-base choice.
 
-- **(a) Stop — I'll merge `$comparison_ref` into `$head_branch` first, then re-run.** Exit 0 with: `Stopping. Run \`git merge $comparison_ref\` (or fast-forward) on \`$head_branch\`, then re-run /adamsreview:review.` (No `review_dir` exists yet — nothing to clean up.)
+- **(a) Stop — I'll merge `$comparison_ref` into `$head_branch` first, then re-run.** Exit 0 with: `Stopping. Run \`git merge $comparison_ref\` (or fast-forward) on \`$head_branch\`, then re-run /matthewsreview:review.` (No `review_dir` exists yet — nothing to clean up.)
 - **(b) Proceed.** Append a buffered warning and continue:
   ```bash
   preflight_warnings+=("branch_behind_base proceeded behind=$behind comparison_ref=$comparison_ref")
@@ -249,10 +249,10 @@ repos have no CLAUDE.md).
 
 Run `git status --porcelain`. If output is non-empty, briefly list what's
 uncommitted (filenames only, categorized as Modified / Staged / Untracked —
-do NOT dump the diff). Then use `AskUserQuestion` once with three options:
+do NOT dump the diff). Then ASK once with three options:
 
 - **Stash my changes, run review, restore** (recommended). Run
-  `git stash push -u -m "pre-adams-review-stash"` now; at end of Phase 6,
+  `git stash push -u -m "pre-matthews-review-stash"` now; at end of Phase 6,
   run `git stash pop`. Capture `stash_taken=true` so Phase 6 knows to pop.
 - **Include uncommitted changes in the review** — the review will include
   whatever's in the tree as-is; no stash. In PR mode this is rarely what
@@ -307,13 +307,110 @@ trivial_mode=$(printf '%s' "$tc_json" | jq -r '.trivial_mode')
 trivial_reason=$(printf '%s' "$tc_json" | jq -r '.reason')
 ```
 
+### 0.11b. Resolve the model plan
+
+Resolve which model runs which pipeline role before the first
+classifier dispatch. This runs even when everything is defaults — the
+printed table is the audit trail and every dispatch reads its role from
+this plan.
+
+```bash
+plan_args=(--repo-root "$repo_root" --orchestrator "$harness_id" \
+  --repo-config-ref "$comparison_ref")
+[[ -n "${profile:-}" ]] && plan_args+=(--profile "$profile")
+[[ -n "${models_csv:-}" ]] && plan_args+=(--models "$models_csv")
+model_plan_json=$(review-config.sh "${plan_args[@]}") || exit $?
+
+# :codex-review only — an explicitly supplied CLI --effort beats config
+# for all three Codex roles, and its provenance must travel with the value.
+if [[ "${reviewer_sources_label:-}" == "internal-codex" \
+      && "${effort_explicit:-false}" == "true" ]]; then
+    model_plan_json=$(printf '%s\n' "$model_plan_json" | jq --arg e "$effort" '
+      def apply_cli_effort:
+        .effort = $e
+        | .source = (.source + " + cli(--effort)");
+      .roles.codex_detect |= apply_cli_effort
+      | .roles.codex_validate |= apply_cli_effort
+      | .roles.codex_crosscut |= apply_cli_effort
+    ') || exit $?
+fi
+
+# Materialize every role now; the classifier below is the first consumer.
+for role_name in \
+    deep_lens deep_validate cross_cutting fix post_fix_review reconcile \
+    light_lens light_validate classifier normalizer dedup scoring fix_hint \
+    briefer drafter ensemble_detect codex_detect codex_validate codex_crosscut
+do
+    role_value=$(printf '%s' "$model_plan_json" | jq -r --arg r "$role_name" \
+      '.roles[$r] | "\(.engine):\(.model)\(if .effort then ":" + .effort else "" end)"')
+    printf -v "role_${role_name}" '%s' "$role_value"
+done
+```
+
+```bash
+# codex-companion 1.0.4 accepts effort through xhigh; standalone Codex
+# also accepts max/ultra. Select transport by the roles this command uses.
+if [[ "${reviewer_sources_label:-}" == "internal-codex" ]]; then
+    codex_requires_standalone=$(printf '%s' "$model_plan_json" | jq -r '
+      [.roles.codex_detect.effort, .roles.codex_validate.effort,
+       .roles.codex_crosscut.effort]
+      | any(. == "max" or . == "ultra")')
+else
+    codex_requires_standalone=$(printf '%s' "$model_plan_json" | jq -r '
+      [.roles.ensemble_detect.effort]
+      | any(. == "max" or . == "ultra")')
+fi
+
+# :codex-review chose a transport before Phase 0. Negotiate it now that
+# role efforts are known.
+if [[ "${reviewer_sources_label:-}" == "internal-codex" \
+      && "$codex_requires_standalone" == "true" \
+      && "${codex_launch_mode:-}" == "companion" ]]; then
+    if command -v codex >/dev/null 2>&1 \
+       && codex login status >/dev/null 2>&1 \
+       && { [[ -n "${MRB:-}" && -x "${MRB}agent-dispatch.sh" ]] \
+            || command -v agent-dispatch.sh >/dev/null 2>&1; }; then
+        codex_launch_mode="agent-dispatch"
+        codex_readiness_note="max/ultra effort requires authenticated standalone Codex CLI"
+    else
+        echo "ERROR: resolved max/ultra effort is unsupported by codex-companion and no authenticated standalone Codex transport is ready." >&2
+        echo "Action: install agent-dispatch.sh, run 'codex login', lower the affected role effort to xhigh, or pass --effort xhigh." >&2
+        exit 1
+    fi
+fi
+```
+
+`$harness_id` is the Dispatch Protocol identity from
+`_prelude-shared.md` (`claude-code` on Claude Code, `omp` on Oh My Pi,
+`codex` on Codex).
+
+On non-zero exit from `review-config.sh` the stderr is error-as-prompt.
+Surface it verbatim and stop — a wrong model plan is worse than no
+review.
+
+Render the Model plan table for the user (also echo any `warnings[]`
+entries below it):
+
+```bash
+printf '%s' "$model_plan_json" | jq -r '
+  "| Role | Engine | Model | Effort | Source |",
+  "|---|---|---|---|---|",
+  (.roles | to_entries[]
+   | "| \(.key) | \(.value.engine) | \(.value.model | if . == "" then "(cli default)" else . end) | \(.value.effort // "—") | \(.value.source) |"),
+  (.warnings[]? | "warning: \(.)")'
+gates_json=$(printf '%s' "$model_plan_json" | jq -c '.gates')
+```
+
+Capture `model_plan_json` and `gates_json` in working context. Step
+0.15b persists them after the artifact exists.
+
 ### 0.12. User-facing-change classifier (Sonnet — skipped in trivial mode)
 
 If `trivial_mode == true`, set `user_facing=false` and skip this step
 (L5 is already off in trivial mode; Phase 1's L5 gating will also
 re-check `trivial_mode`).
 
-Otherwise, launch a Sonnet sub-agent with this input:
+Otherwise, launch a sub-agent (role `classifier`, default claude:sonnet) with this input:
 
 ```
 Diff files (with short descriptions of each file's apparent type):
@@ -329,23 +426,11 @@ i18n files. Return false for pure backend logic, build tooling,
 internal utilities, config.
 ```
 
-Dispatch with the `Agent` tool, `model: sonnet`. After the sub-agent returns,
-parse `user_facing` + `surfaces`. Then log tokens (every required arg is
-explicit here to match the helper's argparse — don't infer):
-
-```bash
-log-tokens.sh \
-  --review-dir "$review_dir" \
-  --phase phase_0 \
-  --agent-role user_facing_classifier \
-  --agent-id "$classifier_agent_id" \
-  --model sonnet \
-  --tokens "$classifier_tokens_or_null"
-```
-
-Where `$classifier_agent_id` is the id in the Agent tool result and
-`$classifier_tokens_or_null` is either the parsed token count or the literal
-word `null` on parse failure.
+Dispatch with the already-resolved `classifier` role. After the
+sub-agent returns, parse `user_facing` + `surfaces`. Capture
+`classifier_agent_id` and `classifier_tokens_or_null` in working
+context; step 0.15c logs them after `review_dir` exists. The token value
+is either the parsed count or the literal word `null` on parse failure.
 
 If JSON parsing of the classifier result fails after one retry, default
 `user_facing=true` (fail-safe — better to run L5 unnecessarily than skip
@@ -353,19 +438,20 @@ a real UX finding).
 
 ### 0.13. Prior-artifact detection
 
-Resolve the reviews root: `$ADAMS_REVIEW_REVIEWS_ROOT` if set, else
-`~/.adams-reviews`. Build the path:
-`<reviews_root>/<repo_slug>/<head_branch>/latest.txt`.
+Resolve `reviews_root=$(review-root.sh)`. The helper honors the new
+environment variable, the legacy environment variable, the existing
+canonical directory, then the legacy directory with a migration warning.
+Build `<reviews_root>/<repo_slug>/<head_branch>/latest.txt`.
 
 If the file exists and is non-empty, read its contents as
 `prior_review_id`. Read `<reviews_root>/<repo_slug>/<head_branch>/<prior_review_id>/artifact.json`
 and determine the prior state:
 
-| Condition | AskUserQuestion prompt |
+| Condition | ASK prompt |
 |---|---|
 | `prior.reviewed_sha == reviewed_sha` AND no `fix_attempts` on any finding | "You have a review for this exact commit from `<date>`. Re-run fresh, or abort?" |
 | `prior.reviewed_sha == reviewed_sha` AND some finding has a `fix_attempts[-1]` whose `output_sha` matches `HEAD` | "You have a review that was already fixed at this commit. Re-run fresh, or abort?" |
-| Any finding has `current_state=open` AND `is_actionable=true` | "Previous review has unresolved actionable findings. Options: (a) run `/adamsreview:fix` first, (b) proceed with fresh review, (c) abort." |
+| Any finding has `current_state=open` AND `is_actionable=true` | "Previous review has unresolved actionable findings. Options: (a) run `/matthewsreview:fix` first, (b) proceed with fresh review, (c) abort." |
 | Otherwise (prior exists but HEAD has moved beyond any known sha) | "Prior review at `<prior.reviewed_sha>`. Current HEAD is `<reviewed_sha>`. Proceed with fresh review?" |
 
 A "fresh review" supersedes the prior local artifact (new `review_id`,
@@ -389,13 +475,18 @@ If `mode=pr` AND step 0.13 found no prior local artifact, run:
 
 ```bash
 gh api --paginate "repos/$(gh repo view --json nameWithOwner -q .nameWithOwner)/issues/$pr_number/comments" \
-  | jq -r --arg user "$(gh api user -q .login)" \
-         --arg marker "<!-- adams-review-v1 -->" \
-      '[.[] | select(.user.login == $user) | select(.body | contains($marker))]
-       | last // empty | .id'
+  | jq -sr --arg user "$(gh api user -q .login)" \
+          --arg current_marker "<!-- matthews-review-v1 -->" \
+          --arg legacy_marker "<!-- adams-review-v1 -->" '
+      [.[][] | select(.user.login == $user)
+       | select(.body as $body
+                | ($body | contains($current_marker))
+                  or ($body | contains($legacy_marker)))]
+      | (max_by(.id) // empty)
+      | .id'
 ```
 
-If a comment id is returned, run `AskUserQuestion` with three choices:
+If a comment id is returned, run ASK with three choices:
 
 - **(a) Post a new comment alongside the existing one** (default). The
   prior comment stays on the PR untouched; this run's rendered artifact
@@ -406,7 +497,7 @@ If a comment id is returned, run `AskUserQuestion` with three choices:
   and want the single canonical review comment updated.
 - **(c) Abort** and recover the prior artifact first.
 
-Suggested prompt: "A prior `/adamsreview:review` comment exists on this PR
+Suggested prompt: "A prior `/matthewsreview:review` comment exists on this PR
 (`<comment_url>`) but no local artifact was found. (a) post a new
 comment (prior stays), (b) replace the prior comment in place, (c)
 abort to recover the prior artifact first."
@@ -414,6 +505,12 @@ abort to recover the prior artifact first."
 Only option (b) sets `existing_comment_id`. The publisher has no
 auto-discovery fallback (§13.4), so any run that reaches Phase 6
 without `existing_comment_id` posts a fresh comment.
+
+### 0.14b. Model-plan checkpoint
+
+The model plan was resolved at step 0.11b, before the classifier
+dispatch. Do not resolve or override it again here. Retain
+`model_plan_json` and `gates_json` for step 0.15b.
 
 ### 0.15. Create the review directory and initialize the artifact
 
@@ -437,7 +534,7 @@ Capture as `review_id`.
 Build the artifact directory:
 
 ```bash
-reviews_root="${ADAMS_REVIEW_REVIEWS_ROOT:-$HOME/.adams-reviews}"
+reviews_root=$(review-root.sh)
 review_dir="$reviews_root/$repo_slug/$head_branch/$review_id"
 mkdir -p "$review_dir"
 artifact_path="$review_dir/artifact.json"
@@ -499,6 +596,58 @@ after retry, escalate to the user with the stderr content AND delete the
 empty `review_dir` you created (`rm -rf -- "$review_dir"`). Leaving it
 behind makes step 0.13 on the next run think a prior review exists when
 none does. Do NOT write `latest.txt` (step 0.16) on this failure path.
+
+### 0.15b. Store the model plan in the artifact
+
+After step 0.15's `--init` succeeds (and before step 0.16), persist the
+model plan + gates so fragments and later lifecycle commands read them
+from the artifact rather than re-deriving:
+
+```bash
+plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX) || exit $?
+plan_write_rc=0
+printf '%s\n' "$model_plan_json" > "$plan_tmp" || plan_write_rc=$?
+if [[ "$plan_write_rc" -ne 0 ]]; then
+    rm -f "$plan_tmp" 2>/dev/null || true
+    exit "$plan_write_rc"
+fi
+
+plan_patch_rc=0
+artifact-patch.py --path "$artifact_path" \
+  --set-json model_plan=@"$plan_tmp" \
+  --set-json gates="$gates_json" \
+  || plan_patch_rc=$?
+
+plan_cleanup_rc=0
+rm -f "$plan_tmp" || plan_cleanup_rc=$?
+if [[ "$plan_patch_rc" -ne 0 ]]; then
+    exit "$plan_patch_rc"
+fi
+if [[ "$plan_cleanup_rc" -ne 0 ]]; then
+    exit "$plan_cleanup_rc"
+fi
+
+```
+
+On non-zero exit: error-as-prompt (schema rejected the shape) — parse,
+fix the config value it names, retry once, escalate on second failure.
+
+### 0.15c. Log deferred classifier tokens
+
+If step 0.12 ran, log its captured usage now that `review_dir` exists:
+
+```bash
+if [[ "$trivial_mode" != "true" ]]; then
+    log-tokens.sh \
+      --review-dir "$review_dir" \
+      --phase phase_0 \
+      --agent-role user_facing_classifier \
+      --agent-id "$classifier_agent_id" \
+      --model "$role_classifier" \
+      --tokens "$classifier_tokens_or_null"
+fi
+```
+
 
 ### 0.16. Update `latest.txt` (atomic) — only after --init succeeds
 

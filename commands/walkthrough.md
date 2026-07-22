@@ -1,12 +1,12 @@
 ---
-allowed-tools: Bash(artifact-read.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(repo-slug.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(cat:*), Bash(printf:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(tr:*), Bash(awk:*), Bash(mktemp:*), Agent, Read, AskUserQuestion
-argument-hint: "[threshold]"
-description: Walk interactively through findings /adamsreview:fix would skip, above a score floor. Per-finding briefing + options + recommendation, then batch re-render/re-publish and post a decisions-log PR comment.
+allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(review-root.sh:*), Bash(doctor.sh:*), Bash(agent-dispatch.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(repo-slug.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(cat:*), Bash(printf:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(tr:*), Bash(awk:*), Bash(mktemp:*), Agent, Read, AskUserQuestion
+argument-hint: "[threshold] [--profile <name>] [--models \"<csv>\"]"
+description: Walk interactively through findings /matthewsreview:fix would skip, above a score floor. Per-finding briefing + options + recommendation, then batch re-render/re-publish and post a decisions-log PR comment.
 disable-model-invocation: false
 ---
 
-Walk the reviewer through findings in the latest `/adamsreview:review`
-artifact that `/adamsreview:fix` would **skip** — deep-manual,
+Walk the reviewer through findings in the latest `/matthewsreview:review`
+artifact that `/matthewsreview:fix` would **skip** — deep-manual,
 deep-report, light-manual, light-report, and light-auto that fails
 the impact_type lane filter — further restricted to findings scoring
 **at or above `$threshold`** so low-signal items don't pad the
@@ -23,12 +23,16 @@ helper-script error-as-prompt).**
 
 ## Arguments
 
-- `[threshold]` (optional, positional) — non-negative integer score
-  floor. Default: 60. Findings with effective score
-  (`COALESCE(score_phase4, score_phase3, -1)`) below this value are
-  dropped from the walk scope so the session isn't padded with
-  low-signal findings. Independent of the `/adamsreview:fix`
-  threshold — promoted findings are picked up by `/adamsreview:fix`
+- `--profile <name>` / `--models "<csv>"` (optional) — model-plan
+  overrides, resolved fresh at step 2b. Same semantics as `:review`.
+- `[threshold]` (optional, positional) — finite JSON number score floor
+  in the inclusive range `[0, 100]`. Decimals are preserved without
+  rounding. Default: the resolved operational
+  `gates.walkthrough_threshold` (60 unless configured). Findings with
+  effective score (`COALESCE(score_phase4, score_phase3, -1)`) below
+  this value are dropped from the walk scope so the session is not padded
+  with low-signal findings. Independent of the `/matthewsreview:fix`
+  threshold — promoted findings are picked up by `/matthewsreview:fix`
   regardless of the score gate via the `human_confirmation` bypass.
 
 ## What it does
@@ -64,8 +68,8 @@ helper-script error-as-prompt).**
 10. Appends a `## walkthrough (<ts>)` block to `trace.md`.
 11. Prints a user-visible summary.
 
-Does NOT run `/adamsreview:fix`. Does NOT surface `disposition=disproven`
-findings (those require an explicit `/adamsreview:promote <id> --force`).
+Does NOT run `/matthewsreview:fix`. Does NOT surface `disposition=disproven`
+findings (those require an explicit `/matthewsreview:promote <id> --force`).
 
 ## Execution
 
@@ -75,20 +79,40 @@ headings.
 
 ### 1. Parse arguments
 
-Parse `$ARGUMENTS` (whitespace-split):
+Parse `$ARGUMENTS` left-to-right before any artifact lookup,
+`review-config.sh` call, or git/tree work:
 
-- First token that parses as a non-negative integer → `threshold`.
-- Any other token → stop and ask the user to clarify.
+- `--profile <name>` → `profile`; `--models "<csv>"` → `models_csv`.
+  Each flag consumes the next non-empty token.
+- Accept at most one positional threshold token. Validate the complete
+  original token as a finite JSON number in the inclusive range `[0, 100]`:
 
-If no integer was provided, `threshold=60` (matches the
-`/adamsreview:fix` default and the Phase 4 moderate-confirmation
-breakpoint, so the walkthrough shows what a reviewer at standard
-confidence would want to see). Record in your working context.
+  ```bash
+  jq -en --arg token "$token" '
+    ($token | fromjson) as $n
+    | (($n | type) == "number"
+       and (($n - $n) == 0)
+       and $n >= 0
+       and $n <= 100)
+  ' >/dev/null 2>&1
+  ```
+
+  Keep the original token as `threshold`; do not coerce it to an integer or
+  round it, so decimal thresholds retain their value. A second positional
+  token is a duplicate-threshold usage error.
+- Reject a repeated flag, a missing/empty flag value, an unknown option, an
+  unconsumed token, a non-number, a non-finite number, or a number outside
+  `[0, 100]` with a usage error naming the valid invocation.
+
+Do not continue past parsing on any error. If no threshold was provided,
+step 2b sets it from the freshly resolved operational
+`gates.walkthrough_threshold` (default 60). Capture `profile`, `models_csv`,
+and `threshold` in working context.
 
 ### 2. Locate the artifact
 
 ```bash
-reviews_root="${ADAMS_REVIEW_REVIEWS_ROOT:-$HOME/.adams-reviews}"
+reviews_root=$(review-root.sh)
 head_branch=$(git rev-parse --abbrev-ref HEAD)
 repo_root=$(git rev-parse --show-toplevel)
 repo_slug=$(repo-slug.sh --repo-root "$repo_root")
@@ -99,7 +123,7 @@ If `latest.txt` is missing or empty, error-as-prompt:
 
 > ERROR: no review found for branch `$head_branch` under
 > `$reviews_root/$repo_slug/`.
-> Action: run /adamsreview:review against this branch first.
+> Action: run /matthewsreview:review against this branch first.
 
 Otherwise:
 
@@ -110,13 +134,110 @@ artifact_path="$review_dir/artifact.json"
 trace_log_path="$review_dir/trace.md"
 ```
 
-Capture paths. Schema-validate:
+### 2a. Validate the artifact before config resolution
 
 ```bash
 artifact-validate.sh --path "$artifact_path"
 ```
 
-On non-zero: surface the validator stderr and abort.
+On non-zero: surface the validator stderr and abort before reading
+classification provenance, resolving repo config, or mutating the artifact.
+
+### 2b. Resolve the model plan
+
+Resolve runtime roles/tiers and operational thresholds fresh for this
+invocation. Read repo configuration from the artifact's trusted comparison
+commit, never from the reviewed worktree. Preserve the classification
+provenance that produced existing scores and dispositions: retain the
+artifact's `phase3_gate` and `phase4_bands` (or normative defaults when
+absent), while refreshing `fix_threshold` and `walkthrough_threshold` from
+the current trusted config.
+
+Persist the merged model plan and its exact `.gates` object together so the
+plan and top-level gates remain coherent:
+
+```bash
+if ! comparison_ref=$(
+  artifact-read.sh \
+    --path "$artifact_path" \
+    --filter '.base_context.comparison_ref' |
+  jq -er 'select(type == "string" and length > 0)'
+); then
+    printf '%s\n' \
+      'ERROR: artifact is missing trusted base_context.comparison_ref.' \
+      'Action: run /matthewsreview:review again before using /matthewsreview:walkthrough.' >&2
+    exit 1
+fi
+classification_gates_json=$(artifact-read.sh \
+  --path "$artifact_path" \
+  --filter '{
+    phase3_gate: (.gates.phase3_gate // .model_plan.gates.phase3_gate // 45),
+    phase4_bands: (.gates.phase4_bands // .model_plan.gates.phase4_bands // [45, 60, 75])
+  }') || exit $?
+
+plan_args=(
+  --repo-root "$repo_root"
+  --orchestrator "$harness_id"
+  --repo-config-ref "$comparison_ref"
+)
+[[ -n "${profile:-}" ]] && plan_args+=(--profile "$profile")
+[[ -n "${models_csv:-}" ]] && plan_args+=(--models "$models_csv")
+runtime_model_plan_json=$(review-config.sh "${plan_args[@]}") || exit $?
+
+if [[ -z "${threshold:-}" ]]; then
+    threshold=$(printf '%s\n' "$runtime_model_plan_json" |
+      jq -er '.gates.walkthrough_threshold') || exit $?
+fi
+fix_threshold=$(printf '%s\n' "$runtime_model_plan_json" |
+  jq -er '.gates.fix_threshold') || exit $?
+
+model_plan_json=$(printf '%s\n' "$runtime_model_plan_json" |
+  jq -ce --argjson classification "$classification_gates_json" '
+    .gates.phase3_gate = $classification.phase3_gate
+    | .gates.phase4_bands = $classification.phase4_bands
+  ') || exit $?
+gates_json=$(printf '%s\n' "$model_plan_json" | jq -ce '.gates') || exit $?
+phase3_gate=$(printf '%s\n' "$gates_json" | jq -er '.phase3_gate') || exit $?
+phase4_b1=$(printf '%s\n' "$gates_json" | jq -er '.phase4_bands[0]') || exit $?
+phase4_b2=$(printf '%s\n' "$gates_json" | jq -er '.phase4_bands[1]') || exit $?
+phase4_b3=$(printf '%s\n' "$gates_json" | jq -er '.phase4_bands[2]') || exit $?
+
+plan_tmp=$(mktemp -t matthews-model-plan.XXXXXX) || exit $?
+plan_write_rc=0
+printf '%s\n' "$model_plan_json" > "$plan_tmp" || plan_write_rc=$?
+if [[ "$plan_write_rc" -ne 0 ]]; then
+    rm -f "$plan_tmp" 2>/dev/null || true
+    exit "$plan_write_rc"
+fi
+
+plan_patch_rc=0
+artifact-patch.py --path "$artifact_path" \
+  --set-json model_plan=@"$plan_tmp" \
+  --set-json gates="$gates_json" \
+  || plan_patch_rc=$?
+
+plan_cleanup_rc=0
+rm -f "$plan_tmp" || plan_cleanup_rc=$?
+if [[ "$plan_patch_rc" -ne 0 ]]; then
+    exit "$plan_patch_rc"
+fi
+if [[ "$plan_cleanup_rc" -ne 0 ]]; then
+    exit "$plan_cleanup_rc"
+fi
+
+printf '%s\n' "$model_plan_json" | jq -r '
+  "| Role | Engine | Model | Effort | Source |",
+  "|---|---|---|---|---|",
+  (.roles | to_entries[]
+   | "| \(.key) | \(.value.engine) | \(.value.model | if . == "" then "(cli default)" else . end) | \(.value.effort // "—") | \(.value.source) |"),
+  (.warnings[]? | "warning: \(.)")'
+```
+
+On non-zero from `review-config.sh`: surface stderr verbatim and stop.
+`$harness_id` is the Dispatch Protocol identity. On any temp write, patch,
+or cleanup failure, exit with that operation's status after best-effort temp
+cleanup; never let `rm` mask an `artifact-patch.py` failure.
+
 
 Extract `mode` and `pr_number` from the validated artifact now — both
 are needed by §3's mode-aware exit checks, §4's preflight messaging,
@@ -134,10 +255,11 @@ paths from unnecessarily reading it.)
 
 ### 3. Compute walkthrough scope
 
-The walkthrough surfaces findings `/adamsreview:fix` would SKIP at
-`$threshold`. Compute three parallel id sets so the preflight at step
-4 can offer a tiered choice (default Qualifying) and step 6.5 can
-handle `pre_existing_report` findings on a separate track.
+The walkthrough surfaces findings `/matthewsreview:fix` would SKIP at
+the independently resolved `$fix_threshold`. Compute three parallel id
+sets so the preflight at step 4 can offer a tiered choice (default
+Qualifying) and step 6.5 can handle `pre_existing_report` findings on a
+separate track.
 
 **`scope_full_ids`** — the inverse of the Phase 8 eligibility selector
 at `09-fix-execution.md` step 8.1 (minus terminal + already-promoted),
@@ -155,7 +277,7 @@ sync with `09-fix-execution.md`; the pre-existing exclusion and score
 floor are specific to the walkthrough.**
 
 ```bash
-scope_full_ids=$(jq -r --argjson thr "$threshold" '
+scope_full_ids=$(jq -r --argjson walk_thr "$threshold" --argjson fix_thr "$fix_threshold" '
     [.findings[]
      # Not terminal: skip resolved / disproven / pending_validation.
      | select(.current_state == "open")
@@ -176,7 +298,7 @@ scope_full_ids=$(jq -r --argjson thr "$threshold" '
            (.disposition == "confirmed_mechanical" or .disposition == "partial" or .disposition == "regression")
            and (
              (.impact_type == "correctness" or .impact_type == "security")
-             and (.score_phase4 != null and .score_phase4 >= $thr)
+            and (.score_phase4 != null and .score_phase4 >= $fix_thr)
            )
          ) | not
        )
@@ -184,7 +306,7 @@ scope_full_ids=$(jq -r --argjson thr "$threshold" '
      # session stays focused on high-signal items. COALESCE falls back
      # to phase3 for below_gate (no phase4), and to -1 if neither is set
      # (so null-scored findings are excluded at any threshold > 0).
-     | select((.score_phase4 // .score_phase3 // -1) >= $thr)
+     | select((.score_phase4 // .score_phase3 // -1) >= $walk_thr)
      | .id
     ] | join(",")
 ' "$artifact_path")
@@ -197,7 +319,8 @@ judged these low-impact × low-confidence) and `pre_existing_report`
 the new default tier.
 
 ```bash
-scope_qualifying_ids=$(jq -r --argjson thr "$threshold" '
+scope_qualifying_ids=$(jq -r \
+  --argjson walk_thr "$threshold" --argjson fix_thr "$fix_threshold" '
     [.findings[]
      | select(.current_state == "open")
      | select(.disposition != "resolved")
@@ -211,14 +334,14 @@ scope_qualifying_ids=$(jq -r --argjson thr "$threshold" '
            (.disposition == "confirmed_mechanical" or .disposition == "partial" or .disposition == "regression")
            and (
              (.impact_type == "correctness" or .impact_type == "security")
-             and (.score_phase4 != null and .score_phase4 >= $thr)
+             and (.score_phase4 != null and .score_phase4 >= $fix_thr)
            )
          ) | not
        )
      # Score floor — same rule as scope_full_ids. Phase3 fallback is
      # irrelevant here (below_gate is already excluded above), but kept
      # for symmetry with scope_full_ids so the two stay easy to diff.
-     | select((.score_phase4 // .score_phase3 // -1) >= $thr)
+     | select((.score_phase4 // .score_phase3 // -1) >= $walk_thr)
      | .id
     ] | join(",")
 ' "$artifact_path")
@@ -258,7 +381,7 @@ If **all three** are empty, exit cleanly:
 ```
 No findings to walk through at score floor $threshold.
 
-Either every finding is already auto-eligible (run /adamsreview:fix
+Either every finding is already auto-eligible (run /matthewsreview:fix
 to apply them), every remaining skip-eligible finding scored below the
 floor (re-run with a lower threshold to see them), or the review has
 no actionable findings left. Nothing to do.
@@ -275,7 +398,7 @@ work the run can't perform:
 ```
 $scope_preexisting_count pre-existing finding(s) in this review, but
 local mode has no PR to file issues against. Re-run
-/adamsreview:walkthrough on the PR branch (or use the GitHub UI)
+/matthewsreview:walkthrough on the PR branch (or use the GitHub UI)
 to file them. Nothing to do here.
 ```
 
@@ -293,24 +416,27 @@ understands what "scope" means here:
 **Understanding the scope.** Three different gates govern this pipeline,
 plus a fourth floor specific to this walkthrough:
 
-- **Phase 3 scoring gate (45)** — filters candidates into validation.
-  Failures get `disposition=below_gate` and no `score_phase4`.
-- **Phase 4 confirmation gate (45/60/75)** — maps `score_phase4` into
+- **Phase 3 scoring gate (`$phase3_gate`)** — filters candidates into
+  validation. Failures get `disposition=below_gate` and no
+  `score_phase4`.
+- **Phase 4 confirmation cutoffs
+  (`$phase4_b1/$phase4_b2/$phase4_b3`)** — map `score_phase4` into
   `disproven` / `uncertain` / `confirmed_*`.
-- **Phase 8 fix gate (default 60)** — what `/adamsreview:fix` touches:
-  confirmed_mechanical + deep lane + score ≥ threshold.
-- **Walkthrough score floor (`$threshold`, default 60)** — the
-  argument to this command. A display filter that drops findings below
-  the floor so the session focuses on high-signal items. Independent
-  of the fix gate: findings promoted here get picked up by
-  `/adamsreview:fix` regardless of its threshold, via the
-  `human_confirmation` bypass.
+- **Phase 8 fix gate (`$fix_threshold`)** — what
+  `/matthewsreview:fix` touches: confirmed_mechanical + deep lane +
+  score ≥ this independently configured threshold.
+- **Walkthrough score floor (`$threshold`)** — the argument or resolved
+  config value for this command. A display filter that drops findings
+  below the floor
+  so the session focuses on high-signal items. Independent of the fix
+  gate: findings promoted here get picked up by `/matthewsreview:fix`
+  regardless of its threshold, via the `human_confirmation` bypass.
 
 The walkthrough surfaces what Phase 8 would SKIP, minus anything below
 the floor. `below_gate` is a **disposition name**, not a threshold —
 Phase 3 already demoted those as low-impact × low-confidence, and the
-score floor excludes them at default threshold=60 (fall back to
-`score_phase3` means a low threshold like 30 would surface them for
+score floor excludes them at the resolved walkthrough threshold (the
+`score_phase3` fallback lets a lower threshold surface them for
 auditing). Pre-existing findings (`pre_existing_report`) are handled
 on a separate track at the end of the run (file GitHub issues for
 base-branch bugs instead of trying to fix them here); they are not
@@ -359,7 +485,7 @@ table: "N pre-existing finding(s) are excluded from both walk tiers
 and will be offered as GitHub issues at the end of the run." This
 prevents the "where did F005 go?" variant of the same confusion.
 
-Then dispatch `AskUserQuestion` with three options. Default
+Then ASK with three options. Default
 highlighted on Qualifying:
 
 - "⭐ Qualifying only — walk $scope_qualifying_count finding(s) (recommended)"
@@ -370,7 +496,7 @@ Edge case: if `scope_qualifying_count == 0` and `scope_full_count > 0`,
 the only useful walk choice is "Full." Offer only "Full" and "Cancel"
 in that case — no recommendation star, since Qualifying is empty.
 If `scope_full_count == 0` AND `scope_preexisting_count > 0` (only
-pre-existing findings remain), skip the walk `AskUserQuestion`
+pre-existing findings remain), skip the walk the ASK primitive
 entirely and set `scope_tier="none"` directly. Print a one-line note
 like "No walk scope at score floor $threshold; jumping to pre-existing
 issue filing." Then continue normally: the timestamp/reviewer
@@ -381,9 +507,9 @@ derived, and §6.5 takes over. The §7 guard
 ("decisions empty AND issues_filed empty → skip POST") handles the
 case where the reviewer then skips issue filing too.
 
-Bind the `AskUserQuestion` result to `$scope_tier` (one of
+Bind the the ASK primitive result to `$scope_tier` (one of
 `qualifying` / `full` / `cancel`). For the walk-skip edge case
-(scope_full_count == 0, AskUserQuestion bypassed), set
+(scope_full_count == 0, ASK bypassed), set
 `scope_tier="none"` directly. Then map it onto the loop variables
 the rest of the command uses:
 
@@ -423,7 +549,7 @@ reviewer=$(git config user.email 2>/dev/null)
 
 ### 4.5. Auto-recommendation batch (Phase 5.5 fast-path)
 
-Phase 5.5 of `/adamsreview:review` (and `:codex-review` / `:add`)
+Phase 5.5 of `/matthewsreview:review` (and `:codex-review` / `:add`)
 generates an `auto_fix_hint` for findings the user typically accepts
 during walkthrough — surfacing the recommendation upfront lets a
 batch confirmation replace the per-finding loop for the typical
@@ -499,12 +625,17 @@ those are the cases the reviewer most needs to inspect:
 
 ```bash
 auto_rec_table=$(jq -r '
+    def location:
+      if .file == "(unknown)" then "(unknown)"
+      elif .line_range == null then .file
+      else (.file + ":" + (.line_range[0] | tostring))
+      end;
     (["F-id", "score", "disp", "file:line", "hint", "confidence", "concerns"] | @tsv),
     (.[] | [
        .id,
        (.score | tostring),
        .disposition,
-       (.file + ":" + (.line_range[0] | tostring)),
+       location,
        (.auto_fix_hint.hint | gsub("\n"; " ") |
          (if length > 120 then (.[0:117] + "...") else . end)),
        .auto_fix_hint.confidence,
@@ -536,7 +667,7 @@ of Accept-all."
 
 #### 4.5.3. Ask for the batch action
 
-Dispatch `AskUserQuestion` with three options. **Note on rationale:**
+Dispatch ASK with three options. **Note on rationale:**
 the original spec called for four options including a "Skip auto-rec
 batch" alongside "Walk through each." Both end with the same outcome
 (continue to §5 with full scope; the §5.2 short-circuit handles the
@@ -563,7 +694,7 @@ Compute `accept_ids` (comma-separated) and `accept_payload`
 accept_ids=$(jq -r '[.[].id] | join(",")' <<<"$auto_rec_in_scope")
 ```
 
-**`pick_subset`:** dispatch `AskUserQuestion` (multi-select) with
+**`pick_subset`:** ASK (multi-select) with
 one option per auto-rec finding:
 
 ```
@@ -755,17 +886,29 @@ finding_json=$(artifact-read.sh \
     --filter ".findings[] | select(.id == \"$finding_id\")")
 ```
 
-Capture the `file` and `line_range` for the briefing agent's file
-snippet request:
+Capture the location for the briefing agent. Branch on `file` and
+`line_range` before indexing either range element:
 
 ```bash
 f_file=$(jq -r '.file' <<<"$finding_json")
-f_line_start=$(jq -r '.line_range[0]' <<<"$finding_json")
-f_line_end=$(jq -r '.line_range[1]' <<<"$finding_json")
+f_line_range_json=$(jq -c '.line_range // null' <<<"$finding_json")
 f_disp=$(jq -r '.disposition' <<<"$finding_json")
 f_score=$(jq -r '.score_phase4 // .score_phase3 // "null"' <<<"$finding_json")
 f_impact=$(jq -r '.impact_type' <<<"$finding_json")
 f_claim=$(jq -r '.claim' <<<"$finding_json")
+
+if [[ "$f_file" == "(unknown)" ]]; then
+    f_location="(unknown)"
+    f_location_context="Source location is unknown. Do not issue a Read request for the (unknown) placeholder. Locate relevant context from the finding claim/evidence with repository search; do not fabricate a file or line number."
+elif [[ "$f_line_range_json" == "null" ]]; then
+    f_location="$f_file"
+    f_location_context="File: $f_file (line range unknown). Locate the relevant context within this file by matching the finding claim/evidence; do not fabricate line numbers."
+else
+    f_line_start=$(jq -r '.[0]' <<<"$f_line_range_json")
+    f_line_end=$(jq -r '.[1]' <<<"$f_line_range_json")
+    f_location="$f_file:$f_line_start-$f_line_end"
+    f_location_context="File: $f_file, lines $f_line_start-$f_line_end, plus ±30 lines of context (use Read)."
+fi
 ```
 
 #### 5.2. Build the briefing (short-circuit when `auto_fix_hint` is present, else dispatch)
@@ -845,8 +988,8 @@ directly to §5.3 with `$briefing_json` populated.
 Run the Sonnet briefer below ONLY when `briefing_source ==
 "briefer_agent"`.
 
-One `Agent` tool-use per finding. Model: `sonnet`. Budget: ~3-5k
-tokens. Prompt:
+One sub-agent per finding. Role `briefer` (default claude:sonnet).
+Budget: ~3-5k tokens. Prompt:
 
 > You are a code-review triage briefer. The reviewer is walking
 > through one finding and needs:
@@ -868,10 +1011,11 @@ tokens. Prompt:
 >      pick the walkthrough's Skip.
 >      **For `confirmed_manual` and `confirmed_report` findings:**
 >      propose a best-effort fix hint anyway. These are above the
->      Phase 4 confirmation threshold (score ≥ 60) — the validator
->      said the finding is real, just not mechanically trivial (manual)
->      or not worth a fix (report-only). If a concrete fix path exists,
->      emit it as your top option with a specific `fix_hint_if_picked`.
+>      resolved Phase 4 confirmation cutoff (`gates.phase4_bands[1]`) —
+>      the validator said the finding is real, just not mechanically
+>      trivial (manual) or not worth a fix (report-only). If a concrete
+>      fix path exists, emit it as your top option with a specific
+>      `fix_hint_if_picked`.
 >      If you genuinely can't see a clean fix (rare), emit one or two
 >      weak-conviction options and say so in your recommendation
 >      rationale — the reviewer can still pick Skip.
@@ -880,14 +1024,15 @@ tokens. Prompt:
 >      agent. Include negative constraints when over-engineering is a
 >      risk ("do NOT add a new flag"; "do NOT change the code").
 >
-> Context (read the repo via the Read tool for the file snippet):
+> Context:
 >
 >   - Finding JSON: <paste $finding_json verbatim>
->   - File: $f_file (lines $f_line_start-$f_line_end, plus ±30 of
->     context — use Read)
->   - Repo root CLAUDE.md: read once and extract any rules that
->     cite $f_file or the same pattern as $f_claim.
->   - Other findings on the same file: <filter artifact-read by .file == $f_file>
+>   - Display location: $f_location
+>   - Location handling: $f_location_context
+>   - Repo root CLAUDE.md: read once and extract rules matching the claim;
+>     when `$f_file` is known, also match rules that cite that file.
+>   - Other findings on the same file: filter by `.file == $f_file` only
+>     when `$f_file != "(unknown)"`; otherwise skip this same-file lookup.
 >
 > Return strict JSON matching:
 >
@@ -937,15 +1082,15 @@ log-tokens.sh \
     --review-dir "$review_dir" \
     --phase walkthrough --agent-role briefing \
     --agent-id <id-from-Agent-result> \
-    --model sonnet --finding-id "$finding_id" \
+    --model "$role_briefer" --finding-id "$finding_id" \
     --tokens <N or null>
 ```
 
 #### 5.3. Render the briefing to chat
 
-**Anti-instruction (between iterations).** Do not dispatch a spurious
-"continue / stop?" `AskUserQuestion` between per-finding iterations.
-The only `AskUserQuestion` the reviewer sees per finding is the
+**Anti-instruction (between iterations).** Do not ASK a spurious
+"continue / stop?" between per-finding iterations.
+The only the ASK primitive the reviewer sees per finding is the
 decision prompt at step 5.4, which already includes an explicit "Stop
 the walkthrough" option. Adding a standalone continue/stop check
 after each iteration double-prompts the reviewer and breaks the
@@ -957,7 +1102,7 @@ glance:
 ```markdown
 ## $finding_id — <first line of claim>
 
-**File:** `$f_file:$f_line_start-$f_line_end`
+**File:** `$f_location`
 **Score:** $f_score · **Impact:** $f_impact · **Disposition:** $f_disp
 
 **What it's about:** <briefing.summary>
@@ -973,14 +1118,14 @@ glance:
 
 #### 5.4. Ask for a decision
 
-Dispatch `AskUserQuestion` with options built from the briefing:
+Dispatch ASK with options built from the briefing:
 
 - One option per `briefing.options[]` entry, labeled with its letter
   and title ("**A.** <title>").
 - **"✎ Edit the fix hint (for the recommended option)"** — picks the
   briefing's recommended option but overrides its
   `fix_hint_if_picked` with reviewer-supplied text. On selection,
-  dispatch one follow-up `AskUserQuestion` (free-form) capturing the
+  dispatch one follow-up ASK primitive (free-form) capturing the
   override string. Use when the recommended option's direction is
   right but the hint wording needs tightening or negative constraints
   added.
@@ -1185,8 +1330,8 @@ patches stand; the user can manually re-render.
 Issue-filing in §6.5 below dispatches another batch of sub-agents
 after this point; those land in `tokens.jsonl` (and generate further
 orchestrator turns) but the walkthrough does not re-render after §6.5,
-so their cost will only surface on the next `/adamsreview:fix` (or
-subsequent `/adamsreview:add` / `/adamsreview:walkthrough`) run when
+so their cost will only surface on the next `/matthewsreview:fix` (or
+subsequent `/matthewsreview:add` / `/matthewsreview:walkthrough`) run when
 that command re-tallies. This is acceptable — issue-filing is terminal
 and no further re-publish follows it.
 
@@ -1258,14 +1403,14 @@ cleaner.
 
 #### 6.5.1. One-shot gate prompt
 
-Dispatch `AskUserQuestion`:
+Dispatch the ASK primitive:
 
 - "File all $scope_preexisting_count issue(s)"
 - "Pick a subset"
 - "Skip — don't file any"
 
 If the reviewer picks "Pick a subset," dispatch a follow-up
-`AskUserQuestion` with the finding ids as multi-select options
+ASK with the finding ids as multi-select options
 (fall back to a free-form comma-separated id list with validation
 when multi-select isn't available). Capture the selected ids into
 `filing_ids` (comma-separated). "File all" sets
@@ -1290,10 +1435,25 @@ finding_json=$(artifact-read.sh \
     --path "$artifact_path" \
     --filter ".findings[] | select(.id == \"$finding_id\")")
 f_file=$(jq -r '.file' <<<"$finding_json")
-f_line_start=$(jq -r '.line_range[0]' <<<"$finding_json")
-f_line_end=$(jq -r '.line_range[1]' <<<"$finding_json")
+f_line_range_json=$(jq -c '.line_range // null' <<<"$finding_json")
 f_claim=$(jq -r '.claim' <<<"$finding_json")
 f_hc=$(jq -c '.human_confirmation // null' <<<"$finding_json")
+
+if [[ "$f_file" == "(unknown)" ]]; then
+    f_location="(unknown)"
+    f_issue_location_rule="In the Location section, state that the exact source location is unknown; do not fabricate a file or line number."
+    f_issue_context="No source location is available. Do not issue a Read request for the (unknown) placeholder. Locate supporting context from the finding claim/evidence with repository search."
+elif [[ "$f_line_range_json" == "null" ]]; then
+    f_location="$f_file"
+    f_issue_location_rule="The Location section must include exactly \`File: $f_file\` with no line suffix."
+    f_issue_context="File: $f_file (line range unknown). Locate relevant context within this file by matching the finding claim/evidence; do not fabricate line numbers."
+else
+    f_line_start=$(jq -r '.[0]' <<<"$f_line_range_json")
+    f_line_end=$(jq -r '.[1]' <<<"$f_line_range_json")
+    f_location="$f_file:$f_line_start-$f_line_end"
+    f_issue_location_rule="The Location section must include \`File: $f_location\`."
+    f_issue_context="Read $f_file at lines $f_line_start-$f_line_end plus ±20 lines of context."
+fi
 ```
 
 **Guard: skip findings already promoted off-menu.** The default flow
@@ -1320,8 +1480,8 @@ fi
 Do NOT add an `issues_filed[]` entry for a skipped finding — the array
 records what was actually filed, not what was considered.
 
-**Dispatch a Sonnet drafting agent.** Model: `sonnet`. Budget: ~2-3k
-tokens. Prompt:
+**Dispatch a drafting agent** (role `drafter`, default claude:sonnet).
+Budget: ~2-3k tokens. Prompt:
 
 > You are drafting a GitHub issue for a code-review finding that
 > pre-dates the current PR (`pre_existing_report`). The reviewer
@@ -1343,8 +1503,8 @@ tokens. Prompt:
 >   - Emit ONE JSON object only. No surrounding prose. No outer code
 >     fences on the JSON itself (the `body` string may contain inner
 >     fenced code blocks — those are fine).
->   - Body must include a line like `File: <file>:<line_start>-<line_end>`
->     and a "Discovered during" sentence naming this PR number
+>   - $f_issue_location_rule
+>   - Include a "Discovered during" sentence naming this PR number
 >     (see context).
 >   - Keep the body under 40 lines. Link to the PR once; don't
 >     replicate the finding JSON.
@@ -1353,14 +1513,14 @@ tokens. Prompt:
 >
 >   - Finding JSON: <paste $finding_json verbatim>
 >   - PR: #$pr_number in $repo_name_with_owner
->   - File: $f_file (lines $f_line_start-$f_line_end, plus ±20 of
->     context via Read)
+>   - Display location: $f_location
+>   - Location handling: $f_issue_context
 
 Parse the returned text as JSON (one retry on parse failure). On
 second failure, log to `trace.md` under tag
 `walkthrough_issue_draft_failed:$finding_id` and surface a degraded
 UX: offer `Skip this finding` or `Write body free-form` (captured
-via one `AskUserQuestion` free-form follow-up).
+via one ASK free-form follow-up).
 
 Log the drafting agent's tokens:
 
@@ -1369,7 +1529,7 @@ log-tokens.sh \
     --review-dir "$review_dir" \
     --phase walkthrough --agent-role pre_existing_issue_draft \
     --agent-id <id-from-Agent-result> \
-    --model sonnet --finding-id "$finding_id" \
+    --model "$role_drafter" --finding-id "$finding_id" \
     --tokens <N or null>
 ```
 
@@ -1385,15 +1545,15 @@ log-tokens.sh \
 <draft.body>
 ```
 
-**Ask for the next action.** `AskUserQuestion`:
+**Ask for the next action.** the ASK primitive:
 
 - "Create issue"
 - "Edit the body first"
 - "Skip this finding"
 
-For "Edit the body first," dispatch one follow-up `AskUserQuestion`
+For "Edit the body first," dispatch one follow-up the ASK primitive
 (free-form) capturing the replacement body, then re-render and loop
-back to this same `AskUserQuestion`. Two edit rounds max per finding
+back to this same the ASK primitive. Two edit rounds max per finding
 to keep cadence predictable — after two, auto-offer Create/Skip only.
 
 **For "Skip this finding,"** continue to the next finding in
@@ -1407,8 +1567,8 @@ was available, so absence = skipped.
 **For "Create issue":**
 
 ```bash
-body_tmp=$(mktemp -t adams-walkthrough-issue.XXXXXX)
-err_tmp=$(mktemp -t adams-walkthrough-gh-err.XXXXXX)
+body_tmp=$(mktemp -t matthews-walkthrough-issue.XXXXXX)
+err_tmp=$(mktemp -t matthews-walkthrough-gh-err.XXXXXX)
 # write $draft_body (possibly user-edited) to $body_tmp
 # Capture gh_rc directly; piping gh through awk would swallow gh's exit (pipefail is off here).
 gh_stdout=$(gh issue create \
@@ -1455,8 +1615,8 @@ still written so the run is auditable locally.
 In PR mode, render a decisions-log markdown block from `decisions`
 and POST it as a NEW PR comment (separate from the main review
 comment). DO NOT mutate `artifact.comment_id` — that stays pointing
-at the main review comment so future `/adamsreview:fix` and
-`/adamsreview:promote` runs edit the right comment.
+at the main review comment so future `/matthewsreview:fix` and
+`/matthewsreview:promote` runs edit the right comment.
 
 #### 7.1. Build the decisions-log markdown
 
@@ -1465,14 +1625,14 @@ were made. Use the ids and titles verbatim from the `decisions[]`
 array.
 
 ```markdown
-<!-- adams-review-walkthrough-v1 -->
+<!-- matthews-review-walkthrough-v1 -->
 ### Walkthrough decisions
 
 `$review_id` · scope=**$scope_tier** · score_floor=$threshold · reviewer=$reviewer · ts=$walkthrough_ts
 
 Walking the **$scope_tier_title** scope: of **$scope_count** non-auto-eligible finding(s), **$auto_accept_count auto-accepted**, **$promote_count promoted**, **$skip_count skipped**, **$stop_count stopped**, **$unreviewed_count unreviewed**.
 
-Promoted findings will be picked up by the next `/adamsreview:fix` run via the `human_confirmation` bypass, regardless of its score threshold.
+Promoted findings will be picked up by the next `/matthewsreview:fix` run via the `human_confirmation` bypass, regardless of its score threshold.
 
 ---
 
@@ -1503,7 +1663,7 @@ Promoted findings will be picked up by the next `/adamsreview:fix` run via the `
 
 - **F023** — [first line of claim]
   - Reviewer requested stop at this finding. Not mutated.
-  - Resume with `/adamsreview:walkthrough $threshold`.
+  - Resume with `/matthewsreview:walkthrough $threshold`.
 
 #### Pre-existing issues filed
 
@@ -1513,7 +1673,7 @@ Promoted findings will be picked up by the next `/adamsreview:fix` run via the `
 ---
 
 Decisions log: this comment is append-only audit — it's never edited
-in place. Each `/adamsreview:walkthrough` run posts a fresh entry.
+in place. Each `/matthewsreview:walkthrough` run posts a fresh entry.
 Current state: see the main review comment and `artifact.md`.
 ```
 
@@ -1538,7 +1698,7 @@ non-empty, and similarly for the existing Promoted/Skipped/Stopped
 sections. Omit the `$auto_accept_count auto-accepted` and/or
 `$unreviewed_count unreviewed` clauses from the header sentence when
 their counts are 0. Omit the "Promoted findings will be picked up
-by the next `/adamsreview:fix`…" sentence entirely when
+by the next `/matthewsreview:fix`…" sentence entirely when
 `$promote_count == 0` AND `$auto_accept_count == 0` — with zero
 mutations it describes a non-event (and misleadingly hints that a
 fix run is pending when it isn't); when EITHER count is non-zero,
@@ -1548,8 +1708,8 @@ keep the sentence (auto-accepted findings also flow through the
 #### 7.2. POST via `gh api`
 
 ```bash
-comment_body_path=$(mktemp -t adams-walkthrough-body.XXXXXX)
-err_tmp=$(mktemp -t adams-walkthrough-gh-err.XXXXXX)
+comment_body_path=$(mktemp -t matthews-walkthrough-body.XXXXXX)
+err_tmp=$(mktemp -t matthews-walkthrough-gh-err.XXXXXX)
 # ... write the rendered markdown to $comment_body_path ...
 
 decisions_comment_id=$(gh api \
@@ -1642,12 +1802,12 @@ Promoted findings (auto-accepted + per-finding) are now auto-fix-
 eligible via the human_confirmation bypass — they'll be picked up
 at any fix threshold. To apply:
 
-  /adamsreview:fix
+  /matthewsreview:fix
 
 Decisions log comment: <url to the POSTed comment, if PR mode>
 Main review comment: updated in place.
 
-You can resume later by re-running /adamsreview:walkthrough — the
+You can resume later by re-running /matthewsreview:walkthrough — the
 scope filter naturally excludes anything you already promoted (whether
 auto-accepted or per-finding), so the $unreviewed_count unreviewed
 finding(s) plus any newly-added ones will be what you see.
@@ -1699,17 +1859,17 @@ summary block:
 
 ```
 Note: $scope_preexisting_count pre-existing finding(s) not filed as issues.
-Re-run /adamsreview:walkthrough to revisit.
+Re-run /matthewsreview:walkthrough to revisit.
 ```
 
 On any step failure earlier in the run, append a `Note:` section
 listing the deferred failures and their recovery actions (same
-pattern as `/adamsreview:promote` step 10).
+pattern as `/matthewsreview:promote` step 10).
 
 ## What this command does NOT do
 
 - **No `disposition=disproven` handling.** Disproven findings need
-  `/adamsreview:promote <id> --force` with a conscious justification;
+  `/matthewsreview:promote <id> --force` with a conscious justification;
   the walkthrough scope filter excludes them.
 - **No resumption state file.** If you quit mid-walkthrough, the
   promotions you already made stand. Re-invoking the walkthrough

@@ -1,7 +1,7 @@
 ## Promote core — precondition, patch, trace
 
-Shared fragment used by both `/adamsreview:promote` and
-`/adamsreview:walkthrough`.
+Shared fragment used by both `/matthewsreview:promote` and
+`/matthewsreview:walkthrough`.
 
 ### Contract
 
@@ -72,7 +72,7 @@ both the integer and null cases via `--argjson`).
 | `curr_disp` | Additional condition | Action |
 |---|---|---|
 | `confirmed_mechanical` | `curr_hc != null` | Exit 0 with: "F$N already promoted by @$(jq -r '.reviewer' <<<"$curr_hc") on $(jq -r '.ts' <<<"$curr_hc"); no-op." — pulling reviewer and timestamp from the existing `human_confirmation` object (the bash `$reviewer` / `$ts` vars are not yet set in step 4). |
-| `confirmed_mechanical` | `curr_hc == null` | **Proceed.** Set `human_confirmation` to record the human override. May be strictly necessary (light-lane `confirmed_mechanical` fails the Phase 8 impact_type filter, deep-lane below-threshold `confirmed_mechanical` fails the score gate) or redundant-but-harmless audit (deep-lane above-threshold `confirmed_mechanical` was already eligible). Promote can't know the user's planned `/adamsreview:fix` threshold, so always proceed. |
+| `confirmed_mechanical` | `curr_hc == null` | **Proceed.** Set `human_confirmation` to record the human override. May be strictly necessary (light-lane `confirmed_mechanical` fails the Phase 8 impact_type filter, deep-lane below-threshold `confirmed_mechanical` fails the score gate) or redundant-but-harmless audit (deep-lane above-threshold `confirmed_mechanical` was already eligible). Promote can't know the user's planned `/matthewsreview:fix` threshold, so always proceed. |
 | `resolved` | — | Exit 1: "F$N is resolved (fix already ran); cannot promote." |
 | `disproven` | `force == false` | Exit 1: "F$N was disproven by Phase 4 (score=$curr_score). Validator found positive evidence this isn't a real issue. Re-run with --force to override." |
 | `disproven` | `force == true` | Proceed with a warning line in trace.md: `disproven→confirmed_mechanical via --force`. |
@@ -87,10 +87,10 @@ Cases where `confirmed_mechanical` + `curr_hc == null` still needs
 
 - Light-lane `confirmed_mechanical` (impact_type ∈ ux/policy/architecture) —
   fails the Phase 8 impact_type filter; needs `human_confirmation` to
-  bypass. This is the case `/adamsreview:walkthrough`
+  bypass. This is the case `/matthewsreview:walkthrough`
   exists to address.
 - Deep-lane `confirmed_mechanical` below the user's planned threshold — the
-  user may run `/adamsreview:fix 70` on a finding scored 55, which
+  user may run `/matthewsreview:fix 70` on a finding scored 55, which
   fails the score gate; needs `human_confirmation` to bypass the
   score gate.
 
@@ -109,8 +109,7 @@ caller) and the finding's `validation_result`:
 - `$fix_hint` is empty AND `finding.validation_result` is `null` (no
   validator fix_proposal exists — common for light-lane findings and
   for deep-lane findings Phase 4 marked `uncertain`/`disproven`) →
-  dispatch one `AskUserQuestion` whose option set depends on the
-  claim text.
+  dispatch one ASK whose option set depends on the claim text.
 
 **Heuristic for the option set.** Lowercase the `claim` and scan for
 any of these substrings: `docstring`, `doc comment`, `jsdoc`, `tsdoc`,
@@ -129,7 +128,7 @@ If none match, skip the canned options and offer only:
 - "Skip — no steering hint"
 
 For "Other" and "Provide a hint (free-form)", dispatch a follow-up
-`AskUserQuestion` asking for the free-form hint string. For the two
+ASK asking for the free-form hint string. For the two
 canned options, use the option text verbatim as `fix_hint`. For
 "Skip", leave `fix_hint` empty. Capture the final `fix_hint` string
 (may be empty — empty means "no hint").
@@ -147,7 +146,7 @@ reviewer=$(git config user.email 2>/dev/null)
 [[ -z "$reviewer" ]] && reviewer=$(git config user.name 2>/dev/null)
 [[ -z "$reviewer" ]] && reviewer="unknown"
 
-hc_tmp=$(mktemp -t adams-promote-hc.XXXXXX)
+hc_tmp=$(mktemp -t matthews-promote-hc.XXXXXX)
 jq -n \
     --arg reviewer "$reviewer" \
     --arg reason "$reason" \

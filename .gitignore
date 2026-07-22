@@ -4,3 +4,9 @@ __pycache__/
 
 # Claude Code harness state: per-session worktrees, settings, caches
 .claude/
+
+# build-codex-skills.sh output (machine-specific absolute paths baked in)
+dist/
+
+# Local editor state
+.nova/

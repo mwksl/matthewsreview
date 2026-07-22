@@ -1,15 +1,15 @@
 ---
-allowed-tools: Bash(artifact-read.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(claude-md-paths.sh:*), Bash(staleness.sh:*), Bash(external-scrape.sh:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(origin-crosscheck.sh:*), Bash(assign-finding-ids.sh:*), Bash(group-fixes.py:*), Bash(repo-slug.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(timeout:*), Bash(sleep:*), Bash(kill:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(mktemp:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(node:*), Bash(find:*), AskUserQuestion, Agent, Read, Edit, Write, BashOutput, KillShell
-argument-hint: "[threshold] [--granular-commits]"
+allowed-tools: Bash(artifact-read.sh:*), Bash(review-config.sh:*), Bash(review-root.sh:*), Bash(doctor.sh:*), Bash(artifact-patch.py:*), Bash(artifact-validate.sh:*), Bash(artifact-render.py:*), Bash(artifact-publish.sh:*), Bash(claude-md-paths.sh:*), Bash(staleness.sh:*), Bash(external-scrape.sh:*), Bash(log-phase.sh:*), Bash(log-tokens.sh:*), Bash(tally-subagent-tokens.sh:*), Bash(orchestrator-tokens.sh:*), Bash(origin-crosscheck.sh:*), Bash(assign-finding-ids.sh:*), Bash(group-fixes.py:*), Bash(repo-slug.sh:*), Bash(git:*), Bash(gh:*), Bash(jq:*), Bash(date:*), Bash(timeout:*), Bash(sleep:*), Bash(kill:*), Bash(mkdir:*), Bash(mv:*), Bash(rm:*), Bash(mktemp:*), Bash(cat:*), Bash(printf:*), Bash(echo:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(tr:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cut:*), Bash(sort:*), Bash(diff:*), Bash(openssl:*), Bash(python3:*), Bash(node:*), Bash(find:*), AskUserQuestion, Agent, Read, Edit, Write, BashOutput, KillShell
+argument-hint: "[threshold] [--granular-commits] [--profile <name>] [--models \"<csv>\"]"
 description: Apply auto-fixable code review findings. Dispatches fix-group agents, post-fix-reviews the working tree, commits survivors, reverts regressions, updates the artifact.
 disable-model-invocation: false
 ---
 
 Arguments (optional):
-- First positional (integer 0–100) → `threshold` (default `60`). The
-  Phase 8 fix gate: `confirmed_mechanical`/`partial`/`regression` findings
-  with `score_phase4 >= threshold` are eligible. `/adamsreview:fix 80`
-  excludes moderate-strength findings from the run.
+- First positional (finite JSON number in the inclusive range `[0, 100]`)
+  → `threshold` (default: the resolved `gates.fix_threshold`, normally `60`).
+  Decimals are preserved exactly; for example, `/matthewsreview:fix 60.5`
+  selects findings with `score_phase4 >= 60.5`.
 - `--granular-commits` → one commit per surviving fix group. Default is
   one combined commit for all survivors.
 
@@ -43,7 +43,7 @@ gate is restored.
 and Phase 9e writing fix_attempts, findings sit in
 `current_state=attempted`. If the run is interrupted there — or if
 Phase 9.pre detects a touched-file overlap and the reviewer chooses
-abort (default) or inspect — the next `/adamsreview:fix` invocation's
+abort (default) or inspect — the next `/matthewsreview:fix` invocation's
 Phase 7 step 4 hard abort catches the leftover `attempted` state and
 gives the user a deterministic recovery prompt. Never clean up
 `attempted` state silently; that's the user's call. (Reconcile does
@@ -74,25 +74,55 @@ with what actually happened on disk.
 
 Every Agent tool-use specifies:
 - `subagent_type: general-purpose`.
-- `model:` explicitly:
-  - Phase 8 fix-group agents → `opus`.
-  - Phase 9a post-fix reviewer → `opus`.
+- `model:` explicitly — the model segment of the role string:
+  - Phase 8 fix-group agents → role `fix` (default claude:opus).
+  - Phase 9a post-fix reviewer → role `post_fix_review` (default claude:opus).
 
-**Parallel fan-outs** happen by firing multiple Agent tool-use blocks
-in a single orchestrator turn. Phase 8's fix-group dispatch fans out
+**Parallel fan-outs** happen by issuing every DISPATCH in one batch
+(Prelude §3.4: N Agent blocks in one turn on CC; one `parallel()` eval
+cell on omp; N `agent-dispatch.sh start` calls on Codex). Phase 8's
+fix-group dispatch fans out
 all groups at once — don't wait a turn between them. Phase 9a is a
 single-agent call (one sub-agent reviews the whole working tree).
 
 ## Argument handling
 
-Parse `$ARGUMENTS` (whitespace-split):
-- First token that parses as a non-negative integer → `threshold`.
+Parse `$ARGUMENTS` left-to-right before any artifact lookup,
+`review-config.sh` call, or git/tree work:
+
+- Accept at most one positional threshold token. Validate the complete
+  original token as a finite JSON number in the inclusive range `[0, 100]`
+  (not merely a numeric prefix):
+
+  ```bash
+  jq -en --arg token "$token" '
+    ($token | fromjson) as $n
+    | (($n | type) == "number"
+       and (($n - $n) == 0)
+       and $n >= 0
+       and $n <= 100)
+  ' >/dev/null 2>&1
+  ```
+
+  Keep the original token as `threshold`; do not coerce it to an integer or
+  round it, so decimal thresholds retain their value. A second positional
+  token is a duplicate-threshold usage error.
 - `--granular-commits` → `granular_commits=true` (else `false`).
-- Any other token → stop and ask the user to clarify.
+- `--profile <name>` → `profile=<name>` (else unset).
+- `--models "<csv>"` → `models_csv=<csv>` (else unset).
+- Reject a repeated flag, a missing/empty flag value, an unknown option, a
+  non-number, a non-finite number, or a number outside `[0, 100]` with a
+  usage error naming the valid invocation.
 
-If no integer was provided, `threshold=60` (default).
+Do not continue past parsing on any error. If no threshold was provided,
+leave `threshold` unset — step 7.2c sets it from the resolved
+`gates.fix_threshold` (default 60).
 
-Capture both in your working context before executing Phase 7.
+Capture all four values in working context before executing Phase 7.
+`profile` and `models_csv` are consumed by Phase 7 step 7.2c (model-plan
+resolution) — a `:fix` weeks after the review resolves runtime roles and
+operational thresholds against the trusted config at the artifact's
+`comparison_ref`, not the reviewed worktree or the review-time plan.
 
 ---
 

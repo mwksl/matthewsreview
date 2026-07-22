@@ -4,14 +4,17 @@
 
 The Phase 8 fix gate filters on current_state + disposition +
 impact_type (deep lane only — §13.2) + `score_phase4 >= threshold`.
-A non-null `human_confirmation` (set by `/adamsreview:promote`, §27)
+A non-null `human_confirmation` (set by `/matthewsreview:promote`, §27)
 bypasses both the impact_type lane filter AND the score threshold —
 the human has overridden the validator's conservative defaults.
 
-The `/adamsreview:walkthrough` scope filter is the inverse of this selector; keep the two in sync (see `commands/walkthrough.md` §3).
+The `/matthewsreview:walkthrough` scope filter is the inverse of this selector; keep the two in sync (see `commands/walkthrough.md` §3).
 
 ```bash
-eligible_finding_ids=$(jq -r --argjson thr "$threshold" '
+fix_artifact_snapshot=$(artifact-read.sh \
+    --path "$artifact_path" --filter '.')
+
+eligible_finding_ids=$(printf '%s' "$fix_artifact_snapshot" | jq -r --argjson thr "$threshold" '
     [.findings[]
      | select(.current_state == "open")
      | select(.disposition == "confirmed_mechanical" or .disposition == "partial" or .disposition == "regression")
@@ -24,14 +27,14 @@ eligible_finding_ids=$(jq -r --argjson thr "$threshold" '
        )
      | .id
     ] | join(",")
-' "$artifact_path")
+')
 ```
 
 Capture `eligible_finding_ids` (CSV string; empty when no finding
 qualifies). Also capture counts for trace:
 
 ```bash
-eligible_count=$(jq -r --argjson thr "$threshold" '
+eligible_count=$(printf '%s' "$fix_artifact_snapshot" | jq -r --argjson thr "$threshold" '
     [.findings[]
      | select(.current_state == "open")
      | select(.disposition == "confirmed_mechanical" or .disposition == "partial" or .disposition == "regression")
@@ -43,7 +46,7 @@ eligible_count=$(jq -r --argjson thr "$threshold" '
          )
        )
     ] | length
-' "$artifact_path")
+')
 ```
 
 Append a trace record:
@@ -121,14 +124,15 @@ on disk.
 
 ### 8.5. Dispatch parallel fix-group agents (one turn)
 
-> **One turn for all fix-group `Agent` dispatches — not one turn per
+> **One turn for all fix-group DISPATCH calls — not one turn per
 > group.** Phase 8 wall-clock latency is `max(group_durations)`, not
 > `sum(group_durations)`. Serializing turns the fix run into a per-group
 > timer; each group's edits are independent.
 
-Fan out one `Agent` tool-use per group, all in a single orchestrator
-turn. Each agent uses `subagent_type: general-purpose`, `model: opus`,
-and receives the full §19.8 input per-group.
+Fan out one `DISPATCH(fix, prompt, group_id)` per group, all in a single
+batch (Prelude §3.4). Role `fix` (default `claude:opus`) is the only
+write lane; subprocess dispatch MUST append `--write`. Each sub-agent
+receives the full §19.8 input per group.
 
 **Prompt body per fix-group agent** (inline for each group):
 
@@ -146,9 +150,9 @@ Findings in this group:
  full id, file, line_range, claim, validation_result (evidence,
  blast_radius, fix_proposal, verification_context), and — when the
  finding has human_confirmation.fix_hint set (promoted via
- /adamsreview:promote --fix-hint, §27) — a labeled block:
+ /matthewsreview:promote --fix-hint, §27) — a labeled block:
 
-   Human-authored fix direction (set via /adamsreview:promote --fix-hint):
+   Human-authored fix direction (set via /matthewsreview:promote --fix-hint):
    <fix_hint verbatim>
 
    This is an explicit instruction from the reviewer. It takes
@@ -260,7 +264,7 @@ Capture `phase_8_start_epoch` at the top of the dispatch turn:
 phase_8_start_epoch=$(date +%s)
 ```
 
-Then fire all `group_count` Agent tool-use blocks in the same turn.
+Then fire all `group_count` DISPATCHes in the same batch (Prelude §3.4).
 Claude Code runs them concurrently.
 
 ### 8.6. Parse + record per-group results
@@ -274,7 +278,7 @@ After every agent returns (before branching on its content):
      --review-dir "$review_dir" \
      --phase phase_8 --agent-role "fix_group_$group.id" \
      --agent-id <id-from-Agent-result> \
-     --model opus \
+     --model "$role_fix" \
      --tokens <N or null>
    ```
 

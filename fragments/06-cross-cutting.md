@@ -39,14 +39,21 @@ Otherwise, capture the list as `xc_input_json` and proceed.
 
 ### 5.2. Dispatch the cross-cutting sub-agent
 
-Launch one `Agent` tool-use with `model: opus`. No tool access needed;
-input is the serialized findings in the prompt.
+Launch one sub-agent with role `cross_cutting` (default claude:opus).
+It needs read-only repository access; it must not edit the working tree.
 
 Prompt essence:
 
 > You are reviewing a set of confirmed, actionable deep-lane findings
 > to identify cross-cutting concerns — findings whose fixes must happen
 > together because they share code, invariants, or root cause.
+>
+> **Run identity:** `reviewed_sha: $reviewed_sha` (substitute the
+> Phase-0 value before dispatch).
+>
+> **Source of truth:** read reviewed code via `git show
+> $reviewed_sha:<path>` (substituted below) — the working tree may
+> have drifted since the review started.
 >
 > **Findings (full validation_result included):**
 >
@@ -102,7 +109,7 @@ First, token log:
 log-tokens.sh \
   --review-dir "$review_dir" --phase phase_5 \
   --agent-role cross_cutting --agent-id <id> \
-  --model opus --tokens <N or null>
+  --model "$role_cross_cutting" --tokens <N or null>
 ```
 
 Parse the sub-agent's JSON. If parsing fails after one retry (§24.1),
@@ -122,12 +129,23 @@ Write the groups to a tmpfile so `--set-json` can use `@file` form
 # If the sub-agent already returned just the groups array, the `// .`
 # fallback preserves the value. If it returned the outer envelope,
 # we pluck the inner array.
-jq -c '.cross_cutting_groups // .' <<<"$subagent_response_json" \
-    > "/tmp/adams-review-ccg-$review_id.json"
-artifact-patch.py \
-  --path "$artifact_path" \
-  --set-json "cross_cutting_groups=@/tmp/adams-review-ccg-$review_id.json"
-rm -f "/tmp/adams-review-ccg-$review_id.json"
+groups_tmp=$(mktemp -t matthews-review-ccg.XXXXXX)
+cleanup_groups_tmp() { rm -f "$groups_tmp"; }
+trap cleanup_groups_tmp EXIT HUP INT TERM
+if jq -c '.cross_cutting_groups // .' \
+    <<<"$subagent_response_json" > "$groups_tmp"; then
+    artifact-patch.py \
+      --path "$artifact_path" \
+      --set-json "cross_cutting_groups=@$groups_tmp"
+    patch_rc=$?
+else
+    patch_rc=1
+fi
+cleanup_groups_tmp
+trap - EXIT HUP INT TERM
+[[ "$patch_rc" -eq 0 ]] || {
+    printf 'phase_5_groups_apply_failed\n' >> "$trace_log_path"
+}
 ```
 
 The schema validates each group: id must match `^G[0-9]+$`,
