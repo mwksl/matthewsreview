@@ -5722,11 +5722,29 @@ ad_arg_pair() {
       END { exit(found ? 0 : 1) }
     ' "$1"
 }
+# Bounded verdict wait shared by the single-poll AD sites and AD-11/12/15
+# — poll until the wanted verdict lands (≤5s), dcbd4de condition-loop
+# style. A fixed `sleep 1` + single poll flakes under load: an instant
+# stub can legitimately still be `alive` at the 1s mark (witnessed as an
+# AD-1 abort). Sets AD_POLL_OUT (on timeout: the last poll, so a fail()
+# shows what the poller actually said).
+ad_poll_until() { # job scratch wanted-verdict
+    local ad_pu_job="$1" ad_pu_scratch="$2" ad_pu_want="$3" ad_pu_i=0 ad_pu_v=""
+    AD_POLL_OUT=""
+    while [[ $ad_pu_i -lt 100 ]]; do
+        AD_POLL_OUT=$(ad_path "$AD" poll --job "$ad_pu_job" --scratch-dir "$ad_pu_scratch")
+        ad_pu_v=$(printf '%s' "$AD_POLL_OUT" | jq -r '.verdict' 2>/dev/null || echo "")
+        [[ "$ad_pu_v" == "$ad_pu_want" ]] && return 0
+        sleep 0.05
+        ad_pu_i=$((ad_pu_i + 1))
+    done
+    return 1
+}
 
 # AD-1: claude engine completes with tokens summed across all usage buckets
 ad_j=$(ad_path "$AD" start --engine claude --model opus --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
-sleep 1
-ad_out=$(ad_path "$AD" poll --job "$ad_j" --scratch-dir "$AD_HOME/scratch")
+ad_poll_until "$ad_j" "$AD_HOME/scratch" completed || true
+ad_out="$AD_POLL_OUT"
 if [[ $(printf '%s' "$ad_out" | jq -r '.verdict') == "completed" ]] \
    && [[ $(printf '%s' "$ad_out" | jq -r '.tokens') == "185" ]] \
    && [[ $(printf '%s' "$ad_out" | jq -r '.raw_output') == "claude done" ]]; then
@@ -5737,8 +5755,8 @@ fi
 
 # AD-2: codex engine extracts last-message file + token_count JSONL
 ad_j=$(ad_path "$AD" start --engine codex --effort high --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
-sleep 1
-ad_out=$(ad_path "$AD" poll --job "$ad_j" --scratch-dir "$AD_HOME/scratch")
+ad_poll_until "$ad_j" "$AD_HOME/scratch" completed || true
+ad_out="$AD_POLL_OUT"
 if [[ $(printf '%s' "$ad_out" | jq -r '.verdict') == "completed" ]] \
    && [[ $(printf '%s' "$ad_out" | jq -r '.tokens') == "777" ]] \
    && [[ $(printf '%s' "$ad_out" | jq -r '.raw_output') == "codex done" ]]; then
@@ -5750,8 +5768,8 @@ fi
 # AD-3: omp engine passes model and thinking as separate CLI options and
 # completes with tokens null (no usage surface).
 ad_j=$(ad_path "$AD" start --engine omp --model "openai-codex/gpt-5.6-sol" --effort max --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
-sleep 1
-ad_out=$(ad_path "$AD" poll --job "$ad_j" --scratch-dir "$AD_HOME/scratch")
+ad_poll_until "$ad_j" "$AD_HOME/scratch" completed || true
+ad_out="$AD_POLL_OUT"
 if [[ $(printf '%s' "$ad_out" | jq -r '.verdict') == "completed" ]] \
    && [[ $(printf '%s' "$ad_out" | jq -r '.tokens') == "null" ]] \
    && [[ $(printf '%s' "$ad_out" | jq -r '.raw_output') == *"--model openai-codex/gpt-5.6-sol --thinking max @"* ]]; then
@@ -5782,10 +5800,9 @@ ad3c_x=$(ad_path "$AD" start --engine codex --write \
     --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
 ad3c_o=$(ad_path "$AD" start --engine omp --write \
     --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
-sleep 1
-ad3c_o_out=$(ad_path "$AD" poll --job "$ad3c_o" --scratch-dir "$AD_HOME/scratch")
-ad_path "$AD" poll --job "$ad3c_c" --scratch-dir "$AD_HOME/scratch" >/dev/null
-ad_path "$AD" poll --job "$ad3c_x" --scratch-dir "$AD_HOME/scratch" >/dev/null
+ad_poll_until "$ad3c_c" "$AD_HOME/scratch" completed || true
+ad_poll_until "$ad3c_x" "$AD_HOME/scratch" completed || true
+ad_poll_until "$ad3c_o" "$AD_HOME/scratch" completed || true
 ad3c_claude_args=$(cat "$AD_HOME/bin/claude.args")
 ad3c_codex_args=$(cat "$AD_HOME/bin/codex.args")
 ad3c_omp_args=$(cat "$AD_HOME/bin/omp.args")
@@ -5805,8 +5822,8 @@ PATH="$AD_HOME/bin:/usr/bin:/bin" "$AD" start --engine claude-fail --model x --p
 mv "$AD_HOME/bin/claude" "$AD_HOME/bin/claude-ok"
 cp "$AD_HOME/bin/claude-fail" "$AD_HOME/bin/claude"
 ad_j=$(ad_path "$AD" start --engine claude --model opus --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
-sleep 1
-ad_out=$(ad_path "$AD" poll --job "$ad_j" --scratch-dir "$AD_HOME/scratch")
+ad_poll_until "$ad_j" "$AD_HOME/scratch" failed_terminal || true
+ad_out="$AD_POLL_OUT"
 mv "$AD_HOME/bin/claude-ok" "$AD_HOME/bin/claude"
 if [[ $(printf '%s' "$ad_out" | jq -r '.verdict') == "failed_terminal" ]] \
    && [[ $(printf '%s' "$ad_out" | jq -r '.exit_code') == "2" ]] \
@@ -6026,8 +6043,8 @@ AD_LARGE="$AD_HOME/large-prompt.md"
 awk 'BEGIN { s="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"; for (i=0; i<16384; i++) printf "%s", s }' > "$AD_LARGE"
 ad_j=$(ad_path "$AD" start --engine omp --model "openai-codex/gpt-5.6-sol" \
     --effort high --prompt-file "$AD_LARGE" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
-sleep 1
-ad_out=$(ad_path "$AD" poll --job "$ad_j" --scratch-dir "$AD_HOME/scratch")
+ad_poll_until "$ad_j" "$AD_HOME/scratch" completed || true
+ad_out="$AD_POLL_OUT"
 ad_large_raw=$(printf '%s' "$ad_out" | jq -r '.raw_output')
 if [[ $(printf '%s' "$ad_out" | jq -r '.verdict') == "completed" ]] \
    && [[ "$ad_large_raw" == *"@$AD_HOME/scratch/$ad_j/prompt.md"* ]] \
@@ -6036,21 +6053,6 @@ if [[ $(printf '%s' "$ad_out" | jq -r '.verdict') == "completed" ]] \
 else
     fail "AD-10: large omp prompt was not file-backed" "$ad_out"
 fi
-
-# Bounded verdict wait shared by AD-11/12/15 — poll until the wanted
-# verdict lands (≤5s), dcbd4de condition-loop style. Sets AD_POLL_OUT.
-ad_poll_until() { # job scratch wanted-verdict
-    local ad_pu_job="$1" ad_pu_scratch="$2" ad_pu_want="$3" ad_pu_i=0 ad_pu_v=""
-    AD_POLL_OUT=""
-    while [[ $ad_pu_i -lt 100 ]]; do
-        AD_POLL_OUT=$(ad_path "$AD" poll --job "$ad_pu_job" --scratch-dir "$ad_pu_scratch")
-        ad_pu_v=$(printf '%s' "$AD_POLL_OUT" | jq -r '.verdict' 2>/dev/null || echo "")
-        [[ "$ad_pu_v" == "$ad_pu_want" ]] && return 0
-        sleep 0.05
-        ad_pu_i=$((ad_pu_i + 1))
-    done
-    return 1
-}
 
 # AD-11: rapid-completion acceptance — the wrapper of an instantly
 # completing engine can die before ps ever yields its lstart identity.
