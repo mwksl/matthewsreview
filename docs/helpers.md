@@ -8,6 +8,14 @@ Each script has a 20–60 line file-header docblock that's authoritative for the
 contract — `head -40 bin/<script>` for any helper. This file is the one-page
 overview; AGENTS.md keeps a one-liner pointer.
 
+Not in the tables: `bin/schema-v1.json` (data file — artifact-shape source of
+truth, per AGENTS.md) and `bin/include` (transclusion preprocessor, currently
+unused — post-Stage-4 fragments are Read-loaded and no command grants
+`Bash(include:*)`; see AGENTS.md rule 10 before re-adding a call site).
+Installer/build tooling lives outside `bin/` and outside this doc:
+`install.sh` (Codex skill install), `scripts/build-codex-skills.sh`,
+`scripts/dev-run.sh` — see README §Install / §Layout.
+
 ## Readers (safe for any agent)
 
 | Script | Lang | Purpose |
@@ -35,6 +43,20 @@ overview; AGENTS.md keeps a one-liner pointer.
 | `artifact-render.py` | Python | `artifact.json` → `artifact.md`. Uses jsonschema validation; reads disposition for section selection. |
 | `artifact-validate.sh` | Bash | Thin wrapper around the Python validator. |
 
+## Dispatch & config (harness layer)
+
+The v1.0.0 multi-harness layer: per-role model plans plus engine-neutral
+sub-agent dispatch. `review-root.sh` and `review-config.sh` are read-only
+resolvers, safe for any agent; `agent-dispatch.sh` spawns engine child
+processes (and `--write` grants them working-tree access) — treat `start`/
+`stop` as orchestrator-only, `poll` as read-only.
+
+| Script | Lang | Purpose |
+|---|---|---|
+| `agent-dispatch.sh` | Bash | Harness-neutral sub-agent dispatch over CLI engines — one job = one child process (`claude -p` / `codex exec` / `omp -p`) running a prompt file. Generalizes the `codex-poll.sh` pattern so any orchestrator (Claude Code, OMP, Codex CLI) can reach any engine per `review-config.sh`'s support matrix. Subcommands: `start --engine <claude\|codex\|omp> --model <m> [--effort <codex-effort\|omp-thinking>] --prompt-file <abs> --scratch-dir <abs> [--write]` → `{job_id, pid, out_file}` (non-blocking; waits for durable child-PID identity before returning); `poll --job <id> --scratch-dir <abs> [--stall-threshold-sec N (90)] [--wall-clock-ceiling-sec N (600)]` → exactly one verdict object — `completed` (with `raw_output` + `tokens\|null`) / `failed_terminal` (with `error_tail`) / `cancelled` / `alive` / `stalled_suspect` / `wall_clock_exceeded` — callers branch on `verdict` exactly as with `codex-poll.sh`; `stop` claims cancellation atomically, authenticates wrapper + engine PIDs, then TERM/check/KILL/check — emits `cancelled` only after both are gone, `already_finished` when completion won the race, `stop_failed` + non-zero when unverifiable. Job state: `<scratch-dir>/<job_id>/{pid,child_pid,engine,out,err,last_message,terminal/{state,exit_code,ready},prompt.md}`. `--write` opens Claude Bash / Codex `workspace-write` / omp yolo as separate argv. Used by the codex-variant fragments (`01/05/06-codex-*`) as the standalone-CLI transport beside the companion, and by the Phase 0 ultra-effort availability probe. Exit: 0 OK, 1 validation/`stop_failed`, 5 missing dependency or unauthenticated engine, 64 usage. Smoke: `AD-*`, `DX-*`. |
+| `review-config.sh` | Bash | Resolves the per-role model plan + gate thresholds (Phase 0; re-resolved by the `:fix` loader in `fragments/08-fix-loader.md`). Merge order, later wins: built-in defaults → `$MATTHEWS_REVIEW_REVIEWS_ROOT/config.json` (user; root via `review-root.sh`) → trusted `<git-ref>:.matthewsreview.json` (`--repo-config-ref` / diagnostic worktree) → `profiles.<name>` (`--profile`; repo base first, then user) → `--models "<k=v,k=v>"` CLI (keys = tier or role; unknown keys rejected with the valid-key list). Role strings `engine:model[:effort-or-thinking]` — engines `claude\|codex\|omp`; claude roles reject the third segment; `codex::high` = empty model = CLI default. 19 roles over 3 tiers (deep: `deep_lens` `deep_validate` `cross_cutting` `fix` `post_fix_review` `reconcile`; light: `light_lens` `light_validate`; utility: `classifier` `normalizer` `dedup` `scoring` `fix_hint` `briefer` `drafter`) plus codex-default roles (`ensemble_detect` `codex_detect` `codex_validate` `codex_crosscut` = `codex::high`). Gates: `phase3_gate` 45, `phase4_bands` [45,60,75], `fix_threshold` 60, `walkthrough_threshold` 60 — resolved values travel on `artifact.gates`, where `parse-validator-result.py` (strength derivation) and `calibration-report.py` (per-run band grouping) read them back. Engine-support matrix enforced per `--orchestrator <claude-code\|omp\|codex>` (e.g. `omp:*` rejected under claude-code; codex orchestrator reaches everything by subprocess). Output: one JSON object `{orchestrator, roles: {<role>: {engine, model, effort, source}}, gates, warnings[]}`; non-zero stderr is error-as-prompt. Exit: 0/1/5/64. Smoke: `RC-*`. |
+| `review-root.sh` | Bash | Canonical reviews-root resolution — the runtime companion to Operational rule 6. Precedence: `--path <abs>` → `MATTHEWS_REVIEW_REVIEWS_ROOT` → legacy `ADAMS_REVIEW_REVIEWS_ROOT` (migration warning) → existing `~/.matthews-reviews` → existing legacy `~/.adams-reviews` (migration warning) → `~/.matthews-reviews` for a new install. Prints exactly one normalized absolute path on stdout; migration guidance goes to stderr so command substitution stays safe. Existing dirs are physical-path canonicalized; nonexistent absolute roots remain valid for first-run creation; relative/multiline input exits 1, usage 64. Single source of truth — `artifact-publish.sh`, `calibration-report.py`, `review-config.sh`, `doctor.sh`, and every command's Phase 0 / loader resolve through it rather than reimplementing fallback (smoke `B6`/`B8a-c`). |
+
 ## Utilities
 
 | Script | Lang | Purpose |
@@ -50,6 +72,8 @@ overview; AGENTS.md keeps a one-liner pointer.
 | `assign-finding-ids.sh` | Bash | Phase 1 post-join. Monotonic ID assignment over the pooled candidate list. |
 | `external-scrape.sh` | Bash | Phase 1.5 PR-comment fetch + bot filter (allow/deny config). |
 | `_common.py` | Python | Shared: schema validate, `atomic_write`, `suggest()` (error-as-prompt), exit-code constants. Imported by every Python helper. |
+| `doctor.sh` | Bash | Environment diagnostic: one `PASS`/`WARN`/`FAIL` line per check plus the exact `fix:` for anything not PASS. Checks: deps (`uv`, `jq`, `gh`, `git`, bash ≥ 3.2); harness CLIs (`claude`/`codex`/`omp` — informational, any one is enough); user + repo model-config syntax and semantic schema (rejects invalid role plans — smoke `RC-12`/`RC-12b`; honors a custom reviews root, `RC-13`); stale pre-rename remnants (`~/.adams-reviews`, `ADAMS_REVIEW_*` env, `adamsreview@adamsreview` in Claude settings, cache-path allowlists). `--quiet` prints WARN/FAIL only — the `hooks/dep-check.sh` SessionStart mode; run the full report manually after install/upgrade or when a command misbehaves. Exit: 0 pass-or-warn-only, 5 missing required dep / invalid config, 64 usage. |
+| `calibration-report.py` | Python | Operator-facing telemetry aggregator — not called by any phase; surfaced via the skill's Calibration bullet for tuning `gates`/tiers in `config.json`. Walks every `<root>/<slug>/<branch>/<rev_*>/` run dir and renders a markdown calibration report to stdout: are the Phase 3 gate and Phase 4 bands well-placed, where do tokens go, how reliable are the lenses. Inputs per run: `artifact.json` (dispositions + `score_phase3`/`score_phase4`), `phases.jsonl` (`demote_rate`), `tokens.jsonl` (per-phase tokens), `trace.md` (`lens_*` transport-anomaly event lines — killed / resume / wall_clock_exceeded). Emits runs-analyzed count, demote-rate median, waste basis (`disproven`+`uncertain`)/total, per-phase token count/median/total table, and score-band × disposition matrices grouped by each run's own resolved `phase4_bands` (`_common.resolve_phase4_bands` — runs with different band configs never pollute each other's matrix). Root argument optional — defaults through `review-root.sh` canonical semantics (legacy fallback, absolute-path enforcement; smoke `B8c`). Row-isolated: invalid artifacts and malformed JSONL rows warn-and-skip while valid neighbors still aggregate; huge token counts use exact `Fraction` medians. Exit: 0 OK, 1 no-runs/bad-root, 64 usage. Smoke: `CAL-1..6`. |
 
 ## Batched-helper pattern
 
