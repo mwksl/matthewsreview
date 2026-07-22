@@ -18,6 +18,9 @@ Usage:
 
 If --output is omitted, Markdown goes to stdout. `--max-bytes` applies
 only to the bounded `pr-comment` overflow format.
+
+Exits: 0 OK; 1 EXIT_VALIDATION (artifact missing, schema-invalid, or
+--max-bytes below the pr-comment minimum); 64 usage (bad --format).
 """
 
 import html
