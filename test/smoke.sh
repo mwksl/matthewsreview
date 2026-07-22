@@ -2799,6 +2799,25 @@ else
     fail "CF-7: expected unreachable; got len=$len stderr=$(cat "$CF_DIR/cf7.err")"
 fi
 
+# CF-8: missing-dep guard — a dep-less PATH fails at entry with exit 5
+# (error-as-prompt), per the AGENTS.md rule-3 contract (a function named
+# die_missing_dep must return EXIT_MISSING_DEP, not the validation code).
+# Run via /bin/bash so the empty PATH only affects the script's own
+# lookups, not the `#!/usr/bin/env bash` shebang. Only bash builtins run
+# pre-guard, so the git guard (the first of the three) fires.
+mkdir -p "$CF_DIR/cf8-emptybin"
+cf8_rc=0
+cf8_err=$(PATH="$CF_DIR/cf8-emptybin" /bin/bash "$TOOLS/comment-freshness.sh" \
+    --fixtures-dir "$CF_DIR/fixtures" --reviewed-files "a.txt" \
+    2>&1 >/dev/null) || cf8_rc=$?
+if [[ "$cf8_rc" == "5" ]] \
+    && echo "$cf8_err" | grep -q 'git not found' \
+    && echo "$cf8_err" | grep -q '^Action:'; then
+    pass "CF-8: missing-dep guard — dep-less PATH exits 5 with error-as-prompt at entry"
+else
+    fail "CF-8: expected rc=5 + 'git not found' + 'Action:'; got rc=$cf8_rc err='$cf8_err'"
+fi
+
 # ------------------------------------------------------------------ Stage 2.8.B guards
 # These two assertions confirm --since is actually gone (not just ignored).
 # CF-ES-1 also exercises the fixture-replay happy path without --since — was
