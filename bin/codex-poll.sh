@@ -50,7 +50,7 @@
 # Exit codes:
 #   0   verdict emitted on stdout (the verdict carries the meaning;
 #       we do not use exit codes to encode decisions)
-#   5   codex-companion missing or `status --json` itself failed
+#   5   jq or codex-companion missing, or `status --json` itself failed
 #  64   usage error
 
 set -u
@@ -149,6 +149,30 @@ if [[ ! -f "$COMPANION" ]]; then
     die_dep "codex-companion not found at '$COMPANION'" \
         "verify the codex plugin is installed and \$CODEX_COMPANION is set."
 fi
+command -v jq >/dev/null 2>&1 \
+    || die_dep "jq not found on \$PATH" \
+        "install jq (codex-poll.sh emits its JSON verdicts via jq)."
+
+# Temp-file hygiene for the mktemp scratch files below. The inline
+# `rm -f` calls stay (idempotent); the EXIT trap covers early exits,
+# and HUP/INT/TERM are re-raised as exits so it also runs when a
+# signal lands while blocked in a `node "$COMPANION"` call — bash
+# skips EXIT traps on unhandled fatal signals.
+status_err=""
+result_err=""
+cleanup_temp_files() {
+    [[ -n "$status_err" ]] && rm -f "$status_err"
+    [[ -n "$result_err" ]] && rm -f "$result_err"
+    return 0
+}
+signal_exit() {
+    trap - HUP INT TERM
+    exit "$1"
+}
+trap cleanup_temp_files EXIT
+trap 'signal_exit 129' HUP
+trap 'signal_exit 130' INT
+trap 'signal_exit 143' TERM
 
 # ---- emission helper ----------------------------------------------------
 

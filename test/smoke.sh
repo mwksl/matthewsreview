@@ -6018,6 +6018,238 @@ else
     fail "AD-10: large omp prompt was not file-backed" "$ad_out"
 fi
 
+# Bounded verdict wait shared by AD-11/12/15 — poll until the wanted
+# verdict lands (≤5s), dcbd4de condition-loop style. Sets AD_POLL_OUT.
+ad_poll_until() { # job scratch wanted-verdict
+    local ad_pu_job="$1" ad_pu_scratch="$2" ad_pu_want="$3" ad_pu_i=0 ad_pu_v=""
+    AD_POLL_OUT=""
+    while [[ $ad_pu_i -lt 100 ]]; do
+        AD_POLL_OUT=$(ad_path "$AD" poll --job "$ad_pu_job" --scratch-dir "$ad_pu_scratch")
+        ad_pu_v=$(printf '%s' "$AD_POLL_OUT" | jq -r '.verdict' 2>/dev/null || echo "")
+        [[ "$ad_pu_v" == "$ad_pu_want" ]] && return 0
+        sleep 0.05
+        ad_pu_i=$((ad_pu_i + 1))
+    done
+    return 1
+}
+
+# AD-11: rapid-completion acceptance — the wrapper of an instantly
+# completing engine can die before ps ever yields its lstart identity.
+# start must accept the job via the ready + terminal/ready sentinels
+# instead of failing (no live process remains for stop to authenticate);
+# pid_identity is legitimately absent. The ps interposition blanks
+# lstart probes for exactly this job's wrapper pid (read from the pid
+# file the parent persists before its first probe), so the parent never
+# observes an identity even if it races ahead of the wrapper's death.
+AD11_SCRATCH="$AD_HOME/scratch-ad11"
+mkdir -p "$AD11_SCRATCH"
+cat > "$AD_HOME/bin/ps" <<EOF
+#!/usr/bin/env bash
+target=""
+previous=""
+for arg in "\$@"; do
+    if [[ "\$previous" == "-p" ]]; then target="\$arg"; fi
+    previous="\$arg"
+done
+if [[ "\$*" == *"lstart="* ]]; then
+    for ad11_pid_file in "$AD11_SCRATCH"/ad_*/pid; do
+        [[ -f "\$ad11_pid_file" ]] || continue
+        if [[ "\$target" == "\$(cat "\$ad11_pid_file")" ]]; then
+            exit 0
+        fi
+    done
+fi
+exec "$ad_real_ps" "\$@"
+EOF
+chmod +x "$AD_HOME/bin/ps"
+ad11_rc=0
+ad11_start=$(ad_path "$AD" start --engine omp --model m1 \
+    --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD11_SCRATCH" 2>&1) || ad11_rc=$?
+rm -f "$AD_HOME/bin/ps"
+ad11_job=$(printf '%s' "$ad11_start" | jq -r '.job_id // empty' 2>/dev/null || echo "")
+ad11_no_identity=false
+[[ -n "$ad11_job" && ! -f "$AD11_SCRATCH/$ad11_job/pid_identity" ]] && ad11_no_identity=true
+ad11_out=""
+if [[ -n "$ad11_job" ]] && ad_poll_until "$ad11_job" "$AD11_SCRATCH" completed; then
+    ad11_out="$AD_POLL_OUT"
+fi
+if [[ "$ad11_rc" == "0" && "$ad11_no_identity" == "true" ]] \
+   && [[ $(printf '%s' "$ad11_out" | jq -r '.raw_output' 2>/dev/null) == *"omp done"* ]]; then
+    pass "AD-11: rapid completion without observable wrapper identity — sentinel branch accepts the job"
+else
+    fail "AD-11: rapid-completion race regressed" \
+      "rc=$ad11_rc start=$ad11_start no_identity=$ad11_no_identity poll=$ad11_out"
+fi
+
+# AD-12: malformed engine output degrades to the raw-copy fallback with
+# tokens=null instead of failing the poll — claude emitting non-JSON and
+# codex emitting non-JSONL with no -o file both still complete.
+mv "$AD_HOME/bin/claude" "$AD_HOME/bin/claude.sav12"
+cat > "$AD_HOME/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+echo 'plain-text-not-json'
+EOF
+chmod +x "$AD_HOME/bin/claude"
+ad12_j1=$(ad_path "$AD" start --engine claude --model opus \
+    --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+ad12_out1=""
+ad_poll_until "$ad12_j1" "$AD_HOME/scratch" completed && ad12_out1="$AD_POLL_OUT"
+mv "$AD_HOME/bin/claude.sav12" "$AD_HOME/bin/claude"
+mv "$AD_HOME/bin/codex" "$AD_HOME/bin/codex.sav12"
+cat > "$AD_HOME/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "login" && "${2:-}" == "status" ]]; then
+    exit 0
+fi
+cat >/dev/null
+echo 'not jsonl {{{'
+EOF
+chmod +x "$AD_HOME/bin/codex"
+ad12_j2=$(ad_path "$AD" start --engine codex \
+    --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+ad12_out2=""
+ad_poll_until "$ad12_j2" "$AD_HOME/scratch" completed && ad12_out2="$AD_POLL_OUT"
+mv "$AD_HOME/bin/codex.sav12" "$AD_HOME/bin/codex"
+if [[ $(printf '%s' "$ad12_out1" | jq -r '.raw_output') == "plain-text-not-json" ]] \
+   && [[ $(printf '%s' "$ad12_out1" | jq -r '.tokens') == "null" ]] \
+   && [[ $(printf '%s' "$ad12_out2" | jq -r '.raw_output') == "not jsonl {{{" ]] \
+   && [[ $(printf '%s' "$ad12_out2" | jq -r '.tokens') == "null" ]]; then
+    pass "AD-12: malformed claude/codex output falls back to raw copy with tokens=null"
+else
+    fail "AD-12: malformed-output fallback mismatch" "claude=$ad12_out1 codex=$ad12_out2"
+fi
+
+# AD-13: malformed terminal records fail closed — poll and stop exit 1
+# with error-as-prompt and never rewrite the record. Covers a garbage
+# state token and an incoherent completed/exit_code pair.
+ad13_a="$AD_HOME/scratch/ad_20260722T000010Z_131"
+ad13_b="$AD_HOME/scratch/ad_20260722T000011Z_132"
+mkdir -p "$ad13_a/terminal" "$ad13_b/terminal"
+printf 'exploded\n' > "$ad13_a/terminal/state"
+printf '1\n' > "$ad13_a/terminal/ready"
+printf 'completed\n' > "$ad13_b/terminal/state"
+printf '3\n' > "$ad13_b/terminal/exit_code"
+printf '1\n' > "$ad13_b/terminal/ready"
+ad13_sum_before=$(cat "$ad13_a/terminal/state" "$ad13_b/terminal/state" "$ad13_b/terminal/exit_code" | shasum | awk '{print $1}')
+ad13_poll_a_err=$(ad_path "$AD" poll --job ad_20260722T000010Z_131 --scratch-dir "$AD_HOME/scratch" 2>&1 >/dev/null); ad13_poll_a_rc=$?
+ad13_poll_b_err=$(ad_path "$AD" poll --job ad_20260722T000011Z_132 --scratch-dir "$AD_HOME/scratch" 2>&1 >/dev/null); ad13_poll_b_rc=$?
+ad13_stop_err=$(ad_path "$AD" stop --job ad_20260722T000010Z_131 --scratch-dir "$AD_HOME/scratch" 2>&1 >/dev/null); ad13_stop_rc=$?
+ad13_sum_after=$(cat "$ad13_a/terminal/state" "$ad13_b/terminal/state" "$ad13_b/terminal/exit_code" | shasum | awk '{print $1}')
+if [[ $ad13_poll_a_rc -eq 1 && "$ad13_poll_a_err" == *"malformed"* && "$ad13_poll_a_err" == *"Action:"* \
+   && $ad13_poll_b_rc -eq 1 && "$ad13_poll_b_err" == *"malformed"* \
+   && $ad13_stop_rc -eq 1 && "$ad13_stop_err" == *"malformed"* \
+   && "$ad13_sum_before" == "$ad13_sum_after" ]]; then
+    pass "AD-13: malformed terminal records fail closed on poll and stop without rewrite"
+else
+    fail "AD-13: malformed-terminal handling mismatch" \
+      "pa=$ad13_poll_a_rc:$ad13_poll_a_err pb=$ad13_poll_b_rc:$ad13_poll_b_err stop=$ad13_stop_rc:$ad13_stop_err sums=$ad13_sum_before/$ad13_sum_after"
+fi
+
+# AD-14: stall + ceiling verdicts from a live wrapper, and the codex-only
+# stall rule. Sleeper engines keep the wrapper alive; mtime backdating
+# (both out and err — poll maxes the two) and started_epoch poking drive
+# each verdict without real waiting. Ceiling is checked before stall, so
+# both-true pins the ordering. The omp sibling with identically backdated
+# files must stay alive: only codex streams JSONL progress.
+mv "$AD_HOME/bin/codex" "$AD_HOME/bin/codex.sav14"
+cp "$AD_HOME/bin/sleeper-engine.sh" "$AD_HOME/bin/codex"
+mv "$AD_HOME/bin/omp" "$AD_HOME/bin/omp.sav14"
+cat > "$AD_HOME/bin/omp" <<'EOF'
+#!/usr/bin/env bash
+exec /bin/sleep 30
+EOF
+chmod +x "$AD_HOME/bin/omp"
+ad14_cx=$(ad_path "$AD" start --engine codex \
+    --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+ad14_om=$(ad_path "$AD" start --engine omp \
+    --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+ad14_cxd="$AD_HOME/scratch/$ad14_cx"
+ad14_omd="$AD_HOME/scratch/$ad14_om"
+ad14_w=0
+while [[ ( ! -f "$ad14_cxd/out" || ! -f "$ad14_cxd/err" \
+        || ! -f "$ad14_omd/out" || ! -f "$ad14_omd/err" ) && $ad14_w -lt 100 ]]; do
+    sleep 0.05
+    ad14_w=$((ad14_w + 1))
+done
+ad14_v1=$(ad_path "$AD" poll --job "$ad14_cx" --scratch-dir "$AD_HOME/scratch" \
+    --stall-threshold-sec 3600 --wall-clock-ceiling-sec 3600 | jq -r .verdict)
+touch -t 202001010000 "$ad14_cxd/out" "$ad14_cxd/err"
+ad14_p2=$(ad_path "$AD" poll --job "$ad14_cx" --scratch-dir "$AD_HOME/scratch" \
+    --stall-threshold-sec 60 --wall-clock-ceiling-sec 3600)
+printf '%s\n' "$(( $(date +%s) - 7200 ))" > "$ad14_cxd/started_epoch"
+ad14_v3=$(ad_path "$AD" poll --job "$ad14_cx" --scratch-dir "$AD_HOME/scratch" \
+    --stall-threshold-sec 60 --wall-clock-ceiling-sec 3600 | jq -r .verdict)
+touch -t 202001010000 "$ad14_omd/out" "$ad14_omd/err"
+ad14_v4=$(ad_path "$AD" poll --job "$ad14_om" --scratch-dir "$AD_HOME/scratch" \
+    --stall-threshold-sec 60 --wall-clock-ceiling-sec 3600 | jq -r .verdict)
+ad14_s1=$(ad_path "$AD" stop --job "$ad14_cx" --scratch-dir "$AD_HOME/scratch" | jq -r .verdict)
+ad14_s2=$(ad_path "$AD" stop --job "$ad14_om" --scratch-dir "$AD_HOME/scratch" | jq -r .verdict)
+mv "$AD_HOME/bin/codex.sav14" "$AD_HOME/bin/codex"
+mv "$AD_HOME/bin/omp.sav14" "$AD_HOME/bin/omp"
+if [[ "$ad14_v1" == "alive" ]] \
+   && printf '%s' "$ad14_p2" | jq -e '.verdict == "stalled_suspect" and .output_age_sec > 60' >/dev/null \
+   && [[ "$ad14_v3" == "wall_clock_exceeded" && "$ad14_v4" == "alive" \
+      && "$ad14_s1" == "cancelled" && "$ad14_s2" == "cancelled" ]]; then
+    pass "AD-14: stall/ceiling verdicts — alive, codex stalled_suspect, ceiling-before-stall, omp exempt"
+else
+    fail "AD-14: watchdog verdict matrix mismatch" \
+      "v1=$ad14_v1 p2=$ad14_p2 v3=$ad14_v3 v4=$ad14_v4 s1=$ad14_s1 s2=$ad14_s2"
+fi
+
+# AD-15: parallel job isolation on one scratch dir — three gated omp jobs
+# complete/cancel independently, each emitting its own job_id as marker
+# (derived from the @prompt argv, so no cross-job env can leak), and a
+# sibling's stop never perturbs another job's terminal payload.
+mv "$AD_HOME/bin/omp" "$AD_HOME/bin/omp.sav15"
+cat > "$AD_HOME/bin/omp" <<'EOF'
+#!/usr/bin/env bash
+job_dir=""
+for arg in "$@"; do
+    case "$arg" in @*) job_dir=$(dirname "${arg#@}") ;; esac
+done
+gate_wait=0
+while [[ ! -f "$job_dir/gate" && $gate_wait -lt 600 ]]; do
+    /bin/sleep 0.05
+    gate_wait=$((gate_wait + 1))
+done
+[[ -f "$job_dir/gate" ]] || exit 9
+printf 'marker=%s\n' "$(basename "$job_dir")"
+EOF
+chmod +x "$AD_HOME/bin/omp"
+AD15_SCRATCH="$AD_HOME/scratch-ad15"
+mkdir -p "$AD15_SCRATCH"
+ad15_a=$(ad_path "$AD" start --engine omp \
+    --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD15_SCRATCH" | jq -r .job_id)
+ad15_b=$(ad_path "$AD" start --engine omp \
+    --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD15_SCRATCH" | jq -r .job_id)
+ad15_c=$(ad_path "$AD" start --engine omp \
+    --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD15_SCRATCH" | jq -r .job_id)
+ad15_distinct=false
+[[ -n "$ad15_a" && -n "$ad15_b" && -n "$ad15_c" \
+   && "$ad15_a" != "$ad15_b" && "$ad15_b" != "$ad15_c" && "$ad15_a" != "$ad15_c" ]] \
+    && ad15_distinct=true
+touch "$AD15_SCRATCH/$ad15_c/gate"
+ad15_c_out=""
+ad_poll_until "$ad15_c" "$AD15_SCRATCH" completed && ad15_c_out="$AD_POLL_OUT"
+touch "$AD15_SCRATCH/$ad15_a/gate"
+ad15_a_out1=""
+ad_poll_until "$ad15_a" "$AD15_SCRATCH" completed && ad15_a_out1="$AD_POLL_OUT"
+ad15_b_v=$(ad_path "$AD" poll --job "$ad15_b" --scratch-dir "$AD15_SCRATCH" | jq -r .verdict)
+ad15_b_s=$(ad_path "$AD" stop --job "$ad15_b" --scratch-dir "$AD15_SCRATCH" | jq -r .verdict)
+ad15_a_out2=$(ad_path "$AD" poll --job "$ad15_a" --scratch-dir "$AD15_SCRATCH")
+mv "$AD_HOME/bin/omp.sav15" "$AD_HOME/bin/omp"
+if [[ "$ad15_distinct" == "true" ]] \
+   && [[ $(printf '%s' "$ad15_c_out" | jq -r '.raw_output') == "marker=$ad15_c" ]] \
+   && [[ $(printf '%s' "$ad15_a_out1" | jq -r '.raw_output') == "marker=$ad15_a" ]] \
+   && [[ "$ad15_b_v" == "alive" && "$ad15_b_s" == "cancelled" ]] \
+   && [[ "$ad15_a_out1" == "$ad15_a_out2" ]]; then
+    pass "AD-15: three concurrent jobs on one scratch dir stay isolated through completion, stop, and re-poll"
+else
+    fail "AD-15: parallel-isolation contract mismatch" \
+      "distinct=$ad15_distinct c=$ad15_c_out a1=$ad15_a_out1 bv=$ad15_b_v bs=$ad15_b_s a2=$ad15_a_out2"
+fi
+
 # CG-1: generated Codex skills preserve thematic `---` lines after command
 # frontmatter; only the first frontmatter pair is stripped.
 CG_REPO="$WORK/codex-gen"
@@ -6471,6 +6703,13 @@ jq '.gates={"phase3_gate":12,"phase4_bands":[10,20,30],"fix_threshold":25,"walkt
 mv "$cal_tmp" "$CAL_HOME/slug-b/nested/branch-y/rev_002/artifact.json"
 printf '%s\n' '{"name":"scoring-gate","demote_rate":0.5}' > "$CAL_HOME/slug-a/branch-x/rev_001/phases.jsonl"
 printf '%s\n' '{"phase":"phase_1","tokens":1000}' > "$CAL_HOME/slug-a/branch-x/rev_001/tokens.jsonl"
+cat > "$CAL_HOME/slug-a/branch-x/rev_001/trace.md" <<'TRACE'
+lens_L3 killed after stall (attempt 1)
+lens_L5 wall_clock_exceeded at 600s
+lens_L3 resumed on retry
+lens_L1 dispatched cleanly
+the lens was killed (prose decoy — must not count)
+TRACE
 cal_out=$("$TOOLS/calibration-report.py" "$CAL_HOME")
 cal_findings=$(jq '[.findings[] | select(.disposition=="disproven" or .disposition=="uncertain")] | length' "$FIX/artifact-seed.json")
 cal_total=$(jq '.findings | length' "$FIX/artifact-seed.json")
@@ -6483,6 +6722,17 @@ if printf '%s' "$cal_out" | grep -q 'Runs analyzed: \*\*2\*\*' \
     pass "CAL-1: calibration groups score matrices by each run's resolved bands"
 else
     fail "CAL-1: calibration aggregation mismatch" "$(printf '%s' "$cal_out" | head -12)"
+fi
+
+# CAL-6: lens transport-anomaly counting from trace.md — boundary-delimited
+# killed/resume(d)/wall_clock_exceeded tokens on lens_* event lines count
+# (3 above); a clean dispatch line and a prose decoy that does not start
+# with lens_ must not.
+if printf '%s' "$cal_out" | grep -qF 'Total lens anomalies (killed/resume/wall_clock): **3**'; then
+    pass "CAL-6: trace.md lens anomalies counted with token boundaries; decoys excluded"
+else
+    fail "CAL-6: lens-anomaly counting mismatch" \
+      "$(printf '%s' "$cal_out" | grep -i 'anomal' || printf 'no anomaly line found')"
 fi
 
 # CAL-2: no-argument calibration honors the explicit review-root override.
@@ -7735,6 +7985,71 @@ if [[ "$fg3_freshness" == "no_fetch" && "$fg3_compref" == "main" \
     pass "FG-3 (§13.10): fetch-failure case — base_freshness=no_fetch, fetch_failed warning buffered"
 else
     fail "FG-3: expected no_fetch/main/warn_len=1/'fetch_failed ...'; got freshness=$fg3_freshness compref=$fg3_compref warn_len=$fg3_warn_len warn_head='$fg3_warn_head'"
+fi
+
+# FG-4: jq entry guard — a jq-less PATH fails at entry with exit 5
+# (error-as-prompt), before any git call or network side effect. Run via
+# /bin/bash so the empty PATH only affects the script's own lookups, not
+# the `#!/usr/bin/env bash` shebang. Only bash builtins run pre-guard.
+mkdir -p "$FG_DIR/fg4-emptybin"
+fg4_rc=0
+fg4_err=$(PATH="$FG_DIR/fg4-emptybin" /bin/bash "$TOOLS/freshness-gate.sh" \
+    --base-branch main --head-branch feat 2>&1 >/dev/null) || fg4_rc=$?
+if [[ "$fg4_rc" == "5" ]] \
+    && echo "$fg4_err" | grep -q 'jq not found' \
+    && echo "$fg4_err" | grep -q '^Action:'; then
+    pass "FG-4: jq entry guard — jq-less PATH exits 5 with error-as-prompt before any git call"
+else
+    fail "FG-4: expected rc=5 + 'jq not found' + 'Action:'; got rc=$fg4_rc err='$fg4_err'"
+fi
+
+# FG-5: EXIT-trap temp hygiene — a broken jq kills the helper under
+# `set -e` between mktemp (ff_err_file) and its inline rm -f: the
+# --after-choice a HEAD-on-base path fast-forwards cleanly ("already up
+# to date" clone), then emit_terminal's jq fails. The trap must still
+# remove the scratch file. Location is pinned via a PATH-interposed
+# mktemp wrapper: macOS mktemp -t ignores TMPDIR (files land in the
+# /var/folders system temp), so TMPDIR scoping alone would leave this
+# leak check vacuous on the macOS CI leg.
+mkdir -p "$FG_DIR/fg5/origin" "$FG_DIR/fg5/tmp" "$FG_DIR/fg5/stubbin"
+(
+    cd "$FG_DIR/fg5/origin"
+    git init --quiet --initial-branch=main 2>/dev/null || git init --quiet
+    git symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+    git config user.email smoke@example.com
+    git config user.name smoke
+    printf 'a\n' > f.txt
+    git add f.txt && git commit --quiet -m "initial"
+)
+git clone --quiet "$FG_DIR/fg5/origin" "$FG_DIR/fg5/repo" 2>/dev/null
+(
+    cd "$FG_DIR/fg5/repo"
+    git config user.email smoke@example.com
+    git config user.name smoke
+)
+cat > "$FG_DIR/fg5/stubbin/jq" <<'EOS'
+#!/usr/bin/env bash
+exit 7
+EOS
+chmod +x "$FG_DIR/fg5/stubbin/jq"
+FG5_REAL_MKTEMP=$(command -v mktemp)
+cat > "$FG_DIR/fg5/stubbin/mktemp" <<EOS
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "-t" && -n "\${2:-}" ]]; then
+    exec "$FG5_REAL_MKTEMP" "$FG_DIR/fg5/tmp/\$2"
+fi
+exec "$FG5_REAL_MKTEMP" "\$@"
+EOS
+chmod +x "$FG_DIR/fg5/stubbin/mktemp"
+fg5_rc=0
+(cd "$FG_DIR/fg5/repo" && PATH="$FG_DIR/fg5/stubbin:$PATH" \
+    "$TOOLS/freshness-gate.sh" --base-branch main --head-branch main \
+    --after-choice a >/dev/null 2>&1) || fg5_rc=$?
+fg5_leftover=$(find "$FG_DIR/fg5/tmp" -name 'matthews-ff-err.*' 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$fg5_rc" != "0" && "$fg5_leftover" == "0" ]]; then
+    pass "FG-5: EXIT trap removes mktemp scratch when broken jq aborts emit under set -e"
+else
+    fail "FG-5: expected rc!=0 + zero leftover matthews-ff-err.*; got rc=$fg5_rc leftover=$fg5_leftover"
 fi
 
 # ------------------------------------------------------------------ TC-* trivial-check.sh
@@ -9150,6 +9465,87 @@ if printf '%s\n' "$cr16c_block" | grep -qF 'ERROR: no usable Codex transport.' \
     pass "CR-16c: codex-review.md retains fatal exit when companion and standalone Codex are both unavailable"
 else
     fail "CR-16c: codex-review.md final no-transport branch is not fatal"
+fi
+
+# CR-17: jq entry guard — codex-poll.sh guards node and the companion
+# but must also guard jq (its only JSON emitter) before any mktemp or
+# external call. A PATH with node but no jq exits 5 error-as-prompt.
+# Run via /bin/bash so the stripped PATH only affects the script's own
+# lookups, not the `#!/usr/bin/env bash` shebang.
+CR17_DIR="$WORK/cr17"
+mkdir -p "$CR17_DIR/bin"
+printf '#!/bin/sh\nexit 0\n' > "$CR17_DIR/bin/node"
+chmod +x "$CR17_DIR/bin/node"
+: > "$CR17_DIR/companion.mjs"
+cr17_rc=0
+cr17_err=$(PATH="$CR17_DIR/bin" /bin/bash "$TOOLS/codex-poll.sh" \
+    --job cr17job --companion "$CR17_DIR/companion.mjs" \
+    --stall-threshold-sec 5 --wall-clock-ceiling-sec 5 \
+    2>&1 >/dev/null) || cr17_rc=$?
+if [[ "$cr17_rc" == "5" ]] \
+    && echo "$cr17_err" | grep -q 'jq not found' \
+    && echo "$cr17_err" | grep -q '^Action:'; then
+    pass "CR-17: jq entry guard — node-only PATH exits 5 with error-as-prompt before any mktemp"
+else
+    fail "CR-17: expected rc=5 + 'jq not found' + 'Action:'; got rc=$cr17_rc err='$cr17_err'"
+fi
+
+# CR-18: EXIT-trap temp hygiene on the signal path — TERM lands while
+# codex-poll is blocked in `node "$COMPANION" status` (stub writes its
+# pid marker then execs /bin/sleep). Kill both the script and the node
+# child (bash defers a trapped TERM until the foreground child exits),
+# then assert non-zero exit + zero leftover scratch files. Location is
+# pinned via a PATH-interposed mktemp wrapper (macOS mktemp -t ignores
+# TMPDIR — see FG-5). Without the traps an untrapped TERM kills bash
+# mid-wait and leaks the mktemp file made just before the node call.
+CR18_DIR="$WORK/cr18"
+mkdir -p "$CR18_DIR/bin" "$CR18_DIR/tmp"
+: > "$CR18_DIR/companion.mjs"
+cat > "$CR18_DIR/bin/node" <<'EOS'
+#!/usr/bin/env bash
+printf '%s' "$$" > "$CR18_MARKER"
+exec /bin/sleep 300
+EOS
+chmod +x "$CR18_DIR/bin/node"
+CR18_REAL_MKTEMP=$(command -v mktemp)
+cat > "$CR18_DIR/bin/mktemp" <<EOS
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "-t" && -n "\${2:-}" ]]; then
+    exec "$CR18_REAL_MKTEMP" "$CR18_DIR/tmp/\$2"
+fi
+exec "$CR18_REAL_MKTEMP" "\$@"
+EOS
+chmod +x "$CR18_DIR/bin/mktemp"
+CR18_MARKER="$CR18_DIR/node.pid" \
+    PATH="$CR18_DIR/bin:$PATH" "$TOOLS/codex-poll.sh" \
+    --job cr18job --companion "$CR18_DIR/companion.mjs" \
+    --stall-threshold-sec 600 --wall-clock-ceiling-sec 600 \
+    >/dev/null 2>&1 &
+cr18_script_pid=$!
+cr18_w=0
+while [[ ! -s "$CR18_DIR/node.pid" && "$cr18_w" -lt 100 ]]; do
+    sleep 0.05
+    cr18_w=$((cr18_w + 1))
+done
+cr18_node_pid=$(cat "$CR18_DIR/node.pid" 2>/dev/null || echo "")
+kill -TERM "$cr18_script_pid" 2>/dev/null || true
+[[ -n "$cr18_node_pid" ]] && kill -TERM "$cr18_node_pid" 2>/dev/null
+cr18_w=0
+while kill -0 "$cr18_script_pid" 2>/dev/null && [[ "$cr18_w" -lt 100 ]]; do
+    sleep 0.05
+    cr18_w=$((cr18_w + 1))
+done
+if kill -0 "$cr18_script_pid" 2>/dev/null; then
+    kill -KILL "$cr18_script_pid" 2>/dev/null || true
+    [[ -n "$cr18_node_pid" ]] && kill -KILL "$cr18_node_pid" 2>/dev/null
+fi
+cr18_rc=0
+wait "$cr18_script_pid" 2>/dev/null || cr18_rc=$?
+cr18_leftover=$(find "$CR18_DIR/tmp" -name 'matthews-codex-poll*' 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$cr18_rc" != "0" && "$cr18_leftover" == "0" && -n "$cr18_node_pid" ]]; then
+    pass "CR-18: TERM during blocked companion call — trap re-raise leaves zero scratch files"
+else
+    fail "CR-18: expected rc!=0 + zero matthews-codex-poll* leftovers + node started; got rc=$cr18_rc leftover=$cr18_leftover node_pid='$cr18_node_pid'"
 fi
 
 # DF-1: large L1 diffs retain full ≤4k-line shard coverage while bounding

@@ -1,3 +1,5 @@
+> **FROZEN historical reference** (pre-rename `adams-review` design, rev 8, archived 2026-04-19) — consult only for past-decision rationale; `per §X.Y` citations resolve against this file at `docs/archive/DESIGN.md`. Pre-rename paths/env vars are dead: `~/.adams-reviews` → `~/.matthews-reviews`, `ADAMS_REVIEW_*` → `MATTHEWS_REVIEW_*`, `commands/_shared/` → `fragments/` + `bin/`. Live docs: `AGENTS.md` + `docs/`.
+
 # Code review command redesign — plan
 
 > **Reference manual — do not read end-to-end.** This file is ~2400 lines and is consulted by anchor, not by reading from the top. Entry point for routine work is `CLAUDE.md`; the `commands/_shared/` fragments cite specific sections (e.g. "per §13.1") when behavior depends on them. To navigate:

@@ -17,7 +17,7 @@ Recommended flow on a non-trivial PR: `:review` (or `:codex-review`) → optiona
 
 Detailed phase trees and the `subagent_tokens` / `orchestrator_tokens` semantics: `docs/pipeline.md`. Both fields are re-tallied before every lifecycle command's final re-render so the published PR comment shows cumulative spend across the review → fix / add / walkthrough arc. `orchestrator_tokens` is Claude Code-only and opt-in via `MATTHEWS_REVIEW_TALLY_ORCHESTRATOR=1`; the `SessionStart` hook scopes it to the exact active transcript/session (macOS provenance-prompt avoidance).
 
-Per-stage history: `plans/`. Historical backlog: `plans/old-backlog.md` (frozen 2026-05-04). Active follow-ups: GitHub issues.
+Per-stage history: `plans/`. Historical backlog: `plans/old-backlog.md` (frozen 2026-05-04). Active follow-ups: GitHub issues. Upstream `adamjgmiller/adamsreview` is dormant: its last push (2026-05-17) is the fork boundary `b5b8ef4` (v0.4.3), zero upstream commits since — re-check with `gh api 'repos/adamjgmiller/adamsreview/commits?since=2026-05-18T00:00:00Z' --jq length`.
 
 ## State, gates, lanes (TL;DR)
 

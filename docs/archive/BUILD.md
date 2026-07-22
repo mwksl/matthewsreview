@@ -1,3 +1,5 @@
+> **FROZEN historical reference** (pre-rename `adams-review` build journal, archived 2026-04-19) — ignore the "read this file first" instruction below; start at `AGENTS.md`. Pre-rename paths/env vars here are dead: `~/.adams-reviews` → `~/.matthews-reviews`, `ADAMS_REVIEW_*` → `MATTHEWS_REVIEW_*`, `commands/_shared/` → `fragments/` + `bin/`. Live docs: `AGENTS.md` + `docs/`.
+
 # BUILD.md — build journal for adams-review
 
 This is the running build journal. `DESIGN.md` is the normative design (rev 8). This file tracks **execution**: where we are, what's landed, what surprised us, and what still needs attention.
