@@ -7,11 +7,9 @@
 # Sonnet normalizer (§19.2a).
 #
 # Code-locality (freshness) filtering is NOT done here — pipe this
-# helper's output into comment-freshness.sh (§21.10) for that. Stage 2.8
-# removed the `--since` time-window filter that used to live at this
-# layer; code locality (not newness) is the right axis for relevance,
-# and running that decision on the full unfiltered set is simpler to
-# reason about than two filters in series at different layers.
+# helper's output into comment-freshness.sh (§21.10). Stage 2.8 removed
+# the `--since` time-window filter: code locality (not newness) is the
+# relevance axis, and one filter at one layer is simpler to reason about.
 #
 # Usage:
 #   external-scrape.sh --pr <num> [--config <path>]
@@ -57,12 +55,12 @@
 #     ...
 #   ]
 #
+# Exits: 0 success (even when zero results); 1 gh error (rate limit,
+# network, auth); 64 usage.
+#
 # Reviews without a body (e.g. plain APPROVED) are retained — the
 # downstream normalizer decides whether they're actionable. Only the
 # bot/time/allow/deny filters apply here.
-#
-# Exits: 0 success (even when zero results); 1 gh error (rate limit,
-# network, auth); 64 usage.
 
 set -euo pipefail
 

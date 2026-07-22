@@ -5,6 +5,13 @@
 # ///
 """artifact-patch.py — canonical writer for artifact.json (DESIGN §8.2, §21.2).
 
+Exit codes (bin/_common.py): 0 OK; 1 validation; 2 invalid-transition;
+3 dry-run-invalid; 4 unexpected; 5 missing-dep; 6 expected-mismatch
+(--apply-decisions / --apply-auto-rec-promotions / --set-scores with
+--expected); 7 all-rejected (--add-findings / --apply-auto-fix-hints);
+64 usage.
+Mode-specific nuances in the mode list below.
+
 Modes (CLI flags; mutually exclusive):
   --init <seed>             create fresh artifact at --path
   --add-finding <finding>   append a new finding to findings[]
@@ -93,6 +100,17 @@ Modes (CLI flags; mutually exclusive):
                             Stdout: {promoted: [ids], total: N} on success.
                             Appends a `## auto_rec_promotions (<ts>)` block
                             to trace.md.
+  --set-scores <array>      Phase 3: batch score_phase3 writes — one
+                            load, N mutations, one atomic write
+                            (replaces per-finding --set loops, which
+                            raced on rapid sequential invocations).
+                            Input is a JSON array of {id, score_phase3
+                            (number|null), reason?} tuples; each score
+                            auto-appends to score_history. First-fail-
+                            halt: any invalid tuple aborts before ANY
+                            write. Requires --expected N (N > 0); a
+                            count mismatch exits
+                            EXIT_EXPECTED_MISMATCH (6).
   --set field=value         mutate a scalar field (repeatable). With
                             --finding-id, targets a finding; without,
                             targets top-level artifact fields.

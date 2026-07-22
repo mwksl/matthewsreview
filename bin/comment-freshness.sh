@@ -52,7 +52,8 @@
 #       [reason=<short>]
 #
 # Exits: 0 success (empty output array OK); 1 EXIT_VALIDATION (bad
-# stdin JSON, missing required fields, unresolvable args); 64 usage.
+# stdin JSON, missing required fields, unresolvable args);
+# 5 EXIT_MISSING_DEP (no git, no jq, no gh); 64 usage.
 
 set -euo pipefail
 
@@ -70,7 +71,11 @@ USAGE
 
 die_usage() { echo "ERROR: $1" >&2; usage; exit 64; }
 die_validation() { echo "ERROR: $1" >&2; exit 1; }
-die_missing_dep() { echo "ERROR: $1" >&2; exit 1; }
+die_missing_dep() {
+    echo "ERROR: $1" >&2
+    [[ -n "${2:-}" ]] && echo "Action: $2" >&2
+    exit 5
+}
 
 PR_NUM=""
 FILES_ARG=""
@@ -110,11 +115,17 @@ if [[ "$FILES_ARG" == "@-" && "$COMMENTS_ARG" == "@-" ]]; then
     die_usage "only one of --reviewed-files / --comments may use @- per invocation"
 fi
 
-command -v git >/dev/null 2>&1 || die_missing_dep "git not found on PATH"
-command -v jq  >/dev/null 2>&1 || die_missing_dep "jq not found on PATH"
+command -v git >/dev/null 2>&1 \
+    || die_missing_dep "git not found on PATH" \
+        "install git — the freshness checks run git diff / cat-file against the PR commits."
+command -v jq  >/dev/null 2>&1 \
+    || die_missing_dep "jq not found on PATH" \
+        "install jq — comment-freshness.sh parses and emits its JSON via jq."
 
 if [[ -z "$FIXTURES_DIR" ]]; then
-    command -v gh >/dev/null 2>&1 || die_missing_dep "gh not found on PATH (needed for pulls/<pr>/commits; use --fixtures-dir for offline testing)"
+    command -v gh >/dev/null 2>&1 \
+        || die_missing_dep "gh not found on PATH" \
+            "install gh (needed for pulls/<pr>/commits), or use --fixtures-dir for offline testing."
 fi
 
 # ---------------------------------------------------------------- load inputs

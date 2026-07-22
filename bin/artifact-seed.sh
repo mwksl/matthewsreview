@@ -33,6 +33,14 @@
 #       [--reviewer-sources internal,internal-codex] \
 #     | artifact-patch.py --init - --path "$artifact_path"
 #
+# Output (stdout): the schema-shaped seed JSON for the new artifact.
+# `artifact-patch.py --init -` validates it against `bin/schema-v1.json`
+# and either writes the artifact or exits non-zero with error-as-prompt
+# stderr (handled by the fragment's retry-once-and-escalate path).
+#
+# Exit codes: 0 success; 1 validation error (bad flag value, malformed
+# --base-context JSON); 64 usage error (missing/unknown flag).
+#
 # Flag shapes (all required unless marked optional; empty-string semantics
 # called out):
 #   --review-id          String matching ^rev_[A-Za-z0-9]+$.
@@ -63,14 +71,6 @@
 #                        the standard `/matthewsreview:review` flow doesn't
 #                        need to pass it. `/matthewsreview:codex-review`
 #                        passes `internal-codex`.
-#
-# Output (stdout): the schema-shaped seed JSON for the new artifact.
-# `artifact-patch.py --init -` validates it against `bin/schema-v1.json`
-# and either writes the artifact or exits non-zero with error-as-prompt
-# stderr (handled by the fragment's retry-once-and-escalate path).
-#
-# Exit codes: 0 success; 1 validation error (bad flag value, malformed
-# --base-context JSON); 64 usage error (missing/unknown flag).
 
 set -euo pipefail
 

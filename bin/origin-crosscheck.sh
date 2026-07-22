@@ -17,17 +17,14 @@
 #   file not in comparison_ref tree:
 #       git log --follow reveals pre-PR ancestor AND blame SHAs ⊆ {file-add
 #         commits}                         → override to pre_existing/high
-#         (file was renamed/extracted from a pre-PR ancestor and the
-#         candidate lines came in with that extraction — F038 case;
-#         this is the one main-path-style override that survives because
-#         the --follow trace is stronger evidence than a lens claim.
-#         Caveat: this branch retains the same Mode 2 risk profile A2
-#         removed from the main path — an exposure finding whose cited
-#         lines live inside an extracted file would still be force-
-#         classified pre_existing/high here. Accepted limitation per
-#         plans/pre-existing-fix.md §A2; recoverable via walkthrough
-#         off-menu promote. Note: Phase 2 dedup C1+C2 in
-#         fragments/03-dedup.md may later cap this override to medium
+#         (renamed/extracted from a pre-PR ancestor with the candidate
+#         lines arriving in that extraction — F038 case; the --follow
+#         trace outweighs a lens claim. Caveat: retains the Mode 2 risk
+#         A2 removed from the main path — an exposure finding inside an
+#         extracted file is still force-classified pre_existing/high —
+#         accepted per plans/pre-existing-fix.md §A2, recoverable via
+#         walkthrough off-menu promote. Phase 2 dedup C1+C2
+#         (fragments/03-dedup.md) may later cap this override to medium
 #         when grouped with same-origin non-high or any cross-origin
 #         sibling; single-id groups preserve the override untouched.)
 #       git log --follow reveals pre-PR ancestor but blame sees later PR

@@ -73,7 +73,7 @@ Each rule is a decision learned the hard way.
 
 All scripts live under `bin/`. Claude Code exposes them on `$PATH`; OMP/Codex use the prelude-resolved `${MRB}` prefix. Claude bare-name invocation: `Bash(<script>:*)` / `<script> --flag ...`. Categories: **readers** (no mutation, safe for any agent), **writers** (orchestrator-only), **utilities** (logs, tallies, batched scaffolding).
 
-Each helper is self-documenting via its file header — `head -40 bin/<script>` for the contract. Full table + cross-references: `docs/helpers.md`. Batched-helper pattern (first-fail-halt for `--apply-*`, continue-on-error for `--add-findings`) also documented there.
+Each helper is self-documenting via its file header — `head -60 bin/<script>` for the contract. Full table + cross-references: `docs/helpers.md`. Batched-helper pattern (first-fail-halt for `--apply-*`, continue-on-error for `--add-findings`) also documented there.
 
 ## How to work on new changes
 
