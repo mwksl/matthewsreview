@@ -11524,15 +11524,31 @@ if [[ "$sub" == "status" ]]; then
         completed)
             printf '{"job":{"status":"completed","logFile":"%s"}}\n' "$DX_NODE_LOG"
             ;;
-        running)
+        running|stalled-agree|desync-result)
             printf '{"job":{"status":"running","logFile":"%s"}}\n' "$DX_NODE_LOG"
             ;;
         failed)
             printf '{"job":{"status":"failed","logFile":"%s"}}\n' "$DX_NODE_LOG"
             ;;
+        desync-status)
+            printf '%s\n' 'No job found for "opaque". Run /codex:status to list jobs.' >&2
+            exit 1
+            ;;
     esac
 elif [[ "$sub" == "result" ]]; then
-    printf '{"storedJob":{"result":{"rawOutput":"companion result"}}}\n'
+    case "$DX_NODE_MODE" in
+        stalled-agree)
+            printf '%s\n' 'resolveResultJob: job "opaque" is still running' >&2
+            exit 1
+            ;;
+        desync-result)
+            printf '%s\n' 'No finished job found for "opaque". Run /codex:status to inspect.' >&2
+            exit 1
+            ;;
+        *)
+            printf '{"storedJob":{"result":{"rawOutput":"companion result"}}}\n'
+            ;;
+    esac
 else
     exit 64
 fi
@@ -11578,6 +11594,64 @@ if [[ -z "$dx_threshold_bad" ]] \
 else
     fail "DX-4: threshold ordering or companion verdict schema failed" \
       "thresholds=$dx_threshold_bad completed=$dx_cp_completed alive=$dx_cp_alive failed=$dx_cp_failed"
+fi
+
+# DX-4b (#7): the two-signal stall/desync fork, behaviorally. CR-13d
+# source-greps the status-path fallback; these probes drive both result-
+# path outcomes and the status-path desync end-to-end through the mode-
+# aware companion stub above. The stale log is backdated past the 90s
+# stall threshold; the stub's status JSON carries no startedAt, so the
+# wall-clock ceiling stays out of the way and the mtime check is reached.
+# A result failure whose stderr says the job is still running must stay
+# stalled_suspect — only the "No (finished )?job found" store-miss
+# confirms the desync.
+: > "$DX_DIR/companion-stale.log"
+touch -t 202001010000 "$DX_DIR/companion-stale.log"
+dx_cp_stalled=$(PATH="$DX_DIR/node-bin:$PATH" \
+    DX_NODE_MODE=stalled-agree DX_NODE_LOG="$DX_DIR/companion-stale.log" \
+    "$TOOLS/codex-poll.sh" --job opaque \
+      --companion "$DX_DIR/companion.mjs" \
+      --stall-threshold-sec 90 --wall-clock-ceiling-sec 600)
+dx_cp_stalled_rc=$?
+dx_cp_desync_result=$(PATH="$DX_DIR/node-bin:$PATH" \
+    DX_NODE_MODE=desync-result DX_NODE_LOG="$DX_DIR/companion-stale.log" \
+    "$TOOLS/codex-poll.sh" --job opaque \
+      --companion "$DX_DIR/companion.mjs" \
+      --stall-threshold-sec 90 --wall-clock-ceiling-sec 600)
+dx_cp_desync_result_rc=$?
+dx_cp_desync_status=$(PATH="$DX_DIR/node-bin:$PATH" \
+    DX_NODE_MODE=desync-status DX_NODE_LOG="$DX_DIR/companion-stale.log" \
+    "$TOOLS/codex-poll.sh" --job opaque \
+      --companion "$DX_DIR/companion.mjs" \
+      --stall-threshold-sec 90 --wall-clock-ceiling-sec 600)
+dx_cp_desync_status_rc=$?
+if [[ "$dx_cp_stalled_rc" -eq 0 && "$dx_cp_desync_result_rc" -eq 0 \
+   && "$dx_cp_desync_status_rc" -eq 0 ]] \
+   && printf '%s' "$dx_cp_stalled" | jq -e '
+        keys == [
+          "elapsed_sec", "log_file", "log_mtime_age_sec", "status", "verdict"
+        ]
+        and .status == "running" and .verdict == "stalled_suspect"
+        and .log_mtime_age_sec > 90 and .elapsed_sec == null
+      ' >/dev/null \
+   && printf '%s' "$dx_cp_desync_result" | jq -e '
+        keys == [
+          "elapsed_sec", "log_file", "log_mtime_age_sec", "status", "verdict"
+        ]
+        and .status == "running" and .verdict == "broker_desynced"
+        and .log_mtime_age_sec > 90
+      ' >/dev/null \
+   && printf '%s' "$dx_cp_desync_status" | jq -e '
+        keys == [
+          "elapsed_sec", "log_file", "log_mtime_age_sec", "status", "verdict"
+        ]
+        and .status == "unknown" and .verdict == "broker_desynced"
+        and .log_file == null and .log_mtime_age_sec == null
+      ' >/dev/null; then
+    pass "DX-4b (#7): still-running result failure stays stalled_suspect; store-miss on result or status path is broker_desynced"
+else
+    fail "DX-4b: two-signal fork misrouted" \
+      "stalled=$dx_cp_stalled_rc:$dx_cp_stalled desync_result=$dx_cp_desync_result_rc:$dx_cp_desync_result desync_status=$dx_cp_desync_status_rc:$dx_cp_desync_status"
 fi
 
 # Standalone Codex must authenticate before creating job state or executing an
