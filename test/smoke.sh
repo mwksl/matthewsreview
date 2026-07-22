@@ -6018,6 +6018,238 @@ else
     fail "AD-10: large omp prompt was not file-backed" "$ad_out"
 fi
 
+# Bounded verdict wait shared by AD-11/12/15 — poll until the wanted
+# verdict lands (≤5s), dcbd4de condition-loop style. Sets AD_POLL_OUT.
+ad_poll_until() { # job scratch wanted-verdict
+    local ad_pu_job="$1" ad_pu_scratch="$2" ad_pu_want="$3" ad_pu_i=0 ad_pu_v=""
+    AD_POLL_OUT=""
+    while [[ $ad_pu_i -lt 100 ]]; do
+        AD_POLL_OUT=$(ad_path "$AD" poll --job "$ad_pu_job" --scratch-dir "$ad_pu_scratch")
+        ad_pu_v=$(printf '%s' "$AD_POLL_OUT" | jq -r '.verdict' 2>/dev/null || echo "")
+        [[ "$ad_pu_v" == "$ad_pu_want" ]] && return 0
+        sleep 0.05
+        ad_pu_i=$((ad_pu_i + 1))
+    done
+    return 1
+}
+
+# AD-11: rapid-completion acceptance — the wrapper of an instantly
+# completing engine can die before ps ever yields its lstart identity.
+# start must accept the job via the ready + terminal/ready sentinels
+# instead of failing (no live process remains for stop to authenticate);
+# pid_identity is legitimately absent. The ps interposition blanks
+# lstart probes for exactly this job's wrapper pid (read from the pid
+# file the parent persists before its first probe), so the parent never
+# observes an identity even if it races ahead of the wrapper's death.
+AD11_SCRATCH="$AD_HOME/scratch-ad11"
+mkdir -p "$AD11_SCRATCH"
+cat > "$AD_HOME/bin/ps" <<EOF
+#!/usr/bin/env bash
+target=""
+previous=""
+for arg in "\$@"; do
+    if [[ "\$previous" == "-p" ]]; then target="\$arg"; fi
+    previous="\$arg"
+done
+if [[ "\$*" == *"lstart="* ]]; then
+    for ad11_pid_file in "$AD11_SCRATCH"/ad_*/pid; do
+        [[ -f "\$ad11_pid_file" ]] || continue
+        if [[ "\$target" == "\$(cat "\$ad11_pid_file")" ]]; then
+            exit 0
+        fi
+    done
+fi
+exec "$ad_real_ps" "\$@"
+EOF
+chmod +x "$AD_HOME/bin/ps"
+ad11_rc=0
+ad11_start=$(ad_path "$AD" start --engine omp --model m1 \
+    --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD11_SCRATCH" 2>&1) || ad11_rc=$?
+rm -f "$AD_HOME/bin/ps"
+ad11_job=$(printf '%s' "$ad11_start" | jq -r '.job_id // empty' 2>/dev/null || echo "")
+ad11_no_identity=false
+[[ -n "$ad11_job" && ! -f "$AD11_SCRATCH/$ad11_job/pid_identity" ]] && ad11_no_identity=true
+ad11_out=""
+if [[ -n "$ad11_job" ]] && ad_poll_until "$ad11_job" "$AD11_SCRATCH" completed; then
+    ad11_out="$AD_POLL_OUT"
+fi
+if [[ "$ad11_rc" == "0" && "$ad11_no_identity" == "true" ]] \
+   && [[ $(printf '%s' "$ad11_out" | jq -r '.raw_output' 2>/dev/null) == *"omp done"* ]]; then
+    pass "AD-11: rapid completion without observable wrapper identity — sentinel branch accepts the job"
+else
+    fail "AD-11: rapid-completion race regressed" \
+      "rc=$ad11_rc start=$ad11_start no_identity=$ad11_no_identity poll=$ad11_out"
+fi
+
+# AD-12: malformed engine output degrades to the raw-copy fallback with
+# tokens=null instead of failing the poll — claude emitting non-JSON and
+# codex emitting non-JSONL with no -o file both still complete.
+mv "$AD_HOME/bin/claude" "$AD_HOME/bin/claude.sav12"
+cat > "$AD_HOME/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+echo 'plain-text-not-json'
+EOF
+chmod +x "$AD_HOME/bin/claude"
+ad12_j1=$(ad_path "$AD" start --engine claude --model opus \
+    --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+ad12_out1=""
+ad_poll_until "$ad12_j1" "$AD_HOME/scratch" completed && ad12_out1="$AD_POLL_OUT"
+mv "$AD_HOME/bin/claude.sav12" "$AD_HOME/bin/claude"
+mv "$AD_HOME/bin/codex" "$AD_HOME/bin/codex.sav12"
+cat > "$AD_HOME/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "login" && "${2:-}" == "status" ]]; then
+    exit 0
+fi
+cat >/dev/null
+echo 'not jsonl {{{'
+EOF
+chmod +x "$AD_HOME/bin/codex"
+ad12_j2=$(ad_path "$AD" start --engine codex \
+    --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+ad12_out2=""
+ad_poll_until "$ad12_j2" "$AD_HOME/scratch" completed && ad12_out2="$AD_POLL_OUT"
+mv "$AD_HOME/bin/codex.sav12" "$AD_HOME/bin/codex"
+if [[ $(printf '%s' "$ad12_out1" | jq -r '.raw_output') == "plain-text-not-json" ]] \
+   && [[ $(printf '%s' "$ad12_out1" | jq -r '.tokens') == "null" ]] \
+   && [[ $(printf '%s' "$ad12_out2" | jq -r '.raw_output') == "not jsonl {{{" ]] \
+   && [[ $(printf '%s' "$ad12_out2" | jq -r '.tokens') == "null" ]]; then
+    pass "AD-12: malformed claude/codex output falls back to raw copy with tokens=null"
+else
+    fail "AD-12: malformed-output fallback mismatch" "claude=$ad12_out1 codex=$ad12_out2"
+fi
+
+# AD-13: malformed terminal records fail closed — poll and stop exit 1
+# with error-as-prompt and never rewrite the record. Covers a garbage
+# state token and an incoherent completed/exit_code pair.
+ad13_a="$AD_HOME/scratch/ad_20260722T000010Z_131"
+ad13_b="$AD_HOME/scratch/ad_20260722T000011Z_132"
+mkdir -p "$ad13_a/terminal" "$ad13_b/terminal"
+printf 'exploded\n' > "$ad13_a/terminal/state"
+printf '1\n' > "$ad13_a/terminal/ready"
+printf 'completed\n' > "$ad13_b/terminal/state"
+printf '3\n' > "$ad13_b/terminal/exit_code"
+printf '1\n' > "$ad13_b/terminal/ready"
+ad13_sum_before=$(cat "$ad13_a/terminal/state" "$ad13_b/terminal/state" "$ad13_b/terminal/exit_code" | shasum | awk '{print $1}')
+ad13_poll_a_err=$(ad_path "$AD" poll --job ad_20260722T000010Z_131 --scratch-dir "$AD_HOME/scratch" 2>&1 >/dev/null); ad13_poll_a_rc=$?
+ad13_poll_b_err=$(ad_path "$AD" poll --job ad_20260722T000011Z_132 --scratch-dir "$AD_HOME/scratch" 2>&1 >/dev/null); ad13_poll_b_rc=$?
+ad13_stop_err=$(ad_path "$AD" stop --job ad_20260722T000010Z_131 --scratch-dir "$AD_HOME/scratch" 2>&1 >/dev/null); ad13_stop_rc=$?
+ad13_sum_after=$(cat "$ad13_a/terminal/state" "$ad13_b/terminal/state" "$ad13_b/terminal/exit_code" | shasum | awk '{print $1}')
+if [[ $ad13_poll_a_rc -eq 1 && "$ad13_poll_a_err" == *"malformed"* && "$ad13_poll_a_err" == *"Action:"* \
+   && $ad13_poll_b_rc -eq 1 && "$ad13_poll_b_err" == *"malformed"* \
+   && $ad13_stop_rc -eq 1 && "$ad13_stop_err" == *"malformed"* \
+   && "$ad13_sum_before" == "$ad13_sum_after" ]]; then
+    pass "AD-13: malformed terminal records fail closed on poll and stop without rewrite"
+else
+    fail "AD-13: malformed-terminal handling mismatch" \
+      "pa=$ad13_poll_a_rc:$ad13_poll_a_err pb=$ad13_poll_b_rc:$ad13_poll_b_err stop=$ad13_stop_rc:$ad13_stop_err sums=$ad13_sum_before/$ad13_sum_after"
+fi
+
+# AD-14: stall + ceiling verdicts from a live wrapper, and the codex-only
+# stall rule. Sleeper engines keep the wrapper alive; mtime backdating
+# (both out and err — poll maxes the two) and started_epoch poking drive
+# each verdict without real waiting. Ceiling is checked before stall, so
+# both-true pins the ordering. The omp sibling with identically backdated
+# files must stay alive: only codex streams JSONL progress.
+mv "$AD_HOME/bin/codex" "$AD_HOME/bin/codex.sav14"
+cp "$AD_HOME/bin/sleeper-engine.sh" "$AD_HOME/bin/codex"
+mv "$AD_HOME/bin/omp" "$AD_HOME/bin/omp.sav14"
+cat > "$AD_HOME/bin/omp" <<'EOF'
+#!/usr/bin/env bash
+exec /bin/sleep 30
+EOF
+chmod +x "$AD_HOME/bin/omp"
+ad14_cx=$(ad_path "$AD" start --engine codex \
+    --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+ad14_om=$(ad_path "$AD" start --engine omp \
+    --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD_HOME/scratch" | jq -r .job_id)
+ad14_cxd="$AD_HOME/scratch/$ad14_cx"
+ad14_omd="$AD_HOME/scratch/$ad14_om"
+ad14_w=0
+while [[ ( ! -f "$ad14_cxd/out" || ! -f "$ad14_cxd/err" \
+        || ! -f "$ad14_omd/out" || ! -f "$ad14_omd/err" ) && $ad14_w -lt 100 ]]; do
+    sleep 0.05
+    ad14_w=$((ad14_w + 1))
+done
+ad14_v1=$(ad_path "$AD" poll --job "$ad14_cx" --scratch-dir "$AD_HOME/scratch" \
+    --stall-threshold-sec 3600 --wall-clock-ceiling-sec 3600 | jq -r .verdict)
+touch -t 202001010000 "$ad14_cxd/out" "$ad14_cxd/err"
+ad14_p2=$(ad_path "$AD" poll --job "$ad14_cx" --scratch-dir "$AD_HOME/scratch" \
+    --stall-threshold-sec 60 --wall-clock-ceiling-sec 3600)
+printf '%s\n' "$(( $(date +%s) - 7200 ))" > "$ad14_cxd/started_epoch"
+ad14_v3=$(ad_path "$AD" poll --job "$ad14_cx" --scratch-dir "$AD_HOME/scratch" \
+    --stall-threshold-sec 60 --wall-clock-ceiling-sec 3600 | jq -r .verdict)
+touch -t 202001010000 "$ad14_omd/out" "$ad14_omd/err"
+ad14_v4=$(ad_path "$AD" poll --job "$ad14_om" --scratch-dir "$AD_HOME/scratch" \
+    --stall-threshold-sec 60 --wall-clock-ceiling-sec 3600 | jq -r .verdict)
+ad14_s1=$(ad_path "$AD" stop --job "$ad14_cx" --scratch-dir "$AD_HOME/scratch" | jq -r .verdict)
+ad14_s2=$(ad_path "$AD" stop --job "$ad14_om" --scratch-dir "$AD_HOME/scratch" | jq -r .verdict)
+mv "$AD_HOME/bin/codex.sav14" "$AD_HOME/bin/codex"
+mv "$AD_HOME/bin/omp.sav14" "$AD_HOME/bin/omp"
+if [[ "$ad14_v1" == "alive" ]] \
+   && printf '%s' "$ad14_p2" | jq -e '.verdict == "stalled_suspect" and .output_age_sec > 60' >/dev/null \
+   && [[ "$ad14_v3" == "wall_clock_exceeded" && "$ad14_v4" == "alive" \
+      && "$ad14_s1" == "cancelled" && "$ad14_s2" == "cancelled" ]]; then
+    pass "AD-14: stall/ceiling verdicts — alive, codex stalled_suspect, ceiling-before-stall, omp exempt"
+else
+    fail "AD-14: watchdog verdict matrix mismatch" \
+      "v1=$ad14_v1 p2=$ad14_p2 v3=$ad14_v3 v4=$ad14_v4 s1=$ad14_s1 s2=$ad14_s2"
+fi
+
+# AD-15: parallel job isolation on one scratch dir — three gated omp jobs
+# complete/cancel independently, each emitting its own job_id as marker
+# (derived from the @prompt argv, so no cross-job env can leak), and a
+# sibling's stop never perturbs another job's terminal payload.
+mv "$AD_HOME/bin/omp" "$AD_HOME/bin/omp.sav15"
+cat > "$AD_HOME/bin/omp" <<'EOF'
+#!/usr/bin/env bash
+job_dir=""
+for arg in "$@"; do
+    case "$arg" in @*) job_dir=$(dirname "${arg#@}") ;; esac
+done
+gate_wait=0
+while [[ ! -f "$job_dir/gate" && $gate_wait -lt 600 ]]; do
+    /bin/sleep 0.05
+    gate_wait=$((gate_wait + 1))
+done
+[[ -f "$job_dir/gate" ]] || exit 9
+printf 'marker=%s\n' "$(basename "$job_dir")"
+EOF
+chmod +x "$AD_HOME/bin/omp"
+AD15_SCRATCH="$AD_HOME/scratch-ad15"
+mkdir -p "$AD15_SCRATCH"
+ad15_a=$(ad_path "$AD" start --engine omp \
+    --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD15_SCRATCH" | jq -r .job_id)
+ad15_b=$(ad_path "$AD" start --engine omp \
+    --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD15_SCRATCH" | jq -r .job_id)
+ad15_c=$(ad_path "$AD" start --engine omp \
+    --prompt-file "$AD_HOME/prompt.md" --scratch-dir "$AD15_SCRATCH" | jq -r .job_id)
+ad15_distinct=false
+[[ -n "$ad15_a" && -n "$ad15_b" && -n "$ad15_c" \
+   && "$ad15_a" != "$ad15_b" && "$ad15_b" != "$ad15_c" && "$ad15_a" != "$ad15_c" ]] \
+    && ad15_distinct=true
+touch "$AD15_SCRATCH/$ad15_c/gate"
+ad15_c_out=""
+ad_poll_until "$ad15_c" "$AD15_SCRATCH" completed && ad15_c_out="$AD_POLL_OUT"
+touch "$AD15_SCRATCH/$ad15_a/gate"
+ad15_a_out1=""
+ad_poll_until "$ad15_a" "$AD15_SCRATCH" completed && ad15_a_out1="$AD_POLL_OUT"
+ad15_b_v=$(ad_path "$AD" poll --job "$ad15_b" --scratch-dir "$AD15_SCRATCH" | jq -r .verdict)
+ad15_b_s=$(ad_path "$AD" stop --job "$ad15_b" --scratch-dir "$AD15_SCRATCH" | jq -r .verdict)
+ad15_a_out2=$(ad_path "$AD" poll --job "$ad15_a" --scratch-dir "$AD15_SCRATCH")
+mv "$AD_HOME/bin/omp.sav15" "$AD_HOME/bin/omp"
+if [[ "$ad15_distinct" == "true" ]] \
+   && [[ $(printf '%s' "$ad15_c_out" | jq -r '.raw_output') == "marker=$ad15_c" ]] \
+   && [[ $(printf '%s' "$ad15_a_out1" | jq -r '.raw_output') == "marker=$ad15_a" ]] \
+   && [[ "$ad15_b_v" == "alive" && "$ad15_b_s" == "cancelled" ]] \
+   && [[ "$ad15_a_out1" == "$ad15_a_out2" ]]; then
+    pass "AD-15: three concurrent jobs on one scratch dir stay isolated through completion, stop, and re-poll"
+else
+    fail "AD-15: parallel-isolation contract mismatch" \
+      "distinct=$ad15_distinct c=$ad15_c_out a1=$ad15_a_out1 bv=$ad15_b_v bs=$ad15_b_s a2=$ad15_a_out2"
+fi
+
 # CG-1: generated Codex skills preserve thematic `---` lines after command
 # frontmatter; only the first frontmatter pair is stripped.
 CG_REPO="$WORK/codex-gen"
