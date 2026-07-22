@@ -145,10 +145,15 @@ fi
 
 # Temp-file hygiene for the mktemp scratch files below. The inline
 # `rm -f` calls stay (idempotent); the EXIT trap covers the abort paths
-# `set -e` takes between mktemp and rm. HUP/INT/TERM are re-raised as
-# exits because bash skips EXIT traps on unhandled fatal signals — and
-# this helper has long blocking windows (30s fetch, ff merge) where a
-# Ctrl-C would otherwise leak the scratch file.
+# `set -e` takes between mktemp and rm. HUP/INT/TERM — the long
+# blocking windows here (30s fetch, ff merge) are where a Ctrl-C
+# typically lands — run cleanup explicitly, then re-raise with default
+# disposition restored so the parent observes a genuine signal death
+# (WIFSIGNALED), not a normal 128+N exit. (bash 3.2 does run EXIT
+# traps on unhandled fatal signals; the handlers exist for
+# deterministic cleanup and honest signal reporting, not because
+# cleanup would otherwise be skipped.) The trailing numeric exit is an
+# unreachable fallback in case the re-raise is ever blocked.
 ff_err_file=""
 fetch_err_file=""
 cleanup_temp_files() {
@@ -157,13 +162,15 @@ cleanup_temp_files() {
     return 0
 }
 signal_exit() {
-    trap - HUP INT TERM
-    exit "$1"
+    trap - HUP INT TERM EXIT
+    cleanup_temp_files
+    kill -s "$1" $$
+    exit "$2"
 }
 trap cleanup_temp_files EXIT
-trap 'signal_exit 129' HUP
-trap 'signal_exit 130' INT
-trap 'signal_exit 143' TERM
+trap 'signal_exit HUP 129' HUP
+trap 'signal_exit INT 130' INT
+trap 'signal_exit TERM 143' TERM
 
 # ---- emission helpers ---------------------------------------------------
 

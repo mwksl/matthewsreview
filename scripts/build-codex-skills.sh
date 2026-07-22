@@ -16,9 +16,7 @@ REPO="$(cd "${1:-$THIS/..}" && pwd)"
 OUT="$REPO/dist/codex-skills"
 TMP="$REPO/dist/.codex-skills.tmp.$$"
 BACKUP="$REPO/dist/.codex-skills.backup.$$"
-restore_publish() {
-    status=$?
-    trap - EXIT
+restore_backup() {
     rm -rf "$TMP"
     if [[ -e "$BACKUP" || -L "$BACKUP" ]]; then
         if [[ ! -e "$OUT" && ! -L "$OUT" ]]; then
@@ -27,16 +25,28 @@ restore_publish() {
             rm -rf "$BACKUP"
         fi
     fi
+}
+restore_publish() {
+    status=$?
+    trap - EXIT
+    restore_backup
     exit "$status"
 }
+# Signals restore the backup explicitly, then re-raise with default
+# disposition restored so the parent observes a genuine signal death
+# (WIFSIGNALED). Going through restore_publish instead would convert
+# the signal into a normal `exit 128+N` via its trailing exit. The
+# trailing numeric exit here is an unreachable fallback.
 signal_exit() {
-    trap - HUP INT TERM
-    exit "$1"
+    trap - HUP INT TERM EXIT
+    restore_backup
+    kill -s "$1" $$
+    exit "$2"
 }
 trap restore_publish EXIT
-trap 'signal_exit 129' HUP
-trap 'signal_exit 130' INT
-trap 'signal_exit 143' TERM
+trap 'signal_exit HUP 129' HUP
+trap 'signal_exit INT 130' INT
+trap 'signal_exit TERM 143' TERM
 mkdir -p "$REPO/dist"
 rm -rf "$TMP" "$BACKUP"
 mkdir -p "$TMP"

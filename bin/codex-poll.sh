@@ -154,10 +154,15 @@ command -v jq >/dev/null 2>&1 \
         "install jq (codex-poll.sh emits its JSON verdicts via jq)."
 
 # Temp-file hygiene for the mktemp scratch files below. The inline
-# `rm -f` calls stay (idempotent); the EXIT trap covers early exits,
-# and HUP/INT/TERM are re-raised as exits so it also runs when a
-# signal lands while blocked in a `node "$COMPANION"` call — bash
-# skips EXIT traps on unhandled fatal signals.
+# `rm -f` calls stay (idempotent); the EXIT trap covers early exits.
+# HUP/INT/TERM — e.g. landing while blocked in a `node "$COMPANION"`
+# call — run cleanup explicitly, then re-raise with default disposition
+# restored so the parent observes a genuine signal death (WIFSIGNALED),
+# not a normal 128+N exit. (bash 3.2 does run EXIT traps on unhandled
+# fatal signals; the handlers exist for deterministic cleanup and
+# honest signal reporting, not because cleanup would otherwise be
+# skipped.) The trailing numeric exit is an unreachable fallback in
+# case the re-raise is ever blocked.
 status_err=""
 result_err=""
 cleanup_temp_files() {
@@ -166,13 +171,15 @@ cleanup_temp_files() {
     return 0
 }
 signal_exit() {
-    trap - HUP INT TERM
-    exit "$1"
+    trap - HUP INT TERM EXIT
+    cleanup_temp_files
+    kill -s "$1" $$
+    exit "$2"
 }
 trap cleanup_temp_files EXIT
-trap 'signal_exit 129' HUP
-trap 'signal_exit 130' INT
-trap 'signal_exit 143' TERM
+trap 'signal_exit HUP 129' HUP
+trap 'signal_exit INT 130' INT
+trap 'signal_exit TERM 143' TERM
 
 # ---- emission helper ----------------------------------------------------
 
