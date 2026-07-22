@@ -87,6 +87,12 @@ die_validation() {
     exit 1
 }
 
+die_missing_dep() {
+    echo "ERROR: $1" >&2
+    [[ -n "${2:-}" ]] && echo "Action: $2" >&2
+    exit 5
+}
+
 BASE_BRANCH=""
 HEAD_BRANCH=""
 AFTER_CHOICE=""
@@ -114,6 +120,13 @@ case "$AFTER_CHOICE" in
     *) die_usage "unknown --after-choice '$AFTER_CHOICE' (expected a|b|c)" ;;
 esac
 
+# jq builds every JSON object this helper emits. Guard it before the git
+# checks so a jq-less environment fails at entry with exit 5 instead of
+# dying under `set -e` mid-run — after the network fetch side effect.
+command -v jq >/dev/null 2>&1 \
+    || die_missing_dep "jq not found on \$PATH" \
+        "install jq — every freshness-gate.sh output path emits JSON via jq."
+
 # Confirm we're inside a git working tree. Callers are Phase 0.2 (which
 # already called `git rev-parse --show-toplevel`), so this is a belt-
 # and-suspenders check, not the primary gate.
@@ -129,6 +142,28 @@ if ! git show-ref --verify --quiet "refs/heads/$BASE_BRANCH"; then
     die_validation "base branch '$BASE_BRANCH' does not exist locally" \
         "verify step 0.2 resolved base_branch to an existing local ref."
 fi
+
+# Temp-file hygiene for the mktemp scratch files below. The inline
+# `rm -f` calls stay (idempotent); the EXIT trap covers the abort paths
+# `set -e` takes between mktemp and rm. HUP/INT/TERM are re-raised as
+# exits because bash skips EXIT traps on unhandled fatal signals — and
+# this helper has long blocking windows (30s fetch, ff merge) where a
+# Ctrl-C would otherwise leak the scratch file.
+ff_err_file=""
+fetch_err_file=""
+cleanup_temp_files() {
+    [[ -n "$ff_err_file" ]] && rm -f "$ff_err_file"
+    [[ -n "$fetch_err_file" ]] && rm -f "$fetch_err_file"
+    return 0
+}
+signal_exit() {
+    trap - HUP INT TERM
+    exit "$1"
+}
+trap cleanup_temp_files EXIT
+trap 'signal_exit 129' HUP
+trap 'signal_exit 130' INT
+trap 'signal_exit 143' TERM
 
 # ---- emission helpers ---------------------------------------------------
 
