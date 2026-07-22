@@ -22,55 +22,43 @@ Canonical output shape (always emitted on exit 0):
       "related_candidates_to_investigate": [ ... ]   (deep-lane passthrough)
     }
 
-
 Input shapes handled (normalized to `score_phase4` int on 0-100):
-
-  A) Canonical: `{score_phase4: <int>}`  — pass through.
-  B) Nested:    `{score: {correctness: <int>}}` — extract the first
-                inner numeric value.
+  A) Canonical: `{score_phase4: <int>}` — pass through.
+  B) Nested: `{score: {correctness: <int>}}` — first inner numeric.
   C) 1-5 scale: `{overall_numeric: <float 1.0-5.0>}` — multiply by 20.
-  D) Severity:  `{severity: "low" | "medium" | "high"}` → 35 | 60 | 85.
-  E) Ambiguous: `{score: <N>}` with no scale hint. Heuristic:
-       - N <= 10 AND N > 5 → treat as 1-10 (multiply by 10).
-       - N <= 5 AND N >= 1 → treat as 1-5 (multiply by 20).
-       - N > 10 AND N <= 100 → pass through.
-       - else → reject (exit 2).
-     Whenever the heuristic or a scale-map fires, `scale_inferred: true`
-     is appended to `notes` so the audit trail records the guess.
+  D) Severity: `{severity: "low" | "medium" | "high"}` → 35 | 60 | 85.
+  E) Ambiguous `{score: <N>}` with no scale hint: 5 < N <= 10 → x10;
+     1 <= N <= 5 → x20; 10 < N <= 100 → pass through; else reject
+     (exit 2).
+Whenever the heuristic or a scale-map fires, `scale_inferred: true` is
+appended to `notes` so the audit trail records the guess.
 
 On parse failure (json-repair can't salvage the raw input) this helper
 also exits 2 — the caller should route the finding to `uncertain` per
 §13.1 Phase-4 table row 1 (`score_phase4: null`).
 
-`actionability` (must be one of auto_fixable | manual | report_only):
-  - Pass through if the raw output carries it at top level.
-  - Else: emit `null` and note "actionability absent".
-  - `artifact-patch.py --apply-decisions` requires actionability when
-    `score_phase4 >= 60` — callers gate the tuple accordingly.
+`actionability` (auto_fixable | manual | report_only): top-level
+pass-through when present; else `null` + note "actionability absent".
+`artifact-patch.py --apply-decisions` requires it when `score_phase4
+>= 60` — callers gate the tuple accordingly.
 
 Deep-lane passthrough:
-  - `validation_result` (the nested object with evidence/blast_radius/
-    fix_proposal/verification_context) is carried through verbatim when
-    present; `null` otherwise.
-  - After any top-level lift (see below), the deep-lane `validation_result`
-    is schema-checked against `bin/schema-v1.json#/$defs/validation_result`.
-    On mismatch — drifted keys, missing required sub-objects, malformed
-    shape — `vr` is dropped to `None` and a concise
-    "validation_result shape unrecoverable: <first two error paths>"
-    note is appended. This preserves the finding (routing it to
-    `uncertain` in combination with a 45-59 score, or to
-    `confirmed_*` with vr=null at >= 60) rather than letting the
-    downstream `artifact-patch.py --apply-decisions` reject the whole
-    tuple and halt the batch.
-  - Top-level lift: if `validation_result` is absent but the raw carries
-    `evidence` / `blast_radius` / `fix_proposal` / `verification_context`
-    at the top level (a known validator shape drift), those are lifted
-    into `vr` BEFORE the schema check — so a legitimately-recoverable
-    drift still passes through.
+  - `validation_result` (evidence/blast_radius/fix_proposal/
+    verification_context) carries through verbatim; `null` otherwise.
+  - Top-level lift first: when `validation_result` is absent but the
+    raw carries those four keys at top level (a known validator shape
+    drift), they are lifted into `vr` BEFORE the schema check, so a
+    recoverable drift still passes through.
+  - `vr` is then schema-checked against
+    `bin/schema-v1.json#/$defs/validation_result`; on mismatch it drops
+    to `None` with a "validation_result shape unrecoverable: <first two
+    error paths>" note — preserving the finding (`uncertain` at 45-59,
+    `confirmed_*` with vr=null at >= 60) instead of letting
+    `artifact-patch.py --apply-decisions` reject the tuple and halt.
   - `related_candidates_to_investigate` passthrough for Wave 2 seeding.
 
-Light-lane outputs typically don't carry either of those — the canonical
-emits `null` / `[]`. Schema check fires only on the deep lane.
+Light-lane outputs typically carry neither — the canonical emits
+`null` / `[]`. The schema check fires only on the deep lane.
 """
 from __future__ import annotations
 

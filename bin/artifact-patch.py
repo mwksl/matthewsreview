@@ -5,6 +5,12 @@
 # ///
 """artifact-patch.py — canonical writer for artifact.json (DESIGN §8.2, §21.2).
 
+Exit codes (bin/_common.py): 0 OK; 1 validation; 2 invalid-transition;
+3 dry-run-invalid; 4 unexpected; 5 missing-dep; 6 expected-mismatch
+(--apply-decisions / --apply-auto-rec-promotions with --expected);
+7 all-rejected (--add-findings / --apply-auto-fix-hints); 64 usage.
+Mode-specific nuances in the mode list below.
+
 Modes (CLI flags; mutually exclusive):
   --init <seed>             create fresh artifact at --path
   --add-finding <finding>   append a new finding to findings[]

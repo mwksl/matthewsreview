@@ -4,9 +4,10 @@ All scripts live under `bin/`. Claude Code's plugin runtime makes `bin/`
 available on `$PATH`, so `allowed-tools` grants and in-body invocations both
 use bare names: `Bash(<script>:*)` / `<script> --flag ...`.
 
-Each script has a 20–60 line file-header docblock that's authoritative for the
-contract — `head -40 bin/<script>` for any helper. This file is the one-page
-overview; AGENTS.md keeps a one-liner pointer.
+Each script has a file-header docblock that's authoritative for the
+contract, with the contract lines (usage, output shape, exit codes) inside
+the first 60 — `head -60 bin/<script>` for any helper. This file is the
+one-page overview; AGENTS.md keeps a one-liner pointer.
 
 Not in the tables: `bin/schema-v1.json` (data file — artifact-shape source of
 truth, per AGENTS.md) and `bin/include` (transclusion preprocessor, currently
