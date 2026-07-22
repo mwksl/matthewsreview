@@ -6703,6 +6703,13 @@ jq '.gates={"phase3_gate":12,"phase4_bands":[10,20,30],"fix_threshold":25,"walkt
 mv "$cal_tmp" "$CAL_HOME/slug-b/nested/branch-y/rev_002/artifact.json"
 printf '%s\n' '{"name":"scoring-gate","demote_rate":0.5}' > "$CAL_HOME/slug-a/branch-x/rev_001/phases.jsonl"
 printf '%s\n' '{"phase":"phase_1","tokens":1000}' > "$CAL_HOME/slug-a/branch-x/rev_001/tokens.jsonl"
+cat > "$CAL_HOME/slug-a/branch-x/rev_001/trace.md" <<'TRACE'
+lens_L3 killed after stall (attempt 1)
+lens_L5 wall_clock_exceeded at 600s
+lens_L3 resumed on retry
+lens_L1 dispatched cleanly
+the lens was killed (prose decoy — must not count)
+TRACE
 cal_out=$("$TOOLS/calibration-report.py" "$CAL_HOME")
 cal_findings=$(jq '[.findings[] | select(.disposition=="disproven" or .disposition=="uncertain")] | length' "$FIX/artifact-seed.json")
 cal_total=$(jq '.findings | length' "$FIX/artifact-seed.json")
@@ -6715,6 +6722,17 @@ if printf '%s' "$cal_out" | grep -q 'Runs analyzed: \*\*2\*\*' \
     pass "CAL-1: calibration groups score matrices by each run's resolved bands"
 else
     fail "CAL-1: calibration aggregation mismatch" "$(printf '%s' "$cal_out" | head -12)"
+fi
+
+# CAL-6: lens transport-anomaly counting from trace.md — boundary-delimited
+# killed/resume(d)/wall_clock_exceeded tokens on lens_* event lines count
+# (3 above); a clean dispatch line and a prose decoy that does not start
+# with lens_ must not.
+if printf '%s' "$cal_out" | grep -qF 'Total lens anomalies (killed/resume/wall_clock): **3**'; then
+    pass "CAL-6: trace.md lens anomalies counted with token boundaries; decoys excluded"
+else
+    fail "CAL-6: lens-anomaly counting mismatch" \
+      "$(printf '%s' "$cal_out" | grep -i 'anomal' || printf 'no anomaly line found')"
 fi
 
 # CAL-2: no-argument calibration honors the explicit review-root override.
