@@ -10794,14 +10794,20 @@ dx_orphan_terminal=false
 dx_orphan_stop=$("$AD" stop --job "$dx_orphan_job" \
     --scratch-dir "$DX_SCRATCH" 2>/dev/null)
 dx_orphan_stop_rc=$?
-if [[ "$dx_orphan_first" == "$dx_orphan_second" \
-   && "$dx_orphan_terminal" == "false" \
+if [[ "$dx_orphan_terminal" == "false" \
    && "$dx_orphan_stop_rc" -eq 0 ]] \
    && ! /bin/kill -0 "$dx_orphan_pid" 2>/dev/null \
    && printf '%s' "$dx_orphan_first" | jq -e '
         keys == ["elapsed_sec", "engine_state", "status", "verdict", "wrapper_state"]
         and .verdict == "alive" and .status == "running"
         and .wrapper_state == "dead" and .engine_state == "alive"
+      ' >/dev/null \
+   && printf '%s' "$dx_orphan_second" | jq -e \
+      --argjson first "$dx_orphan_first" '
+        keys == ["elapsed_sec", "engine_state", "status", "verdict", "wrapper_state"]
+        and .verdict == "alive" and .status == "running"
+        and .wrapper_state == "dead" and .engine_state == "alive"
+        and .elapsed_sec >= $first.elapsed_sec
       ' >/dev/null \
    && printf '%s' "$dx_orphan_stop" | jq -e --arg job "$dx_orphan_job" '
         keys == ["job_id", "status", "verdict"]
