@@ -50,7 +50,7 @@
 # Exit codes:
 #   0   verdict emitted on stdout (the verdict carries the meaning;
 #       we do not use exit codes to encode decisions)
-#   5   codex-companion missing or `status --json` itself failed
+#   5   jq or codex-companion missing, or `status --json` itself failed
 #  64   usage error
 
 set -u

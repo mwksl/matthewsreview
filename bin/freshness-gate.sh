@@ -53,7 +53,7 @@
 #     `base_freshness`).
 #
 # Exit codes: 0 success; 1 validation error (e.g., base branch does not
-# exist); 64 usage error.
+# exist); 5 missing dependency (e.g., jq not found); 64 usage error.
 
 set -euo pipefail
 
